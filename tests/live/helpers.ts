@@ -121,6 +121,64 @@ export async function inboundTextsFrom(
   return out;
 }
 
+// A call's transcript split by who spoke. Read from the DRIVER's client, so
+// "remote" segments are the AGENT's speech and "local" are the driver's.
+export async function callSegments(
+  c: Inkbox,
+  callId: string,
+): Promise<{ agent: string[]; driver: string[] }> {
+  const segs = (await c.calls.transcripts(callId)) as Array<{ party?: string; text?: string }>;
+  const pick = (party: string) =>
+    segs
+      .filter((s) => (s.party ?? "").toLowerCase() === party && (s.text ?? "").trim() !== "")
+      .map((s) => (s.text ?? "").trim());
+  return { agent: pick("remote"), driver: pick("local") };
+}
+
+// Block until the transcript shows BOTH parties spoke, then return the agent's
+// speech — proof the agent reached the caller out loud on a two-way call.
+export async function waitTwoWayCall(
+  driver: Inkbox,
+  callId: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<string> {
+  return pollUntil(
+    "two-way call transcript",
+    async () => {
+      const { agent, driver: drv } = await callSegments(driver, callId).catch(() => ({
+        agent: [],
+        driver: [],
+      }));
+      return agent.length > 0 && drv.length > 0 ? agent.join(" | ") : undefined;
+    },
+    timeoutMs,
+  );
+}
+
+// (useInkboxTts, useInkboxStt) of the AUT's most recent ANSWERED call in
+// `direction` with the driver: (true,true) is Inkbox STT/TTS, (false,false) is
+// the realtime path — so each leg can prove the speech path it claims.
+export async function autSpeechMode(
+  aut: Inkbox,
+  direction: "inbound" | "outbound",
+  driverNumber: string,
+): Promise<{ tts: boolean | null; stt: boolean | null } | undefined> {
+  const tail = driverNumber.replace(/\D/g, "").slice(-10);
+  const calls = (await aut.calls.list({ limit: 10 })) as Array<{
+    direction?: string;
+    remotePhoneNumber?: string;
+    useInkboxTts: boolean | null;
+    useInkboxStt: boolean | null;
+  }>;
+  const c = calls.find(
+    (x) =>
+      (x.direction ?? "").toLowerCase() === direction &&
+      (x.remotePhoneNumber ?? "").replace(/\D/g, "").slice(-10) === tail &&
+      x.useInkboxTts !== null,
+  );
+  return c ? { tts: c.useInkboxTts, stt: c.useInkboxStt } : undefined;
+}
+
 // Settle, send an SMS to the AUT, and return the first NEW inbound reply.
 // Settling first folds any trailing reply to a previous question into
 // `before`, so it can't be mis-matched as this question's answer.

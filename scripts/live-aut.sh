@@ -51,11 +51,15 @@ mkdir -p .opencode/plugins .opencode/agent
 cp "$ROOT/agents/inkbox-channel.md" .opencode/agent/
 
 # Outbound approval auto: gateway turns must send without an interactive TUI.
+# calls enabled so the voice suite's agent can place an outbound call.
 cat > .opencode/plugins/inkbox.ts <<'EOF'
 import InkboxPlugin from "@inkbox/opencode-plugin";
 
 export default async (input: any) => {
-  return InkboxPlugin(input, { outbound: { approval: "auto" } });
+  return InkboxPlugin(input, {
+    outbound: { approval: "auto" },
+    tools: { enable: ["calls"] },
+  });
 };
 EOF
 
@@ -85,6 +89,13 @@ fi
 SERVE_LOG="$WORKDIR/serve.log"
 GATEWAY_LOG="$WORKDIR/gateway.log"
 
+# The AUT's own call-audio WS, derived from the handle + the wire zone (prod
+# inkbox.ai -> inkboxwire.com). Deterministic, so the server-side place-call
+# tool can bridge an outbound call back to this gateway before the tunnel URL
+# is known at runtime.
+WIRE_ZONE="$(printf '%s' "$BASE_URL" | sed -E 's|^https?://||; s|/.*$||; s|inkbox\.ai$|inkboxwire.com|')"
+AUT_CALL_WS="wss://${HANDLE}.${WIRE_ZONE}/phone/media/ws"
+
 # The plugin's TOOLS run inside the opencode server, so its credentials must
 # live here too — not only on the sidecar. Without this, an agent tool call
 # like inkbox_send_sms 401s while sidecar-delivered replies still work.
@@ -94,6 +105,7 @@ echo "==> starting opencode serve on :$SERVE_PORT"
   INKBOX_IDENTITY="$HANDLE" \
   INKBOX_SIGNING_KEY="$AUT_INKBOX_SIGNING_KEY" \
   INKBOX_BASE_URL="$BASE_URL" \
+  INKBOX_CALL_WEBSOCKET_URL="$AUT_CALL_WS" \
   nohup opencode serve --port "$SERVE_PORT" > "$SERVE_LOG" 2>&1 &
  echo $! > "$WORKDIR/serve.pid")
 for _ in $(seq 1 30); do
@@ -114,6 +126,9 @@ echo "==> starting the gateway sidecar ($MODE model: $GATEWAY_MODEL)"
   INKBOX_EXTERNAL_EVENTS_ENABLED="${INKBOX_WEBHOOK_SECRET_GITHUB:+true}" \
   INKBOX_GATEWAY_AGENT=inkbox-channel \
   INKBOX_GATEWAY_MODEL="$GATEWAY_MODEL" \
+  INKBOX_VOICE_ENABLED="${INKBOX_VOICE_ENABLED:-}" \
+  INKBOX_REALTIME_ENABLED="${INKBOX_REALTIME_ENABLED:-}" \
+  INKBOX_REALTIME_API_KEY="${INKBOX_REALTIME_API_KEY:-}" \
   OPENCODE_SERVER_URL="http://127.0.0.1:$SERVE_PORT" \
   nohup node "$ROOT/bin/inkbox-opencode.js" run > "$GATEWAY_LOG" 2>&1 &
   echo $! > "$WORKDIR/gateway.pid")

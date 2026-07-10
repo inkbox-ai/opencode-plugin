@@ -210,6 +210,8 @@ export function createCallBridge(deps: CallBridgeDeps) {
         },
         onContactRead: async (kind, args) => {
           const client = await deps.inkbox.getClient();
+          const tool = kind === "list" ? "inkbox_list_contacts" : "inkbox_lookup_contact";
+          deps.logger.info("call.contact_read", { tool, chatKey: ctx.chatKey });
           if (kind === "list") {
             const q = strOf(args.q);
             return describeContacts(await client.contacts.list({ ...(q ? { q } : {}), limit: 5 }));

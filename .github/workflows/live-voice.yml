@@ -1,0 +1,121 @@
+name: Live — voice calls (Inkbox STT/TTS + Realtime)
+
+# Boots the AUT gateway plus a driver process that bridges the other side of a
+# real phone call over its own Inkbox tunnel. Three matrix legs:
+#   inbound_inkbox            — driver calls the agent; agent answers Inkbox STT/TTS.
+#   outbound_realtime         — driver texts "call me"; agent calls back on Realtime.
+#   outbound_realtime_contact — same call-back, but the driver asks for a seeded
+#                               contact's email; the agent must speak it.
+# Each leg verifies the stored call transcript shows the agent spoke to the
+# caller. Real model + real calls — the priciest suite — so it runs only on
+# ready (non-draft) PRs + manual dispatch, and shares the AUT tunnel lock.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the call/transcript"
+        default: "220"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as the other live suites: only one holder of the AUT tunnel.
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive).
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+    strategy:
+      fail-fast: false
+      max-parallel: 1          # legs share the AUT + driver identities → one at a time
+      matrix:
+        scenario: [inbound_inkbox, outbound_realtime, outbound_realtime_contact]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install -g opencode-ai@latest
+
+      - name: Boot the AUT gateway (voice; ${{ matrix.scenario }})
+        env:
+          MODE: real
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INKBOX_VOICE_ENABLED: "true"
+          # Inbound leg proves the Inkbox STT/TTS path; the others prove Realtime.
+          INKBOX_REALTIME_ENABLED: ${{ matrix.scenario == 'inbound_inkbox' && 'false' || 'true' }}
+          INKBOX_REALTIME_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: bash scripts/live-aut.sh
+
+      - name: Start the voice driver and wait for its tunnel
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
+        run: |
+          if [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
+            # Must name the contact the test seeds (voice.test.ts LOOKUP_*).
+            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
+            export VOICE_DRIVER_LISTEN=25   # tool round-trip + spoken email needs a longer turn
+          fi
+          nohup node tests/live/voice-driver.mjs > "$RUNNER_TEMP/driver.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/driver.pid"
+          for _ in $(seq 1 30); do        # up to ~90s
+            [ -s "$VOICE_DRIVER_STATE" ] && { echo "driver ready:"; cat "$VOICE_DRIVER_STATE"; exit 0; }
+            sleep 3
+          done
+          echo "::error::driver did not become ready"; cat "$RUNNER_TEMP/driver.log"; exit 1
+
+      - name: Run voice test (${{ matrix.scenario }})
+        env:
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          LIVE_REAL_MODEL: "1"
+          VOICE_SCENARIO: ${{ matrix.scenario }}
+          VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
+          LIVE_VOICE_TIMEOUT_S: ${{ github.event.inputs.timeout_s || '220' }}
+        run: |
+          npx vitest run --config vitest.live.config.ts tests/live/voice.test.ts
+
+      # Failure-only: these logs carry live call content and this repo is public.
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$AUT_GATEWAY_LOG" || true
+          echo "=== serve.log ===";   tail -n 100 "$AUT_SERVE_LOG" || true
+          echo "=== driver.log ===";  cat "$RUNNER_TEMP/driver.log" || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/driver.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$AUT_GATEWAY_PID" 2>/dev/null || true
+          kill "$AUT_SERVE_PID" 2>/dev/null || true
+          sleep 3   # let the driver revert its number on exit
+
+      - name: Upload artifacts (on failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-logs-${{ matrix.scenario }}
+          retention-days: 5
+          path: |
+            ${{ env.AUT_GATEWAY_LOG }}
+            ${{ env.AUT_SERVE_LOG }}
+            ${{ runner.temp }}/driver.log
+          if-no-files-found: ignore
