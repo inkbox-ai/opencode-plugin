@@ -1,0 +1,34 @@
+name: Canary — plugin vs opencode latest
+
+on:
+  schedule:
+    # Twice daily; opencode ships stable releases every day or two.
+    - cron: "23 3 * * *"
+    - cron: "23 15 * * *"
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install -D @opencode-ai/plugin@latest
+      - run: npm run typecheck
+      - run: npx vitest run tests/contract
+
+  loader-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install -g opencode-ai@latest
+      - run: bash scripts/smoke-loader.sh

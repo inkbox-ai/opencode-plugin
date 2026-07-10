@@ -1,0 +1,70 @@
+{
+  "name": "@inkbox/opencode-plugin",
+  "version": "0.1.0",
+  "description": "Inkbox for opencode — give your agent an email address, a phone number (SMS/MMS + voice), iMessage, contacts, notes, and an encrypted credential vault.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src tests scripts",
+    "format": "biome format --write src tests scripts"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "inkbox",
+    "email",
+    "sms",
+    "imessage",
+    "phone",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inkbox-ai/opencode-plugin.git"
+  },
+  "homepage": "https://inkbox.ai",
+  "bugs": {
+    "url": "https://github.com/inkbox-ai/opencode-plugin/issues"
+  },
+  "engines": {
+    "opencode": ">=1.15.0 <1.19.0"
+  },
+  "dependencies": {
+    "@inkbox/sdk": ">=0.4.19 <1.0.0",
+    "zod": "4.1.8"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@opencode-ai/plugin": "1.17.18",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^2.1.9"
+  }
+}
