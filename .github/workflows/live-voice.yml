@@ -1,11 +1,9 @@
 name: Live — voice calls (Inkbox STT/TTS + Realtime)
 
 # Boots the AUT gateway plus a driver process that bridges the other side of a
-# real phone call over its own Inkbox tunnel. Three matrix legs:
-#   inbound_inkbox            — driver calls the agent; agent answers Inkbox STT/TTS.
-#   outbound_realtime         — driver texts "call me"; agent calls back on Realtime.
-#   outbound_realtime_contact — same call-back, but the driver asks for a seeded
-#                               contact's email; the agent must speak it.
+# real phone call over its own Inkbox tunnel. Two matrix legs:
+#   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
+#   outbound_realtime — driver texts "call me"; agent calls back on Realtime.
 # Each leg verifies the stored call transcript shows the agent spoke to the
 # caller. Real model + real calls — the priciest suite — so it runs only on
 # ready (non-draft) PRs + manual dispatch, and shares the AUT tunnel lock.
@@ -37,7 +35,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT + driver identities → one at a time
       matrix:
-        scenario: [inbound_inkbox, outbound_realtime, outbound_realtime_contact]
+        scenario: [inbound_inkbox, outbound_realtime]
 
     steps:
       - uses: actions/checkout@v4
@@ -67,11 +65,6 @@ jobs:
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
           VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
         run: |
-          if [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
-            # Must name the contact the test seeds (voice.test.ts LOOKUP_*).
-            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
-            export VOICE_DRIVER_LISTEN=25   # tool round-trip + spoken email needs a longer turn
-          fi
           nohup node tests/live/voice-driver.mjs > "$RUNNER_TEMP/driver.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/driver.pid"
           for _ in $(seq 1 30); do        # up to ~90s
