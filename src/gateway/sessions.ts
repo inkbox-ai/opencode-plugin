@@ -1,7 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
-import { frameCapture, frameInbound } from "./prompts.js";
+import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
 import { deliverReply } from "./reply.js";
 import type { StateStore } from "./state.js";
 import type {
@@ -52,6 +52,29 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const keys = new Map<string, PerKey>();
   let closing = false;
 
+  // The agent's own-identity system message, resolved once (lazily) and
+  // attached to every turn so the model always knows its own addresses.
+  let identitySystemCache: string | undefined;
+  let identityResolved = false;
+  async function identitySystem(): Promise<string | undefined> {
+    if (identityResolved) return identitySystemCache;
+    identityResolved = true;
+    try {
+      const id = await deps.inkbox.getIdentity();
+      identitySystemCache = buildIdentitySystem({
+        handle: id.agentHandle,
+        emailAddress: id.emailAddress,
+        dedicatedNumber: id.phoneNumber?.number,
+        imessageEnabled: (id as { imessageEnabled?: boolean }).imessageEnabled,
+      });
+    } catch (err) {
+      // A resolution failure must not block turns; retry on the next turn.
+      identityResolved = false;
+      deps.logger.warn("gateway.identity_unresolved", { error: String(err) });
+    }
+    return identitySystemCache;
+  }
+
   function per(chatKey: string): PerKey {
     let entry = keys.get(chatKey);
     if (!entry) {
@@ -87,11 +110,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   ): Promise<string | undefined> {
     const g = deps.config.gateway;
     const agent = agentOverride ?? g.agent;
+    const system = await identitySystem();
     const res = await deps.opencode.session.prompt({
       path: { id: sessionID },
       query: { directory: deps.directory },
       body: {
         ...(agent ? { agent } : {}),
+        ...(system ? { system } : {}),
         ...(g.model?.includes("/")
           ? {
               model: {

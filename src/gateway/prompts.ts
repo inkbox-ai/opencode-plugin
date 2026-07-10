@@ -100,18 +100,31 @@ export interface ChannelIdentity {
   imessageEnabled?: boolean;
 }
 
-// The system prompt for gateway sessions: an identity header (so the agent
-// can state its own addresses without a tool call) over the generic body.
-export function buildChannelPrompt(identity: ChannelIdentity): string {
+function reachableLine(identity: ChannelIdentity): string {
   const reachable: string[] = [];
   if (identity.handle) reachable.push(identity.handle);
   if (identity.emailAddress) reachable.push(identity.emailAddress);
   if (identity.dedicatedNumber) reachable.push(identity.dedicatedNumber);
   if (identity.imessageEnabled) reachable.push("iMessage (shared line)");
-  const line = reachable.join(" / ") || "not yet provisioned";
+  return reachable.join(" / ") || "not yet provisioned";
+}
+
+// A compact system message naming the agent's OWN addresses, delivered on
+// every gateway turn so the model can answer "what's your email?" without a
+// tool call — and never claims it can't access its own identity.
+export function buildIdentitySystem(identity: ChannelIdentity): string {
+  return (
+    `You are an Inkbox agent. Your own addresses — use these when asked who you are ` +
+    `or for your email or number; never say you cannot access them: ${reachableLine(identity)}.`
+  );
+}
+
+// The system prompt for gateway sessions: an identity header (so the agent
+// can state its own addresses without a tool call) over the generic body.
+export function buildChannelPrompt(identity: ChannelIdentity): string {
   return `# Inkbox identity
 
-You are an Inkbox agent, reachable at: ${line}.
+You are an Inkbox agent, reachable at: ${reachableLine(identity)}.
 
 ${CHANNEL_PROMPT_BODY}`;
 }

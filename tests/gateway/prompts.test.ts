@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   buildChannelPrompt,
+  buildIdentitySystem,
   CHANNEL_PROMPT_BODY,
   frameCapture,
   frameInbound,
@@ -191,6 +192,23 @@ describe("stripMarkdown", () => {
   it("leaves snake_case identifiers and the SILENT sentinel untouched", () => {
     expect(stripMarkdown("call inkbox_send_sms")).toBe("call inkbox_send_sms");
     expect(stripMarkdown(SILENT)).toBe(SILENT);
+  });
+});
+
+describe("buildIdentitySystem", () => {
+  it("names every provisioned address and forbids the can't-access dodge", () => {
+    const sys = buildIdentitySystem({
+      handle: "scout",
+      emailAddress: "scout@agents.inkbox.ai",
+      dedicatedNumber: "+15551230000",
+      imessageEnabled: true,
+    });
+    expect(sys).toContain("scout / scout@agents.inkbox.ai / +15551230000 / iMessage (shared line)");
+    expect(sys).toMatch(/never say you cannot access them/);
+  });
+
+  it("falls back cleanly when nothing is provisioned", () => {
+    expect(buildIdentitySystem({})).toContain("not yet provisioned");
   });
 });
 

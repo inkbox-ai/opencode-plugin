@@ -19,6 +19,10 @@ afterEach(() => {
 
 function makeIdentity() {
   return {
+    agentHandle: "test-agent",
+    emailAddress: "test-agent@inkboxmail.com",
+    phoneNumber: { number: "+15559990000" },
+    imessageEnabled: true,
     sendEmail: vi.fn(async (_o: Record<string, unknown>) => ({ id: "email-1" })),
     sendText: vi.fn(async (_o: Record<string, unknown>) => ({ id: "sms-1" })),
     sendIMessage: vi.fn(async (_o: Record<string, unknown>) => ({ id: "im-1" })),
@@ -109,6 +113,19 @@ describe("handleInbound", () => {
     expect(call.body.parts).toHaveLength(1);
     expect(call.body.parts[0].type).toBe("text");
     expect(call.body.parts[0].text).toContain("hi there");
+  });
+
+  it("attaches the agent's own identity as the system prompt on every turn", async () => {
+    const { mgr, opencode, inkbox } = makeManager();
+    await mgr.handleInbound(sms("who are you"));
+
+    const call = opencode.session.prompt.mock.calls[0][0] as {
+      body: { system?: string };
+    };
+    expect(inkbox.getIdentity).toHaveBeenCalled();
+    expect(call.body.system).toContain("test-agent@inkboxmail.com");
+    expect(call.body.system).toContain("+15559990000");
+    expect(call.body.system).toMatch(/never say you cannot access them/);
   });
 
   it("delivers the assistant reply on the inbound channel", async () => {
