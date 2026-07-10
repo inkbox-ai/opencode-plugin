@@ -1,10 +1,19 @@
-# Inkbox for opencode
+<h1>Inkbox for opencode</h1>
 
-Give your [opencode](https://opencode.ai) agent its own [Inkbox](https://inkbox.ai)
-identity: a mailbox, a dedicated phone number for SMS/MMS and voice, iMessage,
-contacts, notes, and an encrypted credential vault — as native opencode tools.
+<img src="assets/opencode_with_phone.png" alt="opencode, now with a phone" width="200" align="left">
 
-`Email` · `SMS / MMS` · `iMessage` · `Calls` · `Contacts` · `Notes` · `Vault`
+<p>
+  <br><br>
+  <b>Give your <a href="https://opencode.ai">opencode</a> agent its own <a href="https://inkbox.ai">Inkbox</a> identity:</b><br>
+  a mailbox, a dedicated phone number for SMS/MMS and voice, iMessage,<br>
+  contacts, notes, and an encrypted credential vault — as native opencode tools.
+</p>
+
+<p>
+  <code>Email</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Calls</code> · <code>Contacts</code> · <code>Notes</code> · <code>Vault</code>
+</p>
+
+<br clear="left">
 
 ## Install
 
