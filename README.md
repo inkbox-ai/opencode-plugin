@@ -15,24 +15,35 @@
 
 <br clear="left">
 
-## Install
+## Prerequisites
 
-One line (needs git, Node 20+, and npm; the opencode CLI itself for
-sessions and the gateway's managed server):
+- **opencode installed and logged in.** The plugin loads into real opencode
+  sessions and the gateway drives an `opencode serve` — install it
+  ([opencode.ai](https://opencode.ai)) and authenticate a model provider.
+  `inkbox-opencode doctor` checks for it.
+- **Node.js 20+ and git.** The installer builds the plugin from source.
+- **macOS or Linux.** Boot persistence uses a systemd user unit on Linux and
+  a launchd agent on macOS.
+- **An Inkbox agent** — nothing to set up in advance; the setup wizard
+  self-signs up for you (or takes an existing API key).
+
+## Get started — one command
+
+This builds the plugin, wires it into your global opencode config, puts
+`inkbox-opencode` on your PATH, and runs the setup wizard:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh | bash
 ```
 
-This clones the plugin into `~/.inkbox-opencode/app`, builds it, installs it
-into your **global opencode config** (`~/.config/opencode`) with a plugin
-wrapper, puts an `inkbox-opencode` launcher on your PATH, and runs the
-**interactive setup wizard**: create a fresh Inkbox agent via self-signup (or
-bring an existing API key), enable iMessage, provision a dedicated phone
-number, wait for your START opt-in, validate an OpenAI key for Realtime
-voice, mint the webhook signing key, pick the agent's working directory, and
-offer to keep the gateway running on every boot. When it finishes, text,
-email, or call your agent and it answers.
+That's the whole setup. The clone lives in `~/.inkbox-opencode/app`; the
+plugin is installed into your **global opencode config** (`~/.config/opencode`)
+with a one-file wrapper. The wizard creates a fresh Inkbox agent via
+self-signup (or takes an existing API key), enables iMessage, provisions a
+dedicated phone number, waits for your START opt-in, validates an OpenAI key
+for Realtime voice, mints the webhook signing key, picks the agent's working
+directory, and offers to **keep the gateway running on every boot**. When it
+finishes, text, email, or call your agent and it answers.
 
 Re-running is safe — it updates in place (`--no-setup` installs only;
 `--start` launches the background gateway when done). From a local checkout,
@@ -235,6 +246,15 @@ Beyond outbound tools, the plugin can run an **inbound gateway**: a long-lived
 process that receives email, SMS, iMessage, and phone calls to the agent's
 identity and turns each into an opencode session that replies on the same
 channel. It is off by default.
+
+```
+you (phone)  ── SMS / iMessage / email / call ──▶  Inkbox  ──▶  tunnel  ──▶  gateway
+                                                                               │
+                                                                               ▼
+                                                                     opencode session
+                                                                     (Inkbox tools, in
+                                                                      your project dir)
+```
 
 Two ways to run it:
 
