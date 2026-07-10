@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { ResolvedConfig } from "../../src/config.js";
@@ -105,6 +108,31 @@ describe("sendIMessageTools", () => {
       text: "pic",
       mediaUrls: ["https://example.com/a.jpg"],
       sendStyle: "confetti",
+    });
+  });
+
+  it("uploads local media paths and passes the hosted URL to sendIMessage", async () => {
+    const identity = {
+      sendIMessage: vi.fn(async () => ({ id: "im-2", conversationId: "conv-9", status: "sent" })),
+      uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/up1" })),
+    };
+    const [tool] = sendIMessageTools(makeDeps(identity));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-imessage-"));
+    const file = path.join(dir, "pic.png");
+    fs.writeFileSync(file, "img");
+    try {
+      await tool.definition.execute(
+        { to: "+14155550123", text: "pic", mediaPaths: [file] },
+        makeCtx(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(identity.uploadIMessageMedia).toHaveBeenCalledTimes(1);
+    expect(identity.sendIMessage).toHaveBeenCalledWith({
+      to: "+14155550123",
+      text: "pic",
+      mediaUrls: ["https://media.example/up1"],
     });
   });
 

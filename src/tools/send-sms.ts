@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
+import { uploadLocalMedia } from "../gateway/media.js";
 import { assertSmsTextWithinLimit, SMS_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -28,6 +29,7 @@ const sendSmsArgs = {
     .max(10)
     .describe("Optional MMS media attachments.")
     .optional(),
+  mediaPaths: z.array(z.string()).describe("Local file paths to attach as MMS.").optional(),
 };
 
 type SendSmsArgs = z.infer<z.ZodObject<typeof sendSmsArgs>>;
@@ -114,11 +116,14 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
             });
 
             const identity = await runtime.getIdentity();
+            // Uploaded local files lead, then any caller-supplied URLs.
+            const uploaded = args.mediaPaths?.length
+              ? await uploadLocalMedia(identity, args.mediaPaths)
+              : [];
+            const mediaUrls = [...uploaded, ...(args.mediaUrls ?? [])];
             const payload = {
               text: args.text,
-              ...(Array.isArray(args.mediaUrls) && args.mediaUrls.length
-                ? { mediaUrls: args.mediaUrls }
-                : {}),
+              ...(mediaUrls.length ? { mediaUrls } : {}),
               ...(hasConversation
                 ? { conversationId }
                 : { to: recipients.length === 1 ? recipients[0] : recipients }),

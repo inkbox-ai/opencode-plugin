@@ -27,6 +27,93 @@ export interface InkboxPluginOptions {
     approval?: OutboundApproval;
     askTimeoutMs?: number;
   };
+  gateway?: GatewayOptions;
+}
+
+// Inbound gateway mode: a long-lived process that turns inbound Inkbox
+// events (email, texts, iMessage, calls) into opencode sessions and replies
+// on the channel the message arrived on. Default off.
+export interface GatewayOptions {
+  enabled?: boolean;
+  // "sidecar" (default): the gateway runs as its own process pointed at an
+  // opencode server. "plugin": run inside opencode itself (requires the
+  // tunnel to work under the host runtime, or a publicUrl).
+  mode?: "sidecar" | "plugin";
+  // Directory gateway sessions are created against. Defaults to the
+  // opencode project directory (plugin mode) or cwd (sidecar mode).
+  projectDirectory?: string;
+  // opencode server URL for sidecar mode (e.g. http://127.0.0.1:4096).
+  serverUrl?: string;
+  // Local webhook server bind.
+  host?: string;
+  port?: number;
+  // If set, skip the Inkbox tunnel and assume webhooks arrive at this URL.
+  publicUrl?: string;
+  // Tunnel name override; defaults to the identity handle.
+  tunnelName?: string;
+  // Sender allowlist. Empty + allowAllUsers=false defers to server-side
+  // contact rules (the default posture).
+  allowedUsers?: string[];
+  allowAllUsers?: boolean;
+  // Drop inbound events whose resolved contact id is not on this list.
+  allowedInboundContactIds?: string[];
+  // Verify webhook signatures (default true). Disable only for local dev.
+  requireSignature?: boolean;
+  // Deliver verified non-Inkbox webhooks (and unverified ones) to the agent.
+  externalEvents?: boolean;
+  // Outbound sends from gateway sessions never prompt interactively:
+  // "allowlist" enforces outbound.allowedRecipients, "auto" sends freely.
+  outboundApproval?: "allowlist" | "auto";
+  // How long a relayed permission question may wait for the contact's reply.
+  permissionTimeoutS?: number;
+  // Where inbound media files are downloaded.
+  mediaDir?: string;
+  // opencode agent name used for gateway sessions (carries the channel
+  // prompt); the packaged "inkbox-channel" agent definition is the default.
+  agent?: string;
+  // Optional model override for gateway sessions, "provider/model".
+  model?: string;
+  voice?: {
+    enabled?: boolean;
+    realtime?: {
+      enabled?: boolean;
+      model?: string;
+      voice?: string;
+      apiKeyEnvVar?: string;
+      fallbackToInkboxSttTts?: boolean;
+    };
+  };
+}
+
+export interface ResolvedGatewayConfig {
+  enabled: boolean;
+  mode: "sidecar" | "plugin";
+  projectDirectory?: string;
+  serverUrl?: string;
+  host: string;
+  port: number;
+  publicUrl?: string;
+  tunnelName?: string;
+  allowedUsers: string[];
+  allowAllUsers: boolean;
+  allowedInboundContactIds: string[];
+  requireSignature: boolean;
+  externalEvents: boolean;
+  outboundApproval: "allowlist" | "auto";
+  permissionTimeoutS: number;
+  mediaDir?: string;
+  agent?: string;
+  model?: string;
+  voice: {
+    enabled: boolean;
+    realtime: {
+      enabled: boolean;
+      model: string;
+      voice: string;
+      apiKeyEnvVar: string;
+      fallbackToInkboxSttTts: boolean;
+    };
+  };
 }
 
 export interface ResolvedConfig {
@@ -45,6 +132,7 @@ export interface ResolvedConfig {
     approval: OutboundApproval;
     askTimeoutMs: number;
   };
+  gateway: ResolvedGatewayConfig;
 }
 
 export const DEFAULT_VAULT_KEY_ENV_VAR = "INKBOX_VAULT_KEY";
@@ -151,6 +239,94 @@ export function resolveConfig(
       allowedRecipients: stringArray(outbound.allowedRecipients),
       approval,
       askTimeoutMs,
+    },
+    gateway: resolveGatewayConfig(opts.gateway, env, identity),
+  };
+}
+
+function boolEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const v = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return undefined;
+}
+
+function numeric(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return undefined;
+}
+
+// Fully-defaulted gateway config (gateway disabled). Handy for tests and for
+// callers that want the resolved shape without any options set.
+export function defaultGatewayConfig(): ResolvedGatewayConfig {
+  return resolveGatewayConfig({}, {}, undefined);
+}
+
+export const DEFAULT_GATEWAY_PORT = 8767;
+export const DEFAULT_PERMISSION_TIMEOUT_S = 600;
+export const DEFAULT_REALTIME_MODEL = "gpt-realtime-2";
+export const DEFAULT_REALTIME_VOICE = "cedar";
+
+function resolveGatewayConfig(
+  options: unknown,
+  env: NodeJS.ProcessEnv,
+  identity: string | undefined,
+): ResolvedGatewayConfig {
+  const opts: GatewayOptions = isRecord(options) ? (options as GatewayOptions) : {};
+  const voice = isRecord(opts.voice) ? opts.voice : {};
+  const realtime = isRecord(voice.realtime) ? voice.realtime : {};
+  const envAllowedUsers = nonEmptyString(env.INKBOX_ALLOWED_USERS)
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return {
+    enabled: opts.enabled === true,
+    mode: opts.mode === "plugin" ? "plugin" : "sidecar",
+    projectDirectory: nonEmptyString(opts.projectDirectory),
+    serverUrl: nonEmptyString(opts.serverUrl) ?? nonEmptyString(env.OPENCODE_SERVER_URL),
+    host: nonEmptyString(opts.host) ?? nonEmptyString(env.INKBOX_GATEWAY_HOST) ?? "127.0.0.1",
+    port: numeric(opts.port) ?? numeric(env.INKBOX_GATEWAY_PORT) ?? DEFAULT_GATEWAY_PORT,
+    publicUrl: nonEmptyString(opts.publicUrl) ?? nonEmptyString(env.INKBOX_PUBLIC_URL),
+    tunnelName:
+      nonEmptyString(opts.tunnelName) ?? nonEmptyString(env.INKBOX_TUNNEL_NAME) ?? identity,
+    allowedUsers: stringArray(opts.allowedUsers).length
+      ? stringArray(opts.allowedUsers)
+      : (envAllowedUsers ?? []),
+    allowAllUsers: opts.allowAllUsers ?? boolEnv(env.INKBOX_ALLOW_ALL_USERS) ?? false,
+    allowedInboundContactIds: stringArray(opts.allowedInboundContactIds),
+    requireSignature: opts.requireSignature ?? boolEnv(env.INKBOX_REQUIRE_SIGNATURE) ?? true,
+    externalEvents: opts.externalEvents ?? boolEnv(env.INKBOX_EXTERNAL_EVENTS_ENABLED) ?? false,
+    outboundApproval: opts.outboundApproval === "auto" ? "auto" : "allowlist",
+    permissionTimeoutS:
+      numeric(opts.permissionTimeoutS) ??
+      numeric(env.INKBOX_PERMISSION_TIMEOUT_S) ??
+      DEFAULT_PERMISSION_TIMEOUT_S,
+    mediaDir: nonEmptyString(opts.mediaDir) ?? nonEmptyString(env.INKBOX_OPENCODE_MEDIA_DIR),
+    agent: nonEmptyString(opts.agent),
+    model: nonEmptyString(opts.model),
+    voice: {
+      enabled: voice.enabled ?? false,
+      realtime: {
+        enabled: realtime.enabled ?? boolEnv(env.INKBOX_REALTIME_ENABLED) ?? false,
+        model:
+          nonEmptyString(realtime.model) ??
+          nonEmptyString(env.INKBOX_REALTIME_MODEL) ??
+          DEFAULT_REALTIME_MODEL,
+        voice:
+          nonEmptyString(realtime.voice) ??
+          nonEmptyString(env.INKBOX_REALTIME_VOICE) ??
+          DEFAULT_REALTIME_VOICE,
+        apiKeyEnvVar: nonEmptyString(realtime.apiKeyEnvVar) ?? "INKBOX_REALTIME_API_KEY",
+        fallbackToInkboxSttTts:
+          realtime.fallbackToInkboxSttTts ??
+          boolEnv(env.INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS) ??
+          true,
+      },
     },
   };
 }

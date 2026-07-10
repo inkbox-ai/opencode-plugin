@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { ResolvedConfig } from "../../src/config.js";
@@ -73,6 +76,33 @@ describe("sendEmailTools", () => {
     const output = typeof result === "string" ? result : result.output;
     expect(output).toContain("Sent email id=msg-123");
     expect(output).toContain('subject="Hello"');
+  });
+
+  it("packages local attachment paths and passes them to sendEmail", async () => {
+    const identity = makeIdentity();
+    const [tool] = sendEmailTools(makeDeps(identity));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-email-"));
+    const file = path.join(dir, "note.txt");
+    fs.writeFileSync(file, "hello");
+    try {
+      await tool.definition.execute(
+        { to: ["a@example.com"], subject: "Hi", attachmentPaths: [file] },
+        makeCtx(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(identity.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [
+          {
+            filename: "note.txt",
+            contentType: "text/plain",
+            contentBase64: Buffer.from("hello").toString("base64"),
+          },
+        ],
+      }),
+    );
   });
 
   it("accepts a minimal payload and passes optional fields as undefined", async () => {

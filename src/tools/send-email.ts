@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
+import { fileToEmailAttachment } from "../gateway/media.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
@@ -19,6 +20,7 @@ const sendEmailArgs = {
       "RFC 5322 Message-ID of the message being replied to. Pass this when threading a reply so the recipient's client groups the conversation.",
     )
     .optional(),
+  attachmentPaths: z.array(z.string()).describe("Local file paths to attach.").optional(),
 };
 
 type SendEmailArgs = z.infer<z.ZodObject<typeof sendEmailArgs>>;
@@ -47,6 +49,9 @@ export function sendEmailTools(deps: ToolDeps): RegisteredTool[] {
             });
 
             const identity = await runtime.getIdentity();
+            const attachments = args.attachmentPaths?.length
+              ? await Promise.all(args.attachmentPaths.map((p) => fileToEmailAttachment(p)))
+              : undefined;
             const msg = await identity.sendEmail({
               to: args.to,
               subject: args.subject,
@@ -55,6 +60,7 @@ export function sendEmailTools(deps: ToolDeps): RegisteredTool[] {
               cc: args.cc,
               bcc: args.bcc,
               inReplyToMessageId: args.inReplyToMessageId,
+              attachments,
             });
             return {
               title: `Email sent to ${args.to.join(", ")}`,

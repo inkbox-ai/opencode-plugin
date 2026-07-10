@@ -1,7 +1,7 @@
 // Cross-cutting outbound-gating behaviors: misconfiguration guards, the
 // empty-patterns rule, conversation patterns, and abort handling.
 import { describe, expect, it, vi } from "vitest";
-import type { ResolvedConfig } from "../../src/config.js";
+import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import { approveOutbound } from "../../src/permissions.js";
 import { forwardEmailTools } from "../../src/tools/forward-email.js";
 import { placeCallTools } from "../../src/tools/place-call.js";
@@ -14,6 +14,7 @@ function makeConfig(overrides: Partial<ResolvedConfig["outbound"]> = {}): Resolv
     vaultKeyEnvVar: "INKBOX_VAULT_KEY",
     tools: { enable: [], disable: [] },
     outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0, ...overrides },
+    gateway: defaultGatewayConfig(),
   };
 }
 

@@ -15,17 +15,22 @@
   "files": [
     "dist",
     "skills",
+    "agents",
+    "bin",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
+  "bin": {
+    "inkbox-opencode": "bin/inkbox-opencode.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "biome check src tests scripts",
-    "format": "biome format --write src tests scripts"
+    "lint": "biome check src tests scripts bin",
+    "format": "biome format --write src tests scripts bin"
   },
   "keywords": [
     "opencode",
@@ -50,6 +55,8 @@
   },
   "dependencies": {
     "@inkbox/sdk": ">=0.4.19 <1.0.0",
+    "@opencode-ai/sdk": ">=1.17.18 <1.19.0",
+    "ws": "^8.21.0",
     "zod": "4.1.8"
   },
   "peerDependencies": {
@@ -64,6 +71,7 @@
     "@biomejs/biome": "^2.5.0",
     "@opencode-ai/plugin": "1.17.18",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.0",
     "vitest": "^2.1.9"
   }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
+import { uploadLocalMedia } from "../gateway/media.js";
 import { assertIMessageTextWithinLimit, IMESSAGE_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -44,6 +45,7 @@ const sendIMessageArgs = {
     .max(1)
     .describe("Optional media attachment (at most one per message).")
     .optional(),
+  mediaPaths: z.array(z.string()).describe("Local file paths to attach.").optional(),
   sendStyle: z.enum(SEND_STYLES).describe("Optional expressive iMessage send style.").optional(),
 };
 
@@ -68,7 +70,8 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
           return runTool(async () => {
             const text = typeof args.text === "string" ? args.text : "";
             const mediaUrls = Array.isArray(args.mediaUrls) ? args.mediaUrls : undefined;
-            if (!text && !mediaUrls?.length) {
+            const mediaPaths = Array.isArray(args.mediaPaths) ? args.mediaPaths : undefined;
+            if (!text && !mediaUrls?.length && !mediaPaths?.length) {
               throw new Error("Provide `text`, `mediaUrls`, or both.");
             }
             assertIMessageTextWithinLimit(text);
@@ -93,14 +96,20 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
               summary: conversationId
                 ? `Send iMessage to conversation ${conversationId} (${detail})`
                 : `Send iMessage to ${to} (${detail})`,
-              metadata: { textChars: text.length, mediaCount: mediaUrls?.length ?? 0 },
+              metadata: {
+                textChars: text.length,
+                mediaCount: (mediaUrls?.length ?? 0) + (mediaPaths?.length ?? 0),
+              },
             });
 
             const identity = await runtime.getIdentity();
+            // Uploaded local files lead, then any caller-supplied URLs.
+            const uploaded = mediaPaths?.length ? await uploadLocalMedia(identity, mediaPaths) : [];
+            const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
             const msg = await identity.sendIMessage({
               ...(conversationId ? { conversationId } : { to }),
               ...(text ? { text } : {}),
-              ...(mediaUrls?.length ? { mediaUrls } : {}),
+              ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
               ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
             });
             const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;

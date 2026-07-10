@@ -2,6 +2,7 @@
 // default-enabled state, and the sensitive set. Renaming or re-gating a tool
 // is a breaking change and must show up here as a deliberate diff.
 import { describe, expect, it } from "vitest";
+import { defaultGatewayConfig } from "../../src/config.js";
 import { buildAllTools } from "../../src/tools/index.js";
 import type { ToolDeps } from "../../src/tools/types.js";
 
@@ -19,6 +20,7 @@ function stubDeps(): ToolDeps {
       vaultKeyEnvVar: "INKBOX_VAULT_KEY",
       tools: { enable: [], disable: [] },
       outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0 },
+      gateway: defaultGatewayConfig(),
     },
     vault: {
       keyEnvVar: "INKBOX_VAULT_KEY",

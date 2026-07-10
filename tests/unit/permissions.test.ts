@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ResolvedConfig } from "../../src/config.js";
+import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import {
   approveOutbound,
   checkOutboundRecipient,
@@ -13,6 +13,7 @@ function makeConfig(outbound?: Partial<ResolvedConfig["outbound"]>): ResolvedCon
     vaultKeyEnvVar: "INKBOX_VAULT_KEY",
     tools: { enable: [], disable: [] },
     outbound: { allowedRecipients: [], approval: "auto", askTimeoutMs: 0, ...outbound },
+    gateway: defaultGatewayConfig(),
   };
 }
 

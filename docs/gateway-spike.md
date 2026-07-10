@@ -62,18 +62,25 @@ SIGINT to `opencode serve` did not run the plugin's `dispose` hook (tested
 repeatedly; the marker never appears). Consequence: tunnel teardown must not
 depend on `dispose`. Mitigations, in combination:
 
-- process signal handlers (`SIGINT`/`SIGTERM`) registered by the gateway,
 - server-side supersede-on-reconnect semantics (a restarted gateway takes
-  over the tunnel name; the stale session is evicted),
+  over the tunnel name; the stale session is evicted) — the primary teardown
+  story, since it needs no cooperation from the dying process,
 - keep `dispose` wired anyway — it may fire on graceful instance disposal
   and future opencode versions may extend when it runs.
+
+Note on signal handlers: plugin code must NOT register its own
+`SIGINT`/`SIGTERM` handlers inside the host process — a signal listener
+suppresses the runtime's default termination, which interferes with the
+host's own shutdown. Only a dedicated companion process may own its signals
+(the tunnel client's `installSignalHandlers` option should be `false` when
+running inside a host it doesn't own).
 
 ## Verdict
 
 Gateway-in-plugin is viable: the two potential architecture-killers (Bun
 tunnel protocol support; driving sessions from a plugin) both pass. The
 constraints that survive into the design are operational, not architectural:
-deferred startup, idempotent tunnel open, signal-based teardown, and a
+deferred startup, idempotent tunnel open, supersede-based teardown, and a
 post-start poke for lazy loading. A Node sidecar remains the documented
 fallback if the live-tunnel integration test surfaces Bun issues the local
 probe could not.

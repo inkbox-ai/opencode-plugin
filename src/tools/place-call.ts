@@ -12,6 +12,20 @@ const placeCallArgs = {
       'Which line to call from. Use "dedicated_number" to call from your own phone number (the same line SMS/voice conversations use). Use "shared_imessage_number" to call someone over the shared iMessage line you are already messaging them on — this only works if they are connected to you over iMessage (otherwise the call is rejected). If omitted, it is resolved automatically: the only available line, or the dedicated number when both are available.',
     )
     .optional(),
+  purpose: z
+    .string()
+    .describe(
+      "Why this call is being placed. Loaded into the live call so it opens with context instead of a generic greeting. If no topic was given, say the user asked for a general call.",
+    )
+    .optional(),
+  openingMessage: z
+    .string()
+    .describe("Optional exact or near-exact first thing to say when the call connects.")
+    .optional(),
+  context: z
+    .string()
+    .describe("Optional background facts the voice agent may need after the opening.")
+    .optional(),
   clientWebsocketUrl: z
     .string()
     .describe(
@@ -19,6 +33,24 @@ const placeCallArgs = {
     )
     .optional(),
 };
+
+// Fold call context onto the media WebSocket URL as query params. This is the
+// only channel that survives to the call bridge, which may run in a separate
+// process, so it reads purpose/opening/context from the upgrade request URL.
+function decorateCallUrl(
+  rawUrl: string,
+  ctx: { purpose?: string; openingMessage?: string; context?: string },
+): string {
+  try {
+    const url = new URL(rawUrl);
+    if (ctx.purpose) url.searchParams.set("purpose", ctx.purpose);
+    if (ctx.openingMessage) url.searchParams.set("opening_message", ctx.openingMessage);
+    if (ctx.context) url.searchParams.set("context", ctx.context);
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
 
 type PlaceCallArgs = z.infer<z.ZodObject<typeof placeCallArgs>>;
 
@@ -77,9 +109,18 @@ export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
               tool: "inkbox_place_call",
               recipients: [args.toNumber],
               summary: `Place voice call to ${args.toNumber} (audio bridge: ${clientWebsocketUrl})`,
-              metadata: { origination: args.origination ?? "auto", clientWebsocketUrl },
+              metadata: {
+                origination: args.origination ?? "auto",
+                clientWebsocketUrl,
+                ...(args.purpose ? { purpose: args.purpose } : {}),
+              },
             });
 
+            const decoratedUrl = decorateCallUrl(clientWebsocketUrl, {
+              purpose: args.purpose,
+              openingMessage: args.openingMessage,
+              context: args.context,
+            });
             const identity = await runtime.getIdentity();
             // Resolve the outbound line (dedicated number vs shared iMessage line).
             const origination = resolveCallOrigination(identity, args.origination ?? "");
@@ -96,7 +137,7 @@ export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
                   origination === "shared_imessage_number"
                     ? CallOrigin.SHARED_IMESSAGE_NUMBER
                     : CallOrigin.DEDICATED_NUMBER,
-                clientWebsocketUrl,
+                clientWebsocketUrl: decoratedUrl,
               });
             } catch (error) {
               // A shared-line call to someone who isn't connected over iMessage

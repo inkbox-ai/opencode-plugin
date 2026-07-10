@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { ResolvedConfig } from "../../src/config.js";
@@ -119,6 +122,37 @@ describe("sendSmsTools", () => {
     const [tool] = sendSmsTools(makeDeps(identity));
     await tool.definition.execute({ to: "  +14155550123  ", text: "Hi" }, makeCtx());
     expect(identity.sendText).toHaveBeenCalledWith({ text: "Hi", to: "+14155550123" });
+  });
+
+  it("uploads local media paths and merges the hosted URLs into the send call", async () => {
+    const identity = {
+      sendText: vi.fn(async () => ({ id: "txt-2", deliveryStatus: "queued", recipients: null })),
+      uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/up1" })),
+    };
+    const [tool] = sendSmsTools(makeDeps(identity));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-sms-"));
+    const file = path.join(dir, "pic.png");
+    fs.writeFileSync(file, "img");
+    try {
+      await tool.definition.execute(
+        {
+          to: "+14155550123",
+          text: "pic",
+          mediaPaths: [file],
+          mediaUrls: ["https://example.com/a.jpg"],
+        },
+        makeCtx(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(identity.uploadIMessageMedia).toHaveBeenCalledTimes(1);
+    // Uploaded URL leads, then the caller-supplied one.
+    expect(identity.sendText).toHaveBeenCalledWith({
+      text: "pic",
+      to: "+14155550123",
+      mediaUrls: ["https://media.example/up1", "https://example.com/a.jpg"],
+    });
   });
 
   it("rejects when both `to` and `conversationId` are provided", async () => {

@@ -16,3 +16,14 @@ Initial release.
 - 12 bundled skills covering email triage, SMS/iMessage response etiquette,
   outbound calling, contact management, notes, credential use, and
   troubleshooting.
+- Optional inbound gateway (off by default): receives email, SMS, iMessage,
+  and calls to the agent's identity and turns each into an opencode session
+  that replies on the same channel. Contact-keyed sessions, signature
+  verification and dedup, per-contact permission relaying, control commands,
+  inbound/outbound media, delivery-failure recovery, and external webhook
+  providers. Voice answers calls via Inkbox speech or an OpenAI Realtime
+  raw-audio bridge with in-call actions. Runs as a sidecar
+  (`inkbox-opencode`) or inside `opencode serve`.
+- Local-file media on `inkbox_send_email` (`attachmentPaths`),
+  `inkbox_send_sms`/`inkbox_send_imessage` (`mediaPaths`); `inkbox_place_call`
+  carries a call purpose and opening message.

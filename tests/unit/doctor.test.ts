@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { NOT_CONFIGURED_MESSAGE } from "../../src/client.js";
-import type { ResolvedConfig } from "../../src/config.js";
+import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import { doctorTools } from "../../src/tools/doctor.js";
 import type { GatingSummary } from "../../src/tools/registry.js";
 import type { ToolDeps } from "../../src/tools/types.js";
@@ -24,6 +24,7 @@ function makeConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
     vaultKeyEnvVar: VAULT_KEY_ENV_VAR,
     tools: { enable: [], disable: [] },
     outbound: { allowedRecipients: [], approval: "auto", askTimeoutMs: 0 },
+    gateway: defaultGatewayConfig(),
     ...overrides,
   };
 }

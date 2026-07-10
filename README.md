@@ -186,6 +186,65 @@ connects to that WebSocket for the call's media.
 `apiKey`, `identity`, `baseUrl`, and `signingKey` resolve in order: plugin
 option → env var → `~/.inkbox/config`.
 
+## Inbound gateway (email/text/calls come to the agent)
+
+Beyond outbound tools, the plugin can run an **inbound gateway**: a long-lived
+process that receives email, SMS, iMessage, and phone calls to the agent's
+identity and turns each into an opencode session that replies on the same
+channel. It is off by default.
+
+Two ways to run it:
+
+- **Sidecar (recommended)** — a companion process alongside a running
+  `opencode serve`:
+
+  ```bash
+  opencode serve --port 4096 &
+  npx --package @inkbox/opencode-plugin inkbox-opencode run
+  # or manage it as a daemon:
+  inkbox-opencode start | status | stop
+  ```
+
+- **In-plugin** — set `gateway.mode` to `"plugin"` and run inside
+  `opencode serve` itself. This needs the Inkbox tunnel to work under the host
+  runtime (or a reachable `gateway.publicUrl`); the sidecar avoids that
+  requirement.
+
+Enable it and point sessions at a working directory:
+
+```json
+{
+  "plugin": [["@inkbox/opencode-plugin", {
+    "gateway": {
+      "enabled": true,
+      "projectDirectory": "/path/to/agent/workspace",
+      "voice": { "enabled": true, "realtime": { "enabled": true } }
+    }
+  }]]
+}
+```
+
+The gateway needs a webhook signing key (`INKBOX_SIGNING_KEY`) to verify
+inbound events. What it does:
+
+- **Email / SMS / iMessage** arrive as sessions keyed per contact (one person,
+  one ongoing conversation across channels); replies go back on the channel the
+  message came in on, threaded for email. Delivery failures wake the agent to
+  retry or switch channels.
+- **Permission prompts** raised inside a gateway session are relayed to the
+  contact on their channel ("reply 1 to allow once, 2 to always allow, 3 to
+  decline") and time out to a decline.
+- **Control commands** (whole-message): `/clear`, `/stop`, `/status`,
+  `/health`, `/resume`, `/usage`.
+- **Voice** (when `gateway.voice.enabled`): the agent answers calls. With
+  `voice.realtime.enabled` and an OpenAI Realtime key
+  (`INKBOX_REALTIME_API_KEY`), calls run as a live raw-audio conversation with
+  in-call actions; otherwise Inkbox handles speech-to-text and text-to-speech.
+  `inkbox_place_call` dials out with a purpose loaded into the call.
+
+Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
+identity, signing key, opencode server, tunnel/public URL).
+
 ## Development
 
 ```bash
