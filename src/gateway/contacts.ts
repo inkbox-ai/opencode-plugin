@@ -10,6 +10,9 @@ export interface ResolvedContact {
   contactCompany?: string;
   contactEmails?: string[];
   contactPhones?: string[];
+  // Free-form notes from the contact record. Injected into voice-call
+  // instructions only — never into per-message frame tags (can be long).
+  contactNotes?: string;
 }
 
 // One-line contact card for [inkbox:...] frame tags: the addresses the agent
@@ -80,12 +83,14 @@ export function createContactResolver(
       const company = contact.companyName?.trim();
       const emails = (contact.emails ?? []).map((e) => e.value).filter(Boolean);
       const phones = (contact.phones ?? []).map((p) => p.value).filter(Boolean);
+      const notes = contact.notes?.trim();
       return {
         contactId: contact.id,
         ...(name ? { contactName: name } : {}),
         ...(company ? { contactCompany: company } : {}),
         ...(emails.length ? { contactEmails: emails } : {}),
         ...(phones.length ? { contactPhones: phones } : {}),
+        ...(notes ? { contactNotes: notes } : {}),
       };
     } catch (error) {
       // Resolution must never drop a message: warn and fall through to the

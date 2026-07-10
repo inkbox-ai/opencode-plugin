@@ -16,6 +16,8 @@ interface QueuedTurn {
   kind: TurnKind;
   text: string;
   deliver: boolean;
+  // Per-contact/per-channel opencode agent override for this turn.
+  agent?: string;
   replyTarget?: ReplyTarget;
   // True for a follow-up turn enqueued after a delivery failure, so a second
   // failure doesn't spawn another recovery (bounded to one attempt).
@@ -78,13 +80,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return id;
   }
 
-  async function runPrompt(sessionID: string, text: string): Promise<string | undefined> {
+  async function runPrompt(
+    sessionID: string,
+    text: string,
+    agentOverride?: string,
+  ): Promise<string | undefined> {
     const g = deps.config.gateway;
+    const agent = agentOverride ?? g.agent;
     const res = await deps.opencode.session.prompt({
       path: { id: sessionID },
       query: { directory: deps.directory },
       body: {
-        ...(g.agent ? { agent: g.agent } : {}),
+        ...(agent ? { agent } : {}),
         ...(g.model?.includes("/")
           ? {
               model: {
@@ -113,7 +120,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (turn.kind === "normal") entry.interruptNormal = false;
         try {
           const sessionID = await ensureSession(chatKey);
-          const out = await runPrompt(sessionID, turn.text);
+          const out = await runPrompt(sessionID, turn.text, turn.agent);
           // If a newer message interrupted this normal turn, drop its output.
           if (turn.kind === "normal" && entry.interruptNormal) {
             deps.logger.info("turn.interrupted", { chatKey });
@@ -187,11 +194,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         const sessionID = deps.state.getSession(msg.chatKey);
         if (sessionID) await interruptInFlightNormal(msg.chatKey, sessionID);
       }
+      // Operator overrides, keyed by contact id first, then channel.
+      const g = deps.config.gateway;
+      const overrideFor = (map: Record<string, string>): string | undefined =>
+        (msg.contactId ? map[msg.contactId] : undefined) ?? map[msg.channel];
       await new Promise<string | undefined>((resolve, reject) => {
         entry.queue.push({
           kind: "normal",
-          text: frameInbound(msg),
+          text: frameInbound(msg, overrideFor(g.channelPrompts)),
           deliver: true,
+          agent: overrideFor(g.channelAgents),
           replyTarget,
           resolve,
           reject,

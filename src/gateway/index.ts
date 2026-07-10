@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
 import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
@@ -147,6 +148,19 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   const events = subscribeEvents(opts.opencode, escalation, logger, opts.directory);
 
+  // Fragment batching for phone channels, when a quiet window is configured.
+  const bursts =
+    g.textBatchWindowMs > 0
+      ? createBurstBuffer({
+          windowMs: g.textBatchWindowMs,
+          deliver: (msg) => {
+            void wrapSessions()
+              .handleInbound(msg)
+              .catch((err) => logger.error("turn.dispatch_failed", { error: String(err) }));
+          },
+        })
+      : undefined;
+
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
     return dispatchEvent(
       {
@@ -156,6 +170,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         sessions: wrapSessions(),
         notify,
         logger,
+        bursts,
         onExternal: g.externalEvents ? handleExternal : undefined,
       },
       event,
@@ -245,6 +260,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     publicUrl: transport.publicUrl,
     async close() {
       events.close();
+      bursts?.flushAll();
       await sessions.close();
       await server.close();
       await transport.close();

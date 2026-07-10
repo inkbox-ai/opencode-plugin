@@ -97,6 +97,36 @@ describe("frameInbound", () => {
     );
   });
 
+  it("tags merged bursts with the fragment count", () => {
+    const framed = frameInbound(makeMsg({ text: "a\nb", burst: 2 }));
+    expect(framed).toBe(`[inkbox:sms_burst messages=2 from=+15550001111 ${UNKNOWN}]\na\nb`);
+  });
+
+  it("exposes the RFC message id on email frames for reply threading", () => {
+    const framed = frameInbound(
+      makeMsg({ channel: "email", from: "a@b.co", rfcMessageId: "<x@y>", text: "hi" }),
+    );
+    expect(framed).toBe(`[inkbox:email from=a@b.co message_id="<x@y>" ${UNKNOWN}]\nhi`);
+  });
+
+  it("lists group participants in the tag when known", () => {
+    const framed = frameInbound(
+      makeMsg({
+        conversationId: "conv-9",
+        group: { participantCount: 2, participants: ["Ada", "Grace"] },
+        text: "hi both",
+      }),
+    );
+    expect(framed).toContain('participants="Ada, Grace"');
+  });
+
+  it("injects an operator directive line under the tag", () => {
+    const framed = frameInbound(makeMsg({ text: "yo" }), "Always answer in French.");
+    expect(framed).toBe(
+      `[inkbox:sms from=+15550001111 ${UNKNOWN}]\nOperator directive for this channel: Always answer in French.\nyo`,
+    );
+  });
+
   it("frames a group message with media as tag, reminder, body, then files", () => {
     const framed = frameInbound(
       makeMsg({

@@ -73,6 +73,15 @@ export interface GatewayOptions {
   agent?: string;
   // Optional model override for gateway sessions, "provider/model".
   model?: string;
+  // Batch rapid-fire SMS/iMessage fragments arriving within this quiet
+  // window (ms) into one merged turn. 0 (default) disables batching.
+  textBatchWindowMs?: number;
+  // Extra per-turn directive text, keyed by contact id or channel name
+  // (contact id wins). Injected under the frame tag on matching turns.
+  channelPrompts?: Record<string, string>;
+  // opencode agent override keyed by contact id or channel name (contact id
+  // wins); falls back to the gateway-wide agent.
+  channelAgents?: Record<string, string>;
   voice?: {
     enabled?: boolean;
     realtime?: {
@@ -104,6 +113,9 @@ export interface ResolvedGatewayConfig {
   mediaDir?: string;
   agent?: string;
   model?: string;
+  textBatchWindowMs: number;
+  channelPrompts: Record<string, string>;
+  channelAgents: Record<string, string>;
   voice: {
     enabled: boolean;
     realtime: {
@@ -155,6 +167,18 @@ function stringArray(value: unknown): string[] {
   return value
     .map((entry) => nonEmptyString(entry))
     .filter((entry): entry is string => Boolean(entry));
+}
+
+// Keep only entries whose key and value are both non-empty strings.
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    const key = nonEmptyString(k);
+    const val = nonEmptyString(v);
+    if (key && val) out[key] = val;
+  }
+  return out;
 }
 
 // ~/.inkbox/config — `key = value` lines, the same file the Inkbox SDK and CLI
@@ -313,6 +337,10 @@ function resolveGatewayConfig(
     mediaDir: nonEmptyString(opts.mediaDir) ?? nonEmptyString(env.INKBOX_OPENCODE_MEDIA_DIR),
     agent: nonEmptyString(opts.agent),
     model: nonEmptyString(opts.model),
+    textBatchWindowMs:
+      numeric(opts.textBatchWindowMs) ?? numeric(env.INKBOX_TEXT_BATCH_WINDOW_MS) ?? 0,
+    channelPrompts: stringRecord(opts.channelPrompts),
+    channelAgents: stringRecord(opts.channelAgents),
     voice: {
       enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? false,
       realtime: {

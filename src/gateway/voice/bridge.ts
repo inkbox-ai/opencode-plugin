@@ -4,8 +4,9 @@ import { verifyWebhook } from "@inkbox/sdk";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { InkboxRuntime } from "../../client.js";
 import type { ResolvedConfig } from "../../config.js";
-import { type ContactResolver, contactCard } from "../contacts.js";
+import { type ContactResolver, contactCard, type ResolvedContact } from "../contacts.js";
 import type { GatewayLogger, SessionManager } from "../types.js";
+import { buildVoiceGreeting, buildVoiceInstructions, type CallMeta } from "./instructions.js";
 import { callEndedPrompt, createPostCallRegistry, postCallPrompt } from "./post-call.js";
 import {
   callerAudio,
@@ -65,6 +66,10 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const upgradeAt = deps.now();
     deps.logger.info("call.upgrade", { callId: ctx.callId });
 
+    // Resolve who is on this call — counterparty, contact card, own identity —
+    // BEFORE choosing a mode, so voice instructions carry the full picture.
+    const meta = await resolveCallParties(ctx);
+
     // Decide the mode by actually trying OpenAI first (when enabled), so the
     // upgrade headers reflect a mode that will work. Transient API errors get
     // one retry; only then fall back to Inkbox speech (unless disabled).
@@ -74,7 +79,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
     if (rt.enabled && apiKey) {
       for (let attempt = 1; attempt <= 2 && !realtime; attempt++) {
         const t0 = deps.now();
-        const candidate = tryOpenRealtime(apiKey, ctx);
+        const candidate = tryOpenRealtime(apiKey, ctx, meta);
         if (await raceReady(candidate.ready)) {
           realtime = candidate;
         } else {
@@ -101,7 +106,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
     );
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      void runCall(ws, ctx, realtime).catch((err) => {
+      void runCall(ws, ctx, meta, realtime).catch((err) => {
         deps.logger.error("call.failed", { error: String(err) });
         void realtime?.close().catch(() => {});
         try {
@@ -113,29 +118,79 @@ export function createCallBridge(deps: CallBridgeDeps) {
     });
   }
 
+  // Fill in the counterparty (from the signed call record), the contact card,
+  // the chat key, and our own identity — everything the call needs to know
+  // who is talking to whom.
+  async function resolveCallParties(ctx: CallCtx): Promise<CallMeta> {
+    if (!ctx.from && ctx.callId) {
+      try {
+        const client = await deps.inkbox.getClient();
+        const call = await client.calls.get(ctx.callId);
+        ctx.from = call.remotePhoneNumber ?? "";
+        if (call.direction === "inbound" || call.direction === "outbound") {
+          ctx.direction = call.direction;
+        }
+      } catch (err) {
+        deps.logger.warn("call.lookup_failed", { callId: ctx.callId, error: String(err) });
+      }
+    }
+
+    let contact: ResolvedContact = {};
+    if (ctx.from) {
+      contact = await deps.contacts.resolve(ctx.from);
+      ctx.card = contactCard(contact);
+      ctx.chatKey = deps.contacts.chatKeyFor({
+        contactId: contact.contactId,
+        channel: "imessage",
+        from: ctx.from,
+      });
+    } else {
+      ctx.from = "unknown";
+      ctx.card = contactCard({});
+      ctx.chatKey = `call:${ctx.callId ?? "unknown"}`;
+    }
+
+    let identity: CallMeta["identity"] = {};
+    try {
+      const id = await deps.inkbox.getIdentity();
+      identity = {
+        handle: id.agentHandle,
+        emailAddress: id.emailAddress,
+        dedicatedNumber: id.phoneNumber?.number,
+        imessageEnabled: (id as { imessageEnabled?: boolean }).imessageEnabled,
+      };
+    } catch (err) {
+      deps.logger.warn("call.identity_failed", { error: String(err) });
+    }
+
+    return {
+      callId: ctx.callId,
+      direction: ctx.direction,
+      from: ctx.from,
+      contact,
+      identity,
+      purpose: ctx.purpose,
+      openingMessage: ctx.openingMessage,
+      context: ctx.context,
+    };
+  }
+
   // Open a Realtime bridge whose audio callbacks target the (soon-to-exist)
   // caller WS via a mutable ref, so we can connect to OpenAI before the
   // handshake completes.
   function tryOpenRealtime(
     apiKey: string,
     ctx: CallCtx,
+    meta: CallMeta,
   ): RealtimeBridge & { attach(ws: WebSocket): void } {
     let callWs: WebSocket | undefined;
     const registry = createPostCallRegistry();
-    const greeting = ctx.openingMessage || GREETING;
-    const instructions = [
-      greeting,
-      ctx.purpose ? `Call purpose: ${ctx.purpose}` : "",
-      ctx.context ?? "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
     const bridge = openRealtimeBridge(
       {
         apiKey,
         model: deps.config.gateway.voice.realtime.model,
         voice: deps.config.gateway.voice.realtime.voice,
-        instructions,
+        instructions: buildVoiceInstructions(meta),
       },
       registry,
       {
@@ -144,10 +199,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
         onBargeIn: () => callWs && sendClear(callWs),
         onConsult: async (query) => {
           ctx.transcript.push(`caller: ${query}`);
-          const answer = await deps.sessions.runText(
-            ctx.chatKey,
-            `[inkbox:voice from=${ctx.from} | ${ctx.card}]\n${query}`,
-          );
+          const answer = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${query}`);
           if (answer) ctx.transcript.push(`agent: ${answer}`);
           return answer ?? "Done.";
         },
@@ -186,41 +238,16 @@ export function createCallBridge(deps: CallBridgeDeps) {
   async function runCall(
     ws: WebSocket,
     ctx: CallCtx,
+    meta: CallMeta,
     realtime: RealtimeBridge | undefined,
   ): Promise<void> {
-    // The signed context carries only the call id — the counterparty's number
-    // comes from the call record it authenticates.
-    if (!ctx.from && ctx.callId) {
-      try {
-        const client = await deps.inkbox.getClient();
-        const call = await client.calls.get(ctx.callId);
-        ctx.from = call.remotePhoneNumber ?? "";
-      } catch (err) {
-        deps.logger.warn("call.lookup_failed", { callId: ctx.callId, error: String(err) });
-      }
-    }
-    // Resolve the caller to a stable per-contact chat key (falls back to the
-    // raw address on lookup failure, or a per-call key with no address).
-    if (ctx.from) {
-      const resolved = await deps.contacts.resolve(ctx.from);
-      ctx.card = contactCard(resolved);
-      ctx.chatKey = deps.contacts.chatKeyFor({
-        contactId: resolved.contactId,
-        channel: "imessage",
-        from: ctx.from,
-      });
-    } else {
-      ctx.from = "unknown";
-      ctx.card = contactCard({});
-      ctx.chatKey = `call:${ctx.callId ?? "unknown"}`;
-    }
     deps.logger.info("call.connected", { chatKey: ctx.chatKey, realtime: Boolean(realtime) });
     const registry = ctx.registry ?? createPostCallRegistry();
     const greeting = ctx.openingMessage || GREETING;
 
     if (realtime) {
       (realtime as RealtimeBridge & { attach(ws: WebSocket): void }).attach(ws);
-      realtime.start();
+      realtime.start(buildVoiceGreeting(meta));
     }
 
     ws.on("message", (data) => {
@@ -247,10 +274,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
         const t0 = deps.now();
         let reply: string | undefined;
         try {
-          reply = await deps.sessions.runText(
-            ctx.chatKey,
-            `[inkbox:voice from=${ctx.from} | ${ctx.card}]\n${text}`,
-          );
+          reply = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${text}`);
         } catch (err) {
           deps.logger.error("call.turn_failed", { chatKey: ctx.chatKey, error: String(err) });
         }
@@ -280,7 +304,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
     // Post-call: run queued actions, or a reflection turn, off the closed call.
     const actions = registry.list();
     const convo = ctx.transcript.join("\n");
-    const caller = `from=${ctx.from} | ${ctx.card}`;
+    const caller = `from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}`;
     if (actions.length > 0) {
       await deps.sessions
         .runText(ctx.chatKey, postCallPrompt(actions, convo, caller))
@@ -290,9 +314,15 @@ export function createCallBridge(deps: CallBridgeDeps) {
     }
   }
 
+  // Per-turn routing tag for voice frames sent through the text agent.
+  function voiceTag(ctx: CallCtx): string {
+    return `[inkbox:voice from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}]`;
+  }
+
   interface CallCtx {
     from: string;
     callId?: string;
+    direction: "inbound" | "outbound";
     purpose?: string;
     openingMessage?: string;
     context?: string;
@@ -318,11 +348,16 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const url = new URL(req.url ?? "/", "http://localhost");
     const q = (k: string) => url.searchParams.get(k) ?? undefined;
     const from = strOf(signed.remote_phone_number) ?? strOf(signed.from) ?? q("from") ?? "";
+    const purpose = q("purpose");
+    const openingMessage = q("opening_message");
     return {
       from,
       callId: strOf(signed.call_id) ?? strOf(signed.id) ?? q("call_id"),
-      purpose: q("purpose"),
-      openingMessage: q("opening_message"),
+      // Purpose/opening ride only on outbound call URLs; the call record's
+      // direction (fetched later) is authoritative and overrides this.
+      direction: purpose || openingMessage ? "outbound" : "inbound",
+      purpose,
+      openingMessage,
       context: q("context"),
       chatKey: from,
       card: contactCard({}),

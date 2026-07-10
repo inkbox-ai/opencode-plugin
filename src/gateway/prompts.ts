@@ -126,18 +126,30 @@ function groupReminder(participantCount: number): string {
 // Prefix an inbound message with a one-line routing tag — the per-turn
 // context the static system prompt can't carry: which channel this message
 // arrived on and who sent it. Quoted fields may contain spaces.
-export function frameInbound(msg: InboundMessage): string {
-  const fields = [`inkbox:${msg.channel}`, `from=${msg.from}`];
+export function frameInbound(msg: InboundMessage, directive?: string): string {
+  // Merged fragment bursts are tagged as such, with the fragment count.
+  const burst = (msg.burst ?? 1) > 1;
+  const fields = [
+    burst ? `inkbox:${msg.channel}_burst messages=${msg.burst}` : `inkbox:${msg.channel}`,
+    `from=${msg.from}`,
+  ];
   if (msg.channel === "email") {
     if (msg.subject) fields.push(`subject=${JSON.stringify(msg.subject)}`);
+    // RFC 5322 Message-ID, so the agent can thread its own follow-up sends
+    // via inkbox_send_email's inReplyToMessageId.
+    if (msg.rfcMessageId) fields.push(`message_id=${JSON.stringify(msg.rfcMessageId)}`);
   } else if (msg.conversationId) {
     fields.push(`conversation_id=${msg.conversationId}`);
+  }
+  if (msg.group?.participants?.length) {
+    fields.push(`participants=${JSON.stringify(msg.group.participants.join(", "))}`);
   }
   // The contact card carries the addresses the agent may reach this person
   // at, so cross-channel follow-ups never have to guess.
   fields.push("|", contactCard(msg));
 
   const lines = [`[${fields.join(" ")}]`];
+  if (directive) lines.push(`Operator directive for this channel: ${directive}`);
   if (msg.group) lines.push(groupReminder(msg.group.participantCount));
   lines.push(msg.text);
   if (msg.mediaPaths.length > 0) lines.push(`[attached files: ${msg.mediaPaths.join(", ")}]`);

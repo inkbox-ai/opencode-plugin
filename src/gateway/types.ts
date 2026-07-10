@@ -47,12 +47,16 @@ export interface InboundMessage {
   contactCompany?: string;
   contactEmails?: string[];
   contactPhones?: string[];
+  contactNotes?: string;
   text: string;
   // Local paths of downloaded attachments/media, appended to the framed
   // message so the agent can read them.
   mediaPaths: string[];
+  // Number of rapid-fire fragments merged into this message (burst batching);
+  // absent or 1 for a normal single message.
+  burst?: number;
   // Present when the message arrived in a group conversation.
-  group?: { participantCount: number };
+  group?: { participantCount: number; participants?: string[] };
 }
 
 // Where a session's replies are delivered — always the last-used modality.

@@ -89,8 +89,9 @@ export function realtimeTools() {
 export interface RealtimeBridge {
   // Feed caller μ-law audio (base64) into the model.
   pushAudio(base64Ulaw: string): void;
-  // Trigger the opening response once the caller leg is connected.
-  start(): void;
+  // Trigger the opening response once the caller leg is connected, with an
+  // optional per-call greeting instruction.
+  start(greetingInstructions?: string): void;
   close(): Promise<void>;
   // Resolves when the session is configured, rejects if the socket fails to
   // open — so the caller can fall back to Inkbox speech before committing.
@@ -318,9 +319,14 @@ export function openRealtimeBridge(
         ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Ulaw }));
       }
     },
-    start() {
+    start(greetingInstructions) {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response.create" }));
+        ws.send(
+          JSON.stringify({
+            type: "response.create",
+            ...(greetingInstructions ? { response: { instructions: greetingInstructions } } : {}),
+          }),
+        );
       }
     },
     ready,

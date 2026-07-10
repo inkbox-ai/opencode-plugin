@@ -195,7 +195,14 @@ describe("dispatchEvent reactions", () => {
     );
 
     expect(deps.sessions.handleInbound).toHaveBeenCalledWith(
-      expect.objectContaining({ channel: "imessage", text: "[reaction: loved]" }),
+      expect.objectContaining({
+        channel: "imessage",
+        // The reaction line names the target message and leads a short
+        // reply-restraint policy blurb ending in the [SILENT] escape.
+        text: expect.stringMatching(
+          /^\[reaction: loved target_message_id=im-1\]\n.*tapback.*reply with exactly \[SILENT\]\.$/s,
+        ),
+      }),
     );
   });
 });

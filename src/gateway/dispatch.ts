@@ -1,8 +1,10 @@
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
+import type { BurstBuffer } from "./burst.js";
 import type { ContactResolver } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
 import { downloadMedia, mediaDir } from "./media.js";
+import { SILENT } from "./prompts.js";
 import type {
   Channel,
   GatewayLogger,
@@ -30,6 +32,9 @@ export interface DispatchDeps {
   sessions: SessionManager;
   notify: NotifyOnce;
   logger: GatewayLogger;
+  // When set, rapid-fire SMS/iMessage fragments are batched per chat into
+  // one merged turn instead of dispatched individually.
+  bursts?: BurstBuffer;
   // Handle a verified non-Inkbox (external) webhook.
   onExternal?(event: VerifiedEvent): Promise<void>;
 }
@@ -227,12 +232,21 @@ async function handleInbound(
     ...resolved,
     text: info.text,
     mediaPaths,
-    ...(participants > 1 ? { group: { participantCount: participants } } : {}),
+    ...(participants > 1
+      ? { group: { participantCount: participants, participants: participantNames(event.body) } }
+      : {}),
   };
 
   // A media-only message still wakes the agent.
   if (msg.text.trim() === "" && msg.mediaPaths.length === 0) {
     deps.logger.info("dispatch.empty", { channel });
+    return true;
+  }
+
+  // Batch phone-channel fragments when enabled; slash commands bypass the
+  // window so control replies stay immediate.
+  if (deps.bursts && channel !== "email" && !msg.text.trim().startsWith("/")) {
+    deps.bursts.add(msg);
     return true;
   }
 
@@ -253,11 +267,28 @@ function countParticipants(body: Record<string, unknown>): number {
   return Math.max(contacts, identities);
 }
 
+// Names of the resolved remote parties on the event, for the group frame tag.
+function participantNames(body: Record<string, unknown>): string[] {
+  const data = record(body.data);
+  const names: string[] = [];
+  for (const c of Array.isArray(data?.contacts) ? data.contacts : []) {
+    const n = str(record(c)?.name);
+    if (n) names.push(n);
+  }
+  for (const a of Array.isArray(data?.agent_identities) ? data.agent_identities : []) {
+    const rec = record(a);
+    const n = str(rec?.display_name) ?? str(rec?.agent_handle);
+    if (n) names.push(n);
+  }
+  return names;
+}
+
 async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   const r = resourceOf(event.body, "reaction");
   const from = str(r?.remote_number);
   const conversationId = str(r?.conversation_id);
-  const reaction = str(r?.reaction) ?? "reaction";
+  const reaction = str(r?.custom_emoji) ?? str(r?.reaction) ?? "reaction";
+  const targetMessageId = str(r?.target_message_id);
   if (!from) return true;
   const resolved = await deps.contacts.resolve(from);
   if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
@@ -267,6 +298,16 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
     conversationId,
     from,
   });
+  // Reactions carry reply-restraint guidance: a tapback is a lightweight
+  // signal, and most warrant no visible reply at all.
+  const who = resolved.contactName ?? from;
+  const text = [
+    `[reaction: ${reaction}${targetMessageId ? ` target_message_id=${targetMessageId}` : ""}]`,
+    `${who} reacted with a '${reaction}' tapback to your message.`,
+    "A reaction is a lightweight signal, not always a request for a reply — a 'question' " +
+      "tapback usually wants a follow-up; 'love', 'like', 'laugh', or 'dislike' are usually " +
+      `just acknowledgement. If no reply is warranted, reply with exactly ${SILENT}.`,
+  ].join("\n");
   void deps.sessions
     .handleInbound({
       channel: "imessage",
@@ -274,7 +315,7 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       from,
       conversationId,
       ...resolved,
-      text: `[reaction: ${reaction}]`,
+      text,
       mediaPaths: [],
       messageId: str(r?.id),
     })
