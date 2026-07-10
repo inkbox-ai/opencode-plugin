@@ -69,6 +69,7 @@ describe("buildVoiceInstructions", () => {
 
   it("covers tool choreography: consult scope, post-call actions, two-step hangup", () => {
     const out = buildVoiceInstructions(meta());
+    expect(out).toContain("opencode running the Inkbox plugin");
     expect(out).toContain("consult_agent");
     expect(out).toContain("Do not promise work outside that list");
     expect(out).toContain("register_post_call_action");

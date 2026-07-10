@@ -102,6 +102,7 @@ export function buildVoiceInstructions(meta: CallMeta): string {
   if (meta.context) lines.push(`Background for this call: ${meta.context}`);
 
   lines.push(
+    "The text-based agent available through consult_agent is opencode running the Inkbox plugin in this workspace.",
     "Do not perform a context lookup before greeting the caller. Do not say you " +
       "are waiting on a lookup or checking context.",
     `If the caller asks for work to happen now during the live call, call ${CONSULT_TOOL}. ` +
