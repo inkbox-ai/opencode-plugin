@@ -71,6 +71,31 @@ describe("runForeground", () => {
     expect(stop).toHaveBeenCalled();
   });
 
+  it("exits nonzero when the inbound transport dies after startup", async () => {
+    let failTunnel: (err: Error) => void = () => {};
+    const failed = new Promise<void>((_, reject) => {
+      failTunnel = reject;
+    });
+    failed.catch(() => {});
+    const handle = { publicUrl: "https://x", failed, close: vi.fn(async () => {}) };
+    vi.mocked(startGateway).mockResolvedValueOnce(handle as never);
+    const stop = vi.fn(async () => {});
+    vi.mocked(ensureOpencodeServer).mockResolvedValueOnce({
+      url: "http://127.0.0.1:4097",
+      owned: true,
+      onExit: () => {},
+      stop,
+    });
+
+    const running = runForeground(makeConfig(), logger, { runtime: {} as never });
+    await vi.waitFor(() => expect(startGateway).toHaveBeenCalled());
+    failTunnel(new Error("TunnelSupersededError: taken over"));
+
+    expect(await running).toBe(1);
+    expect(handle.close).toHaveBeenCalled();
+    expect(stop).toHaveBeenCalled();
+  });
+
   it("exits nonzero and closes the gateway when the managed server dies", async () => {
     const handle = { publicUrl: "https://tunnel.example", close: vi.fn(async () => {}) };
     vi.mocked(startGateway).mockResolvedValueOnce(handle as never);

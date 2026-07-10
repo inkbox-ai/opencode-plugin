@@ -6,6 +6,10 @@ import type { GatewayLogger, StateStoreLike } from "./transport-types.js";
 export interface Transport {
   // Public base URL webhooks and the call WS are reachable at.
   publicUrl: string;
+  // Rejects when the inbound transport dies after startup (tunnel fatal such
+  // as a supersede, or an unexpected close). Never settles for a configured
+  // publicUrl, and never rejects for a deliberate close(). Pre-caught.
+  failed?: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -75,9 +79,30 @@ export async function openTransport(opts: {
 
   opts.state.update({ tunnelId: listener.tunnel?.id });
   logger.info("transport.tunnel", { publicUrl: listener.publicUrl });
+
+  // Past the first bind, any settle of the serve loop means inbound traffic
+  // has stopped — a deaf gateway must die loudly (so a service manager can
+  // restart it), not linger. close() marks the settle as deliberate.
+  let closing = false;
+  const failed = served.then(
+    () => {
+      if (!closing) throw new Error(`Tunnel "${name}" closed; inbound traffic stopped.`);
+    },
+    (err) => {
+      if (!closing) throw err;
+    },
+  );
+  failed.catch(() => {
+    /* consumers observe via Transport.failed */
+  });
+
   return {
     publicUrl: listener.publicUrl,
-    close: () => listener.close(),
+    failed,
+    close: () => {
+      closing = true;
+      return listener.close();
+    },
   };
 }
 

@@ -88,16 +88,16 @@ export async function runForeground(
   if (server.owned) console.log(`Managed opencode server: ${server.url}`);
   console.log("Press Ctrl+C to stop.");
 
-  const code = await waitForExit(handle.close.bind(handle), server, logger);
+  const code = await waitForExit(handle, server, logger);
   await server.stop();
   return code;
 }
 
-// Resolve on SIGINT/SIGTERM (clean, code 0) or when an owned opencode server
-// dies (code 1 so a service manager restarts the pair together). Closes the
-// gateway before resolving either way.
+// Resolve on SIGINT/SIGTERM (clean, code 0), or with code 1 when an owned
+// opencode server dies or the inbound transport fails — so a service manager
+// restarts the whole stack. Closes the gateway before resolving either way.
 function waitForExit(
-  close: () => Promise<void>,
+  handle: { failed?: Promise<void>; close(): Promise<void> },
   server: EnsuredServer,
   logger: GatewayLogger,
 ): Promise<number> {
@@ -107,7 +107,7 @@ function waitForExit(
       if (closing) return;
       closing = true;
       logger.info("gateway.shutdown", { reason });
-      close().then(
+      handle.close().then(
         () => resolve(code),
         (err) => {
           logger.error("gateway.shutdown_failed", { error: String(err) });
@@ -120,6 +120,10 @@ function waitForExit(
     server.onExit((code) => {
       logger.error("gateway.opencode_exited", { code });
       finish(1, "opencode_exited");
+    });
+    handle.failed?.catch((err) => {
+      logger.error("gateway.transport_fatal", { error: String(err) });
+      finish(1, "transport_fatal");
     });
   });
 }

@@ -126,5 +126,8 @@ export interface WebhookProvider {
 
 export interface GatewayHandle {
   publicUrl: string;
+  // Rejects when the inbound transport dies after startup; the sidecar exits
+  // nonzero on it so a service manager restarts (and reconnects) the gateway.
+  failed?: Promise<void>;
   close(): Promise<void>;
 }

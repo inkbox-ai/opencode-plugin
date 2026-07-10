@@ -261,6 +261,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   return {
     publicUrl: transport.publicUrl,
+    failed: transport.failed,
     async close() {
       events.close();
       bursts?.flushAll();

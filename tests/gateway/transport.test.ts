@@ -77,6 +77,61 @@ describe("openTransport tunnel driving", () => {
     expect(listener.close).toHaveBeenCalled();
   });
 
+  it("rejects failed when the tunnel dies after connecting", async () => {
+    let settleWait: (err?: Error) => void = () => {};
+    const listener = makeListener({
+      wait: vi.fn(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            settleWait = (err) => (err ? reject(err) : resolve());
+          }),
+      ),
+    });
+    const opts = makeOpts(listener);
+
+    const pending = openTransport(opts);
+    await new Promise((r) => setTimeout(r, 0));
+    (connectMock.mock.calls[0][1] as { onStatus: (s: string) => void }).onStatus("connected");
+    const transport = await pending;
+
+    const outcome = vi.fn();
+    transport.failed?.then(
+      () => outcome("resolved"),
+      (err: unknown) => outcome(String(err)),
+    );
+    settleWait(new Error("TunnelSupersededError: another client connected"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(outcome).toHaveBeenCalledWith(expect.stringContaining("Superseded"));
+  });
+
+  it("does not reject failed on a deliberate close", async () => {
+    let settleWait: (err?: Error) => void = () => {};
+    const listener = makeListener({
+      wait: vi.fn(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            settleWait = (err) => (err ? reject(err) : resolve());
+          }),
+      ),
+    });
+    const opts = makeOpts(listener);
+
+    const pending = openTransport(opts);
+    await new Promise((r) => setTimeout(r, 0));
+    (connectMock.mock.calls[0][1] as { onStatus: (s: string) => void }).onStatus("connected");
+    const transport = await pending;
+
+    const outcome = vi.fn();
+    transport.failed?.then(
+      () => outcome("clean"),
+      () => outcome("rejected"),
+    );
+    await transport.close();
+    settleWait(); // the serve loop winds down as part of the close
+    await new Promise((r) => setTimeout(r, 0));
+    expect(outcome).toHaveBeenCalledWith("clean");
+  });
+
   it("uses a configured publicUrl without touching the tunnel", async () => {
     const listener = makeListener();
     const opts = makeOpts(listener);
