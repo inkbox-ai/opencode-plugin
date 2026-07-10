@@ -21,6 +21,10 @@
   sessions and the gateway drives an `opencode serve` — install it
   ([opencode.ai](https://opencode.ai)) and authenticate a model provider.
   `inkbox-opencode doctor` checks for it.
+
+  ```bash
+  curl -fsSL https://opencode.ai/install | bash
+  ```
 - **Node.js 20+ and git.** The installer builds the plugin from source.
 - **macOS or Linux.** Boot persistence uses a systemd user unit on Linux and
   a launchd agent on macOS.
