@@ -44,6 +44,12 @@ export function sendAudioDone(ws: WebSocket): void {
   ws.send(JSON.stringify({ event: "audio_done" }));
 }
 
+// Drop queued outbound audio on the phone side — sent on caller barge-in so
+// the agent goes quiet the moment the caller starts talking.
+export function sendClear(ws: WebSocket): void {
+  ws.send(JSON.stringify({ event: "clear" }));
+}
+
 // Upgrade-response headers select the call mode. STT/TTS mode asks Inkbox to
 // transcribe caller audio and synthesize our text replies; raw-media mode
 // (Realtime) turns both off so µ-law frames flow untouched.

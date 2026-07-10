@@ -44,6 +44,9 @@ export interface InboundMessage {
   rfcMessageId?: string;
   contactId?: string;
   contactName?: string;
+  contactCompany?: string;
+  contactEmails?: string[];
+  contactPhones?: string[];
   text: string;
   // Local paths of downloaded attachments/media, appended to the framed
   // message so the agent can read them.

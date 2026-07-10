@@ -31,8 +31,11 @@ describe("SILENT", () => {
   });
 });
 
+// Unresolved senders carry an explicit unknown marker instead of no card.
+const UNKNOWN = "| contact=unknown_in_inkbox";
+
 describe("frameInbound", () => {
-  it("frames email with subject and resolved contact", () => {
+  it("frames email with subject and the full contact card", () => {
     const framed = frameInbound(
       makeMsg({
         channel: "email",
@@ -40,25 +43,28 @@ describe("frameInbound", () => {
         subject: "Build status",
         contactId: "c-1",
         contactName: "Ada Lovelace",
+        contactEmails: ["ada@example.com"],
+        contactPhones: ["+15550001111"],
         text: "Is the deploy green?",
       }),
     );
     expect(framed).toBe(
-      '[inkbox:email from=ada@example.com subject="Build status" contact_id=c-1 contact_name="Ada Lovelace"]\n' +
-        "Is the deploy green?",
+      '[inkbox:email from=ada@example.com subject="Build status" | contact_id=c-1 ' +
+        'contact_name="Ada Lovelace" contact_emails=ada@example.com ' +
+        "contact_phones=+15550001111]\nIs the deploy green?",
     );
   });
 
-  it("frames email without subject or contact as tag plus body", () => {
+  it("marks an unresolved sender as unknown in the tag", () => {
     const framed = frameInbound(
       makeMsg({ channel: "email", from: "ada@example.com", text: "hello" }),
     );
-    expect(framed).toBe("[inkbox:email from=ada@example.com]\nhello");
+    expect(framed).toBe(`[inkbox:email from=ada@example.com ${UNKNOWN}]\nhello`);
   });
 
   it("frames sms with its conversation id", () => {
     const framed = frameInbound(makeMsg({ conversationId: "conv-9" }));
-    expect(framed).toBe("[inkbox:sms from=+15550001111 conversation_id=conv-9]\nping");
+    expect(framed).toBe(`[inkbox:sms from=+15550001111 conversation_id=conv-9 ${UNKNOWN}]\nping`);
   });
 
   it("frames imessage with conversation id and contact id", () => {
@@ -66,13 +72,13 @@ describe("frameInbound", () => {
       makeMsg({ channel: "imessage", conversationId: "im-3", contactId: "c-7", text: "hey" }),
     );
     expect(framed).toBe(
-      "[inkbox:imessage from=+15550001111 conversation_id=im-3 contact_id=c-7]\nhey",
+      "[inkbox:imessage from=+15550001111 conversation_id=im-3 | contact_id=c-7]\nhey",
     );
   });
 
   it("frames voice with the caller only when no conversation id exists", () => {
     const framed = frameInbound(makeMsg({ channel: "voice", text: "call me back" }));
-    expect(framed).toBe("[inkbox:voice from=+15550001111]\ncall me back");
+    expect(framed).toBe(`[inkbox:voice from=+15550001111 ${UNKNOWN}]\ncall me back`);
   });
 
   it("inserts a one-line group policy reminder for group messages", () => {
@@ -80,14 +86,14 @@ describe("frameInbound", () => {
       makeMsg({ conversationId: "conv-9", group: { participantCount: 4 }, text: "lunch?" }),
     );
     expect(framed).toBe(
-      `[inkbox:sms from=+15550001111 conversation_id=conv-9]\n${GROUP_REMINDER}\nlunch?`,
+      `[inkbox:sms from=+15550001111 conversation_id=conv-9 ${UNKNOWN}]\n${GROUP_REMINDER}\nlunch?`,
     );
   });
 
   it("appends attached file paths after the body", () => {
     const framed = frameInbound(makeMsg({ mediaPaths: ["/media/a.png", "/media/b.pdf"] }));
     expect(framed).toBe(
-      "[inkbox:sms from=+15550001111]\nping\n[attached files: /media/a.png, /media/b.pdf]",
+      `[inkbox:sms from=+15550001111 ${UNKNOWN}]\nping\n[attached files: /media/a.png, /media/b.pdf]`,
     );
   });
 
@@ -101,7 +107,7 @@ describe("frameInbound", () => {
       }),
     );
     expect(framed).toBe(
-      `[inkbox:sms from=+15550001111 conversation_id=conv-9]\n${GROUP_REMINDER}\n` +
+      `[inkbox:sms from=+15550001111 conversation_id=conv-9 ${UNKNOWN}]\n${GROUP_REMINDER}\n` +
         "see photo\n[attached files: /media/a.png]",
     );
   });

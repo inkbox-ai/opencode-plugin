@@ -38,26 +38,31 @@ export function createPostCallRegistry(): PostCallRegistry {
 }
 
 // A prompt that runs the queued actions once the call has ended, reconciled
-// against what was already handled live.
-export function postCallPrompt(actions: PostCallAction[], transcript: string): string {
+// against what was already handled live. `caller` is the counterparty's
+// contact card so follow-ups reach real addresses, never guessed ones.
+export function postCallPrompt(
+  actions: PostCallAction[],
+  transcript: string,
+  caller?: string,
+): string {
   const lines = [
     "The call just ended. Carry out the follow-up actions you committed to during it, using your tools.",
     "Reconcile against the transcript first — skip anything already done, and don't duplicate messages already sent.",
-    "",
-    "Queued actions:",
-    ...actions.map((a, i) => `${i + 1}. ${a.description}`),
   ];
+  if (caller) lines.push(`The call was with: [inkbox:voice ${caller}]`);
+  lines.push("", "Queued actions:", ...actions.map((a, i) => `${i + 1}. ${a.description}`));
   if (transcript.trim()) lines.push("", "Recent call transcript:", transcript);
   return lines.join("\n");
 }
 
 // A reflection prompt when no explicit actions were queued but the call may
 // still imply follow-up.
-export function callEndedPrompt(transcript: string): string {
+export function callEndedPrompt(transcript: string, caller?: string): string {
   const lines = [
     "A call you were on just ended. If it implies follow-up work, do it now with your tools.",
     "Reconcile against the transcript first: only act on what was actually promised and not already done.",
   ];
+  if (caller) lines.push(`The call was with: [inkbox:voice ${caller}]`);
   if (transcript.trim()) lines.push("", "Recent call transcript:", transcript);
   return lines.join("\n");
 }

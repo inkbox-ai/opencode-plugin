@@ -7,6 +7,22 @@ import type { Channel, GatewayLogger } from "./types.js";
 export interface ResolvedContact {
   contactId?: string;
   contactName?: string;
+  contactCompany?: string;
+  contactEmails?: string[];
+  contactPhones?: string[];
+}
+
+// One-line contact card for [inkbox:...] frame tags: the addresses the agent
+// may use for this person. Unresolved senders are marked explicitly so the
+// model asks or looks the person up instead of guessing an address.
+export function contactCard(c: ResolvedContact): string {
+  if (!c.contactId) return "contact=unknown_in_inkbox";
+  const parts = [`contact_id=${c.contactId}`];
+  if (c.contactName) parts.push(`contact_name=${JSON.stringify(c.contactName)}`);
+  if (c.contactCompany) parts.push(`contact_company=${JSON.stringify(c.contactCompany)}`);
+  if (c.contactEmails?.length) parts.push(`contact_emails=${c.contactEmails.join(",")}`);
+  if (c.contactPhones?.length) parts.push(`contact_phones=${c.contactPhones.join(",")}`);
+  return parts.join(" ");
 }
 
 export interface ChatKeyInput {
@@ -59,8 +75,18 @@ export function createContactResolver(
       );
       // Only an unambiguous single match counts; zero or many is a miss.
       if (matches.length !== 1) return {};
-      const name = contactDisplayName(matches[0]);
-      return { contactId: matches[0].id, ...(name ? { contactName: name } : {}) };
+      const contact = matches[0];
+      const name = contactDisplayName(contact);
+      const company = contact.companyName?.trim();
+      const emails = (contact.emails ?? []).map((e) => e.value).filter(Boolean);
+      const phones = (contact.phones ?? []).map((p) => p.value).filter(Boolean);
+      return {
+        contactId: contact.id,
+        ...(name ? { contactName: name } : {}),
+        ...(company ? { contactCompany: company } : {}),
+        ...(emails.length ? { contactEmails: emails } : {}),
+        ...(phones.length ? { contactPhones: phones } : {}),
+      };
     } catch (error) {
       // Resolution must never drop a message: warn and fall through to the
       // channel-thread key. The failure is cached like a miss, so this logs

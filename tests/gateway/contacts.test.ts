@@ -31,12 +31,13 @@ afterEach(() => {
 
 describe("createContactResolver", () => {
   describe("resolve", () => {
-    it("resolves a single email match to its contact id and display name", async () => {
+    it("resolves a single email match to its contact card", async () => {
       const lookup = vi.fn(async () => [makeContact()]);
       const resolver = createContactResolver(makeDeps(lookup));
       await expect(resolver.resolve("ada@example.com")).resolves.toEqual({
         contactId: "contact-1",
         contactName: "Ada Lovelace",
+        contactEmails: ["ada@example.com"],
       });
       expect(lookup).toHaveBeenCalledWith({ email: "ada@example.com" });
     });
@@ -54,12 +55,13 @@ describe("createContactResolver", () => {
       await expect(resolver.resolve("ada@example.com")).resolves.toEqual({
         contactId: "contact-1",
         contactName: "Ada Lovelace",
+        contactEmails: ["ada@example.com"],
       });
     });
 
     it("omits contactName when the contact has no usable name parts", async () => {
       const lookup = vi.fn(async () => [
-        makeContact({ preferredName: null, givenName: null, familyName: null }),
+        makeContact({ preferredName: null, givenName: null, familyName: null, emails: [] }),
       ]);
       const resolver = createContactResolver(makeDeps(lookup));
       await expect(resolver.resolve("ada@example.com")).resolves.toEqual({

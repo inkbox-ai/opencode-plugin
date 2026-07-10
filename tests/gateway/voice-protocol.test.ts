@@ -4,6 +4,7 @@ import {
   callModeHeaders,
   parseFrame,
   sendAudioDone,
+  sendClear,
   sendMedia,
   speak,
 } from "../../src/gateway/voice/protocol.js";
@@ -34,6 +35,12 @@ describe("call media protocol", () => {
     const { ws, sent } = fakeWs();
     sendAudioDone(ws);
     expect(JSON.parse(sent[0])).toEqual({ event: "audio_done" });
+  });
+
+  it("drops queued playback with a clear frame on barge-in", () => {
+    const { ws, sent } = fakeWs();
+    sendClear(ws);
+    expect(JSON.parse(sent[0])).toEqual({ event: "clear" });
   });
 
   it("speaks a turn as a text delta followed by a done frame", () => {

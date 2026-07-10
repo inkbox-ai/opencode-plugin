@@ -55,6 +55,11 @@ inkbox_place_call, ...) reach the human or third parties proactively —
 conversation is automatic; use these tools only for a different channel or
 a different recipient.
 
+Never guess or invent an address. Use the addresses in the [inkbox:...]
+tag for the person you are talking to; for anyone else, look them up
+(inkbox_lookup_contact, inkbox_list_contacts) and ask when no address is
+on file.
+
 # Calling
 
 Outbound calls (inkbox_place_call) can go out over two lines. Match the

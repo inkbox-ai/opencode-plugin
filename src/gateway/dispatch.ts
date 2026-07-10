@@ -192,7 +192,8 @@ async function handleInbound(
 
   if (channel === "sms" && CONTROL_WORDS.has(info.text.trim().toLowerCase())) return true;
 
-  const { contactId, contactName } = await deps.contacts.resolve(from);
+  const resolved = await deps.contacts.resolve(from);
+  const contactId = resolved.contactId;
   if (!senderAllowed(from, contactId, deps.config.gateway)) {
     deps.logger.info("dispatch.blocked_sender", { channel });
     return true;
@@ -223,8 +224,7 @@ async function handleInbound(
     subject: info.subject,
     messageId: info.messageId,
     rfcMessageId: info.rfcMessageId,
-    contactId,
-    contactName,
+    ...resolved,
     text: info.text,
     mediaPaths,
     ...(participants > 1 ? { group: { participantCount: participants } } : {}),
@@ -259,10 +259,10 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   const conversationId = str(r?.conversation_id);
   const reaction = str(r?.reaction) ?? "reaction";
   if (!from) return true;
-  const { contactId, contactName } = await deps.contacts.resolve(from);
-  if (!senderAllowed(from, contactId, deps.config.gateway)) return true;
+  const resolved = await deps.contacts.resolve(from);
+  if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
   const chatKey = deps.contacts.chatKeyFor({
-    contactId,
+    contactId: resolved.contactId,
     channel: "imessage",
     conversationId,
     from,
@@ -273,8 +273,7 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       chatKey,
       from,
       conversationId,
-      contactId,
-      contactName,
+      ...resolved,
       text: `[reaction: ${reaction}]`,
       mediaPaths: [],
       messageId: str(r?.id),

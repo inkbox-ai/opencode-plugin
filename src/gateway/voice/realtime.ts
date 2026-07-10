@@ -21,6 +21,8 @@ export interface RealtimeCallbacks {
   onAudio(base64Ulaw: string): void;
   // A spoken response finished; flush the caller-side playback.
   onAudioDone?(): void;
+  // The caller started talking over the model — clear queued playback.
+  onBargeIn?(): void;
   // Run a full agent turn in the caller's session; the returned text is
   // spoken back. Runs off the audio pump so speech never freezes.
   onConsult(query: string): Promise<string>;
@@ -111,12 +113,10 @@ export function openRealtimeBridge(
   now: () => number,
   makeSocket: (url: string, headers: Record<string, string>) => WebSocket = defaultSocket,
 ): RealtimeBridge {
+  // GA Realtime endpoint: model is required in the URL query; no beta header.
   const ws = makeSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.model)}`,
-    {
-      Authorization: `Bearer ${config.apiKey}`,
-      "OpenAI-Beta": "realtime=v1",
-    },
+    { Authorization: `Bearer ${config.apiKey}` },
   );
   const hangup = createHangupArmer(HANGUP_WINDOW_MS, now);
   const consults = new Set<Promise<void>>();
@@ -124,34 +124,57 @@ export function openRealtimeBridge(
   // name + call id, arguments.delta streams the JSON, arguments.done fires the
   // dispatch. Accumulate by item/call id.
   const fnCalls = new Map<string, FnCall>();
-  let opened = false;
+  let readySettled = false;
   let resolveReady: () => void;
   let rejectReady: (err: unknown) => void;
   const ready = new Promise<void>((resolve, reject) => {
     resolveReady = resolve;
     rejectReady = reject;
   });
+  // ready settles exactly once: resolved by session.updated (the API accepted
+  // our config), rejected by an error event or a close before that — so the
+  // caller can still fall back to Inkbox speech on a post-open rejection.
+  const settleReady = (fn: () => void) => {
+    if (readySettled) return;
+    readySettled = true;
+    fn();
+  };
 
   ws.on("open", () => {
-    opened = true;
     ws.send(
       JSON.stringify({
         type: "session.update",
         session: {
+          type: "realtime",
+          model: config.model,
+          output_modalities: ["audio"],
           instructions: config.instructions,
-          voice: config.voice,
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          turn_detection: { type: "server_vad" },
-          input_audio_transcription: { model: "whisper-1" },
+          audio: {
+            input: {
+              format: { type: "audio/pcmu" },
+              transcription: { model: "whisper-1" },
+              // Server-side VAD: the model detects turn boundaries, responds
+              // on its own, and supports caller barge-in.
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                // Shorter close = snappier turn-taking on phone audio.
+                silence_duration_ms: 400,
+                create_response: true,
+                interrupt_response: true,
+              },
+            },
+            output: {
+              format: { type: "audio/pcmu" },
+              voice: config.voice,
+            },
+          },
           tools: realtimeTools(),
           tool_choice: "auto",
         },
       }),
     );
-    // The opening response is triggered by start() once the caller leg is up,
-    // so the greeting audio isn't produced before there's anywhere to play it.
-    resolveReady();
   });
 
   ws.on("message", (data) => {
@@ -201,19 +224,32 @@ export function openRealtimeBridge(
         });
         break;
       }
-      case "error":
-        cb.logger.warn("realtime.error", { message: String(evt.error?.message ?? "") });
+      case "session.updated":
+        settleReady(resolveReady);
         break;
+      case "input_audio_buffer.speech_started":
+        // Server VAD already cancels the in-flight response; the audio that
+        // was streamed ahead must be dropped downstream too.
+        cb.onBargeIn?.();
+        break;
+      case "error": {
+        const message = String(evt.error?.message ?? "");
+        cb.logger.warn("realtime.error", { message });
+        settleReady(() => rejectReady(new Error(`realtime session rejected: ${message}`)));
+        break;
+      }
     }
   });
 
   ws.on("close", () => {
     cb.logger.info("realtime.closed", {});
-    if (!opened) rejectReady(new Error("realtime socket closed before open"));
+    settleReady(() =>
+      rejectReady(new Error("realtime socket closed before the session was established")),
+    );
   });
   ws.on("error", (err) => {
     cb.logger.warn("realtime.socket_error", { error: String(err) });
-    if (!opened) rejectReady(err instanceof Error ? err : new Error(String(err)));
+    settleReady(() => rejectReady(err instanceof Error ? err : new Error(String(err))));
   });
 
   async function dispatchFunctionCall(evt: {

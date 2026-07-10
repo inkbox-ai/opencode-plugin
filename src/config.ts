@@ -292,8 +292,12 @@ function resolveGatewayConfig(
     host: nonEmptyString(opts.host) ?? nonEmptyString(env.INKBOX_GATEWAY_HOST) ?? "127.0.0.1",
     port: numeric(opts.port) ?? numeric(env.INKBOX_GATEWAY_PORT) ?? DEFAULT_GATEWAY_PORT,
     publicUrl: nonEmptyString(opts.publicUrl) ?? nonEmptyString(env.INKBOX_PUBLIC_URL),
+    // Tunnels are provisioned under the bare handle, so the default strips
+    // the identity's leading "@".
     tunnelName:
-      nonEmptyString(opts.tunnelName) ?? nonEmptyString(env.INKBOX_TUNNEL_NAME) ?? identity,
+      nonEmptyString(opts.tunnelName) ??
+      nonEmptyString(env.INKBOX_TUNNEL_NAME) ??
+      identity?.replace(/^@/, ""),
     allowedUsers: stringArray(opts.allowedUsers).length
       ? stringArray(opts.allowedUsers)
       : (envAllowedUsers ?? []),
@@ -310,7 +314,7 @@ function resolveGatewayConfig(
     agent: nonEmptyString(opts.agent),
     model: nonEmptyString(opts.model),
     voice: {
-      enabled: voice.enabled ?? false,
+      enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? false,
       realtime: {
         enabled: realtime.enabled ?? boolEnv(env.INKBOX_REALTIME_ENABLED) ?? false,
         model:

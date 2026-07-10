@@ -67,7 +67,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       query: { directory: deps.directory },
     });
     const id = (res as any)?.data?.id ?? (res as any)?.id;
-    if (!id) throw new Error("opencode session.create returned no session id");
+    if (!id) {
+      const err = (res as any)?.error;
+      throw new Error(
+        `opencode session.create returned no session id${err ? `: ${JSON.stringify(err).slice(0, 300)}` : ""}`,
+      );
+    }
     deps.state.setSession(chatKey, id);
     deps.logger.info("session.created", { chatKey, sessionID: id });
     return id;
@@ -91,6 +96,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         parts: [{ type: "text", text }],
       },
     });
+    // The generated client reports failures via res.error instead of throwing;
+    // treating that as an empty reply would silently swallow the turn.
+    const err = (res as any)?.error;
+    if (err) throw new Error(`session.prompt failed: ${JSON.stringify(err).slice(0, 300)}`);
     return extractText(res);
   }
 

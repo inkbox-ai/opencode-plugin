@@ -1,3 +1,4 @@
+import { contactCard } from "./contacts.js";
 import type { InboundMessage } from "./types.js";
 
 // Prompt assembly for gateway sessions: the channel system prompt, per-turn
@@ -63,6 +64,11 @@ inkbox_place_call, ...) reach the human or third parties proactively —
 conversation is automatic; use these tools only for a different channel or
 a different recipient.
 
+Never guess or invent an address. Use the addresses in the [inkbox:...]
+tag for the person you are talking to; for anyone else, look them up
+(inkbox_lookup_contact, inkbox_list_contacts) and ask when no address is
+on file.
+
 # Calling
 
 Outbound calls (inkbox_place_call) can go out over two lines. Match the
@@ -127,8 +133,9 @@ export function frameInbound(msg: InboundMessage): string {
   } else if (msg.conversationId) {
     fields.push(`conversation_id=${msg.conversationId}`);
   }
-  if (msg.contactId) fields.push(`contact_id=${msg.contactId}`);
-  if (msg.contactName) fields.push(`contact_name=${JSON.stringify(msg.contactName)}`);
+  // The contact card carries the addresses the agent may reach this person
+  // at, so cross-channel follow-ups never have to guess.
+  fields.push("|", contactCard(msg));
 
   const lines = [`[${fields.join(" ")}]`];
   if (msg.group) lines.push(groupReminder(msg.group.participantCount));

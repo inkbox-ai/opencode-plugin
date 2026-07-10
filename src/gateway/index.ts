@@ -101,19 +101,31 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   await server.listen(g.host, g.port);
   const localUrl = `http://${g.host}:${g.port}`;
 
-  const transport = await openTransport({
-    inkbox: opts.inkbox,
-    gateway: g,
-    localUrl,
-    ownsProcess: opts.ownsProcess,
-    state,
-    logger,
-  });
-
-  await reconcileSubscriptions(deps, transport.publicUrl).catch((err) => {
-    logger.error("subscriptions.failed", { error: String(err) });
+  // From here on a failed start must release what's already up (the bound
+  // webhook port, then the tunnel) — in plugin mode the host process lives on.
+  let transport: Awaited<ReturnType<typeof openTransport>>;
+  try {
+    transport = await openTransport({
+      inkbox: opts.inkbox,
+      gateway: g,
+      localUrl,
+      ownsProcess: opts.ownsProcess,
+      state,
+      logger,
+    });
+  } catch (err) {
+    await server.close().catch(() => {});
     throw err;
-  });
+  }
+
+  try {
+    await reconcileSubscriptions(deps, transport.publicUrl);
+  } catch (err) {
+    logger.error("subscriptions.failed", { error: String(err) });
+    await transport.close().catch(() => {});
+    await server.close().catch(() => {});
+    throw err;
+  }
 
   // Escalation: relay permission asks to the human, capture their reply.
   const escalation = createEscalationBridge({
