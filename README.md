@@ -8,39 +8,53 @@ contacts, notes, and an encrypted credential vault — as native opencode tools.
 
 ## Install
 
-Add the plugin to your `opencode.json`:
+This plugin is distributed as source — clone and build it, then load it from a
+local wrapper. Build the clone:
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@inkbox/opencode-plugin"]
-}
+```bash
+git clone https://github.com/inkbox-ai/opencode-plugin.git
+cd opencode-plugin
+npm install && npm run build
 ```
 
-opencode installs it automatically on next start. Credentials come from
-environment variables (recommended — keys stay out of committed config):
+Then, from your opencode project (or your global `~/.config/opencode`
+directory), install the built clone and add a one-file plugin wrapper:
+
+```bash
+npm install /path/to/opencode-plugin   # the clone you just built
+mkdir -p .opencode/plugins
+```
+
+Create `.opencode/plugins/inkbox.ts` — opencode auto-loads every file under
+`.opencode/plugins/`. **Every option shown in this README goes inside the
+`InkboxPlugin(input, { ... })` call here**:
+
+```ts
+import InkboxPlugin from "@inkbox/opencode-plugin";
+
+export default async (input: any) => InkboxPlugin(input, {
+  // options go here — see the examples throughout this README
+});
+```
+
+Credentials come from environment variables (recommended — keys stay out of
+committed files):
 
 ```bash
 export INKBOX_API_KEY=sk-ink-...        # agent-scoped API key
 export INKBOX_IDENTITY=your-agent       # agent handle
 ```
 
-Get both at [inkbox.ai/console](https://inkbox.ai/console). Alternatively pass
-options with the tuple form — with `{env:VAR}` substitution so the config file
-never holds the key itself:
+Get both at [inkbox.ai/console](https://inkbox.ai/console). They also fall back
+to `~/.inkbox/config` (the same `key = value` file the Inkbox CLI and SDKs
+read), or pass them as wrapper options:
 
-```json
-{
-  "plugin": [["@inkbox/opencode-plugin", {
-    "apiKey": "{env:INKBOX_API_KEY}",
-    "identity": "your-agent"
-  }]]
-}
+```ts
+export default async (input: any) => InkboxPlugin(input, {
+  apiKey: process.env.INKBOX_API_KEY,
+  identity: "your-agent",
+});
 ```
-
-Credentials also fall back to `~/.inkbox/config` (the same `key = value` file
-the Inkbox CLI and SDKs read), which is handy for processes that don't inherit
-your shell's environment.
 
 Sanity-check the setup by asking the agent to run `inkbox_doctor` — it reports
 config, API reachability, key scope, the resolved identity, and which tool
@@ -71,12 +85,10 @@ opencode sends every registered tool's spec to the model on each turn, so the
 default surface is deliberately lean. Enable more by exact name or by group,
 then restart opencode:
 
-```json
-{
-  "plugin": [["@inkbox/opencode-plugin", {
-    "tools": { "enable": ["inkbox_place_call", "contact-rules"] }
-  }]]
-}
+```ts
+export default async (input: any) => InkboxPlugin(input, {
+  tools: { enable: ["inkbox_place_call", "contact-rules"] },
+});
 ```
 
 - `tools.enable` / `tools.disable` accept tool names, group names, or `"all"`.
@@ -108,34 +120,31 @@ Sends and calls are gated before anything leaves:
   or set `outbound.approval` to `"allowlist"` (allowlist only — requires a
   non-empty `allowedRecipients`) or `"auto"`.
 
-```json
-{
-  "plugin": [["@inkbox/opencode-plugin", {
-    "outbound": {
-      "approval": "allowlist",
-      "allowedRecipients": ["ceo@example.com", "+15551234567"]
-    }
-  }]]
-}
+```ts
+export default async (input: any) => InkboxPlugin(input, {
+  outbound: {
+    approval: "allowlist",
+    allowedRecipients: ["ceo@example.com", "+15551234567"],
+  },
+});
 ```
 
 ## Skills
 
-The package bundles skills that teach the agent Inkbox etiquette — email
+The repo bundles skills that teach the agent Inkbox etiquette — email
 triage, SMS/iMessage response patterns, outbound calling, contact and
-credential hygiene, troubleshooting. Point opencode at the installed copy with
-one config line:
+credential hygiene, troubleshooting. Point opencode at the clone's `skills/`
+directory with one config line:
 
 ```json
 {
-  "skills": { "paths": ["node_modules/@inkbox/opencode-plugin/skills"] }
+  "skills": { "paths": ["/path/to/opencode-plugin/skills"] }
 }
 ```
 
-(Adjust the path if your plugin cache lives elsewhere, or copy the `skills/`
-directory into `.opencode/skills/` to vendor it. Skills already installed
-under `.claude/skills/` are picked up by opencode's Claude Code compatibility
-loading.)
+(Or copy the `skills/` directory into `.opencode/skills/` to vendor it. Skills
+already installed under `.claude/skills/` are picked up by opencode's Claude
+Code compatibility loading.)
 
 ## The identity model
 
@@ -200,9 +209,9 @@ Two ways to run it:
 
   ```bash
   opencode serve --port 4096 &
-  npx --package @inkbox/opencode-plugin inkbox-opencode run
+  node /path/to/opencode-plugin/bin/inkbox-opencode.js run
   # or manage it as a daemon:
-  inkbox-opencode start | status | stop
+  node /path/to/opencode-plugin/bin/inkbox-opencode.js start | status | stop
   ```
 
 - **In-plugin** — set `gateway.mode` to `"plugin"` and run inside
@@ -212,16 +221,14 @@ Two ways to run it:
 
 Enable it and point sessions at a working directory:
 
-```json
-{
-  "plugin": [["@inkbox/opencode-plugin", {
-    "gateway": {
-      "enabled": true,
-      "projectDirectory": "/path/to/agent/workspace",
-      "voice": { "enabled": true, "realtime": { "enabled": true } }
-    }
-  }]]
-}
+```ts
+export default async (input: any) => InkboxPlugin(input, {
+  gateway: {
+    enabled: true,
+    projectDirectory: "/path/to/agent/workspace",
+    voice: { enabled: true, realtime: { enabled: true } },
+  },
+});
 ```
 
 The gateway needs a webhook signing key (`INKBOX_SIGNING_KEY`) to verify

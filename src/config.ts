@@ -4,9 +4,9 @@ import * as path from "node:path";
 
 export type OutboundApproval = "ask" | "allowlist" | "auto";
 
-// Options accepted via the opencode.json plugin tuple:
-//   "plugin": [["@inkbox/opencode-plugin", { ...options }]]
-// Every credential also resolves from env vars, so options are never required.
+// Options passed to InkboxPlugin(input, { ...options }) from your
+// .opencode/plugins/inkbox.ts wrapper. Every credential also resolves from env
+// vars, so options are never required.
 export interface InkboxPluginOptions {
   apiKey?: string;
   identity?: string;

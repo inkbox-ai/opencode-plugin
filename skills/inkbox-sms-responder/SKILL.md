@@ -15,13 +15,14 @@ Enabled by default:
 - `inkbox_get_text_conversation` — pull message history by `conversationId` or legacy `remotePhoneNumber`
 - `inkbox_send_sms` — outbound by `conversationId`, one E.164 recipient, or a 2-8 recipient group
 
-Opt-in — the user must enable these in opencode.json, then restart opencode:
+Opt-in — the user must enable these in your .opencode/plugins/inkbox.ts wrapper, then restart opencode:
 
 - `inkbox_list_texts`, `inkbox_get_text` — low-level access to individual messages
 - `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read` — clear unread state
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["inkbox_mark_text_conversation_read"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["inkbox_mark_text_conversation_read"] } })
 ```
 
 (Enabling the `"sms"` group turns all four on at once.) `inkbox_doctor` reports which tools are currently enabled or disabled.

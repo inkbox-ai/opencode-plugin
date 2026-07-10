@@ -209,10 +209,10 @@ export async function runUninstall(opts: DaemonOptions = {}): Promise<number> {
   console.log("Removed local gateway state (pid, log, session map).");
   console.log("");
   console.log("To finish removing the gateway, do the following manually:");
-  console.log("  1. Remove the @inkbox/opencode-plugin gateway options from your opencode.json.");
+  console.log("  1. Remove the .opencode/plugins/inkbox.ts wrapper (or its gateway options).");
   console.log(
     "  2. Unset INKBOX_API_KEY, INKBOX_IDENTITY, and INKBOX_SIGNING_KEY if you set them for the gateway.",
   );
-  console.log("  3. Uninstall the package if it is no longer needed.");
+  console.log("  3. Delete the cloned opencode-plugin repo if it is no longer needed.");
   return 0;
 }

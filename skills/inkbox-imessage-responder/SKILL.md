@@ -22,15 +22,16 @@ Enabled by default:
 - `inkbox_get_imessage_conversation` — pull message history (includes tapback reactions on each message)
 - `inkbox_send_imessage` — outbound by `conversationId` (preferred) or `to` E.164
 
-Opt-in — the user must enable these in opencode.json, then restart opencode:
+Opt-in — the user must enable these in your .opencode/plugins/inkbox.ts wrapper, then restart opencode:
 
 - `inkbox_imessage_triage_number` — router number + connect command for onboarding new people
 - `inkbox_list_imessage_assignments` — who is actively connected to this agent right now (one row per recipient)
 - `inkbox_send_imessage_reaction` — tapback (love/like/dislike/laugh/emphasize/question) on a received message
 - `inkbox_mark_imessage_conversation_read` — send a read receipt and clear unread state
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["inkbox_send_imessage_reaction", "inkbox_mark_imessage_conversation_read"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["inkbox_send_imessage_reaction", "inkbox_mark_imessage_conversation_read"] } })
 ```
 
 (Enabling the `"imessage"` group turns all four on at once.) `inkbox_doctor` reports which tools are currently enabled or disabled.

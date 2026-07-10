@@ -18,10 +18,11 @@ Use this skill when managing who can reach the agent's Inkbox mailbox or phone n
 - `inkbox_update_phone_contact_rule`
 - `inkbox_delete_phone_contact_rule`
 
-None are enabled by default. The user must enable them in opencode.json — the `contact-rules` group covers all eight (exact tool names also work) — then restart opencode:
+None are enabled by default. The user must enable them in your .opencode/plugins/inkbox.ts wrapper — the `contact-rules` group covers all eight (exact tool names also work) — then restart opencode:
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["contact-rules"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["contact-rules"] } })
 ```
 
 If a rule tool is missing, run `inkbox_doctor` to see the enabled/disabled tool list, then tell the user what to add.

@@ -18,10 +18,11 @@ All six are enabled by default:
 - `inkbox_update_contact` — change an existing contact after you know its UUID
 - `inkbox_delete_contact` — delete a contact only after the target is explicit and confirmed
 
-There is no vCard export/import tool. Contact access tools, contact rule tools, and `inkbox_place_call` are opt-in — the user must enable them in opencode.json and restart opencode:
+There is no vCard export/import tool. Contact access tools, contact rule tools, and `inkbox_place_call` are opt-in — the user must enable them in your .opencode/plugins/inkbox.ts wrapper and restart opencode:
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["inkbox_place_call", "access", "contact-rules"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["inkbox_place_call", "access", "contact-rules"] } })
 ```
 
 Use access and rule tools only when the user explicitly asks to manage sharing or allow/block rules. `inkbox_doctor` reports which tools are enabled or disabled.

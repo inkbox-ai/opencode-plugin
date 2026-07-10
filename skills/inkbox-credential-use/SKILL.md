@@ -5,7 +5,7 @@ description: Use when the user asks the agent to "log into X", "get the API key 
 
 # Inkbox credential use
 
-When an action requires plaintext credentials (a password, an API key, an SSH key, a TOTP code), use this skill to retrieve them through the Inkbox vault. The vault tools are **all opt-in** — the user must enable them in opencode.json before this skill can do anything.
+When an action requires plaintext credentials (a password, an API key, an SSH key, a TOTP code), use this skill to retrieve them through the Inkbox vault. The vault tools are **all opt-in** — the user must enable them in your .opencode/plugins/inkbox.ts wrapper before this skill can do anything.
 
 ## Required tools (all opt-in)
 
@@ -17,8 +17,9 @@ When an action requires plaintext credentials (a password, an API key, an SSH ke
 
 Enabling: `inkbox_credentials_list` turns on with the `vault` group, but the four plaintext-returning tools are sensitive — each must be enabled by its exact name (group enable never turns them on). After editing opencode.json, opencode must be restarted:
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["vault", "inkbox_credentials_get_login", "inkbox_credentials_get_api_key", "inkbox_credentials_get_ssh_key", "inkbox_totp_code"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["vault", "inkbox_credentials_get_login", "inkbox_credentials_get_api_key", "inkbox_credentials_get_ssh_key", "inkbox_totp_code"] } })
 ```
 
 `inkbox_doctor` reports which of these are currently enabled or disabled, and whether the vault key is present.

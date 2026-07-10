@@ -5,14 +5,15 @@ export interface SetupOptions {
   print?: (line: string) => void;
 }
 
-// Non-interactive setup helper: prints the exact env vars and opencode.json
-// the gateway needs, reflecting whatever is already configured. Structured so
-// an interactive wizard (QR pairing, self-signup) could wrap this later; for
-// now it's a guidance printer that never blocks or prompts.
+// Non-interactive setup helper: prints the env vars and the local plugin
+// wrapper the gateway needs, reflecting whatever is already configured. This
+// plugin is distributed as source, so setup points at a cloned + built copy
+// rather than an npm package.
 export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): number {
   const print = opts.print ?? ((line: string) => console.log(line));
   const have = (value: unknown) => (value ? "set" : "MISSING");
   const serverUrl = config.gateway.serverUrl ?? DEFAULT_OPENCODE_SERVER_URL;
+  const clone = "/path/to/opencode-plugin";
 
   print("Inkbox opencode gateway — setup");
   print("");
@@ -27,10 +28,11 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("");
   print("   Get credentials at https://inkbox.ai/console.");
   print("");
-  print("2. opencode.json");
-  print("   Register the plugin and enable the gateway:");
+  print("2. Load the plugin");
+  print("   Clone + build the repo, then in your opencode project add");
+  print("   .opencode/plugins/inkbox.ts (installed from the local clone):");
   print("");
-  for (const line of pluginSnippet(serverUrl).split("\n")) print(`     ${line}`);
+  for (const line of wrapperSnippet(serverUrl).split("\n")) print(`     ${line}`);
   print("");
   print("3. Provisioning (done in the Inkbox console / CLI)");
   print("   - Provision a phone number and enable iMessage for your identity.");
@@ -38,28 +40,24 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("");
   print("4. Start it");
   print("     opencode serve --port 4096 &");
-  print("     inkbox-opencode start        # or `run` to stay in the foreground");
-  print("     inkbox-opencode status");
+  print(`     node ${clone}/bin/inkbox-opencode.js start   # or 'run' to stay foreground`);
+  print(`     node ${clone}/bin/inkbox-opencode.js status`);
   print("");
-  print("Run `inkbox-opencode doctor` to verify everything is wired up.");
+  print(`Run 'node ${clone}/bin/inkbox-opencode.js doctor' to verify everything is wired up.`);
   return 0;
 }
 
-function pluginSnippet(serverUrl: string): string {
-  const snippet = {
-    plugin: [
-      [
-        "@inkbox/opencode-plugin",
-        {
-          gateway: {
-            enabled: true,
-            mode: "sidecar",
-            serverUrl,
-            projectDirectory: "/path/to/agent/workspace",
-          },
-        },
-      ],
-    ],
-  };
-  return JSON.stringify(snippet, null, 2);
+function wrapperSnippet(serverUrl: string): string {
+  return [
+    'import InkboxPlugin from "@inkbox/opencode-plugin";',
+    "",
+    "export default async (input: any) => InkboxPlugin(input, {",
+    "  gateway: {",
+    "    enabled: true,",
+    '    mode: "sidecar",',
+    `    serverUrl: ${JSON.stringify(serverUrl)},`,
+    '    projectDirectory: "/path/to/agent/workspace",',
+    "  },",
+    "});",
+  ].join("\n");
 }

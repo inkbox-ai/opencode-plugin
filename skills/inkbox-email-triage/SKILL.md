@@ -17,10 +17,11 @@ Enabled by default:
 - `inkbox_get_email_thread` — pull the rest of a thread before replying
 - `inkbox_send_email` — send new mail or reply (always pass `inReplyToMessageId` when replying)
 
-Opt-in — `inkbox_mark_emails_read` (clear processed messages) and `inkbox_forward_email` (forward with original parts) must be enabled by the user in opencode.json, then opencode restarted:
+Opt-in — `inkbox_mark_emails_read` (clear processed messages) and `inkbox_forward_email` (forward with original parts) must be enabled by the user in your .opencode/plugins/inkbox.ts wrapper, then opencode restarted:
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["inkbox_mark_emails_read", "inkbox_forward_email"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["inkbox_mark_emails_read", "inkbox_forward_email"] } })
 ```
 
 (Enabling the `"email"` group turns both on at once.) `inkbox_doctor` reports which tools are currently enabled or disabled.

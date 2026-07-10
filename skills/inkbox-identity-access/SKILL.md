@@ -9,10 +9,11 @@ Use this skill when managing per-identity visibility for Inkbox contacts and not
 
 ## Enabling the tools
 
-All identity-access tools are opt-in. Enable the `access` group in opencode.json, then restart opencode:
+All identity-access tools are opt-in. Enable the `access` group in your .opencode/plugins/inkbox.ts wrapper, then restart opencode:
 
-```json
-"plugin": [["@inkbox/opencode-plugin", { "tools": { "enable": ["access"] } }]]
+```ts
+// in your .opencode/plugins/inkbox.ts wrapper:
+InkboxPlugin(input, { "tools": { "enable": ["access"] } })
 ```
 
 This enables `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, and `inkbox_revoke_note_access`. Run `inkbox_doctor` to confirm which tools are currently enabled.
