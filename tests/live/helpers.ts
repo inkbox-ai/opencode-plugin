@@ -5,13 +5,15 @@
 import { randomBytes } from "node:crypto";
 import { Inkbox } from "@inkbox/sdk";
 
-export const BASE_URL = process.env.INKBOX_BASE_URL ?? "https://inkbox.ai";
+// Truthy fallbacks, not ??: an unset GitHub `vars.*` arrives as an empty
+// string (not undefined), which nullish-coalescing would wrongly keep.
+export const BASE_URL = process.env.INKBOX_BASE_URL || "https://inkbox.ai";
 export const AUT_KEY = process.env.AUT_INKBOX_API_KEY;
 export const REMOTE_KEY = process.env.REMOTE_INKBOX_API_KEY;
 export const LIVE = Boolean(AUT_KEY && REMOTE_KEY);
 // "real" legs exercise a real model; "mock" legs prove the pipe for free.
 export const REAL_MODEL = process.env.LIVE_REAL_MODEL === "1";
-export const TIMEOUT_MS = Number(process.env.LIVE_REPLY_TIMEOUT_S ?? "150") * 1000;
+export const TIMEOUT_MS = Number(process.env.LIVE_REPLY_TIMEOUT_S || "150") * 1000;
 export const POLL_MS = 5000;
 
 // Strings that mean the agent replied with a failure instead of an answer.
