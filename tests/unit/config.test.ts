@@ -184,6 +184,43 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("gateway voice defaults", () => {
+    it("answers calls by default, with realtime off when no key exists", () => {
+      const cfg = resolveConfig({}, FULL_ENV);
+      expect(cfg.gateway.voice.enabled).toBe(true);
+      expect(cfg.gateway.voice.realtime.enabled).toBe(false);
+    });
+
+    it("auto-enables realtime when OPENAI_API_KEY or the dedicated var is set", () => {
+      const viaOpenai = resolveConfig({}, { ...FULL_ENV, OPENAI_API_KEY: "sk-x" });
+      expect(viaOpenai.gateway.voice.realtime.enabled).toBe(true);
+      const viaDedicated = resolveConfig({}, { ...FULL_ENV, INKBOX_REALTIME_API_KEY: "sk-y" });
+      expect(viaDedicated.gateway.voice.realtime.enabled).toBe(true);
+    });
+
+    it("lets explicit opt-outs beat the defaults and key presence", () => {
+      const envOff = resolveConfig(
+        {},
+        { ...FULL_ENV, OPENAI_API_KEY: "sk-x", INKBOX_REALTIME_ENABLED: "false" },
+      );
+      expect(envOff.gateway.voice.realtime.enabled).toBe(false);
+      const voiceOff = resolveConfig(
+        { gateway: { voice: { enabled: false } } },
+        { ...FULL_ENV, INKBOX_VOICE_ENABLED: "true" },
+      );
+      expect(voiceOff.gateway.voice.enabled).toBe(false);
+    });
+
+    it("respects a custom apiKeyEnvVar for the auto-enable check", () => {
+      const cfg = resolveConfig(
+        { gateway: { voice: { realtime: { apiKeyEnvVar: "MY_RT_KEY" } } } },
+        { ...FULL_ENV, MY_RT_KEY: "sk-z" },
+      );
+      expect(cfg.gateway.voice.realtime.enabled).toBe(true);
+      expect(cfg.gateway.voice.realtime.apiKeyEnvVar).toBe("MY_RT_KEY");
+    });
+  });
+
   describe("gateway managed serve", () => {
     it("defaults to the opencode binary on port 4097", () => {
       const cfg = resolveConfig({}, FULL_ENV);

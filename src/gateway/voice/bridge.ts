@@ -79,7 +79,10 @@ export function createCallBridge(deps: CallBridgeDeps) {
     // upgrade headers reflect a mode that will work. Transient API errors get
     // one retry; only then fall back to Inkbox speech (unless disabled).
     const rt = deps.config.gateway.voice.realtime;
-    const apiKey = rt.enabled ? process.env[rt.apiKeyEnvVar] : undefined;
+    // OPENAI_API_KEY backstops the dedicated var, matching config resolution.
+    const apiKey = rt.enabled
+      ? process.env[rt.apiKeyEnvVar] || process.env.OPENAI_API_KEY
+      : undefined;
     let realtime: RealtimeBridge | undefined;
     if (rt.enabled && apiKey) {
       for (let attempt = 1; attempt <= 2 && !realtime; attempt++) {

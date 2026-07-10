@@ -41,7 +41,7 @@ vi.mock("../../src/cli/setup.js", () => ({
 }));
 
 vi.mock("../../src/cli/env-file.js", () => ({
-  loadEnvFile: vi.fn(() => undefined),
+  loadEnvFile: vi.fn(() => []),
 }));
 
 vi.mock("../../src/cli/autostart.js", () => ({

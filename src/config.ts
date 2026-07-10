@@ -319,6 +319,12 @@ function resolveGatewayConfig(
   const voice = isRecord(opts.voice) ? opts.voice : {};
   const realtime = isRecord(voice.realtime) ? voice.realtime : {};
   const serve = isRecord(opts.serve) ? opts.serve : {};
+  // Realtime auto-enables when a usable key exists — the dedicated var or
+  // OPENAI_API_KEY, so an operator with one set needs no second env var.
+  const realtimeKeyEnvVar = nonEmptyString(realtime.apiKeyEnvVar) ?? "INKBOX_REALTIME_API_KEY";
+  const realtimeKeyPresent = Boolean(
+    nonEmptyString(env[realtimeKeyEnvVar]) ?? nonEmptyString(env.OPENAI_API_KEY),
+  );
   const envAllowedUsers = nonEmptyString(env.INKBOX_ALLOWED_USERS)
     ?.split(",")
     .map((s) => s.trim())
@@ -362,9 +368,11 @@ function resolveGatewayConfig(
         numeric(serve.port) ?? numeric(env.INKBOX_GATEWAY_SERVE_PORT) ?? DEFAULT_GATEWAY_SERVE_PORT,
     },
     voice: {
-      enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? false,
+      // Calls are an ordinary inbound channel, so answering defaults on with
+      // the gateway (Inkbox STT/TTS needs no extra key); explicit false wins.
+      enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? true,
       realtime: {
-        enabled: realtime.enabled ?? boolEnv(env.INKBOX_REALTIME_ENABLED) ?? false,
+        enabled: realtime.enabled ?? boolEnv(env.INKBOX_REALTIME_ENABLED) ?? realtimeKeyPresent,
         model:
           nonEmptyString(realtime.model) ??
           nonEmptyString(env.INKBOX_REALTIME_MODEL) ??
@@ -373,7 +381,7 @@ function resolveGatewayConfig(
           nonEmptyString(realtime.voice) ??
           nonEmptyString(env.INKBOX_REALTIME_VOICE) ??
           DEFAULT_REALTIME_VOICE,
-        apiKeyEnvVar: nonEmptyString(realtime.apiKeyEnvVar) ?? "INKBOX_REALTIME_API_KEY",
+        apiKeyEnvVar: realtimeKeyEnvVar,
         fallbackToInkboxSttTts:
           realtime.fallbackToInkboxSttTts ??
           boolEnv(env.INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS) ??

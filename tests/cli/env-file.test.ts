@@ -42,9 +42,9 @@ describe("envFileCandidates", () => {
 });
 
 describe("loadEnvFile", () => {
-  it("returns undefined when no candidate exists", () => {
+  it("returns an empty list when no candidate exists", () => {
     const env = makeEnv();
-    expect(loadEnvFile(env, cwd)).toBeUndefined();
+    expect(loadEnvFile(env, cwd)).toEqual([]);
   });
 
   it("loads ./.env, skipping comments and stripping export/quotes", () => {
@@ -60,7 +60,7 @@ describe("loadEnvFile", () => {
       ].join("\n"),
     );
     const env = makeEnv();
-    expect(loadEnvFile(env, cwd)).toBe(path.join(cwd, ".env"));
+    expect(loadEnvFile(env, cwd)).toEqual([path.join(cwd, ".env")]);
     expect(env.INKBOX_API_KEY).toBe("abc");
     expect(env.INKBOX_IDENTITY).toBe("agent");
     expect(env.INKBOX_BASE_URL).toBe("https://x.example");
@@ -74,19 +74,26 @@ describe("loadEnvFile", () => {
     expect(env.INKBOX_IDENTITY).toBe("bob");
   });
 
-  it("prefers the explicit INKBOX_OPENCODE_ENV_FILE over ./.env", () => {
+  it("layers all candidates: earlier files win per key, later ones fill gaps", () => {
     const explicit = path.join(home, "boot.env");
     fs.writeFileSync(explicit, "INKBOX_IDENTITY=explicit\n");
-    fs.writeFileSync(path.join(cwd, ".env"), "INKBOX_IDENTITY=cwd\n");
+    fs.writeFileSync(path.join(cwd, ".env"), "INKBOX_IDENTITY=cwd\nINKBOX_API_KEY=from-cwd\n");
+    fs.writeFileSync(path.join(home, ".env"), "INKBOX_BASE_URL=https://state.example\n");
     const env = makeEnv({ INKBOX_OPENCODE_ENV_FILE: explicit });
-    expect(loadEnvFile(env, cwd)).toBe(explicit);
-    expect(env.INKBOX_IDENTITY).toBe("explicit");
+    expect(loadEnvFile(env, cwd)).toEqual([
+      explicit,
+      path.join(cwd, ".env"),
+      path.join(home, ".env"),
+    ]);
+    expect(env.INKBOX_IDENTITY).toBe("explicit"); // explicit beats ./.env
+    expect(env.INKBOX_API_KEY).toBe("from-cwd"); // ./.env fills the gap
+    expect(env.INKBOX_BASE_URL).toBe("https://state.example"); // state dir fills the rest
   });
 
   it("falls back to the state-dir .env when ./.env is absent", () => {
     fs.writeFileSync(path.join(home, ".env"), "INKBOX_IDENTITY=state\n");
     const env = makeEnv();
-    expect(loadEnvFile(env, cwd)).toBe(path.join(home, ".env"));
+    expect(loadEnvFile(env, cwd)).toEqual([path.join(home, ".env")]);
     expect(env.INKBOX_IDENTITY).toBe("state");
   });
 });

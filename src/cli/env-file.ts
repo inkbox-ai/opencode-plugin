@@ -19,31 +19,34 @@ export function envFileCandidates(
   return candidates;
 }
 
-// Load the first candidate that exists into `env`, setting only vars that are
-// not already present. Returns the loaded path, or undefined when none exist.
+// Layer every candidate that exists into `env`, in precedence order — each
+// file only fills vars still missing, so an earlier file (and the real
+// environment above all) wins per key. Returns the loaded paths.
 export function loadEnvFile(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
-): string | undefined {
-  const file = envFileCandidates(env, cwd).find((p) => fs.existsSync(p));
-  if (!file) return undefined;
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf-8");
-  } catch {
-    return undefined;
+): string[] {
+  const loaded: string[] = [];
+  for (const file of envFileCandidates(env, cwd)) {
+    let text: string;
+    try {
+      text = fs.readFileSync(file, "utf-8");
+    } catch {
+      continue;
+    }
+    loaded.push(file);
+    for (const raw of text.split("\n")) {
+      let line = raw.trim();
+      if (!line || line.startsWith("#") || !line.includes("=")) continue;
+      if (line.startsWith("export ")) line = line.slice("export ".length);
+      const eq = line.indexOf("=");
+      const key = line.slice(0, eq).trim();
+      const value = line
+        .slice(eq + 1)
+        .trim()
+        .replace(/^['"]+|['"]+$/g, "");
+      if (key && env[key] === undefined) env[key] = value;
+    }
   }
-  for (const raw of text.split("\n")) {
-    let line = raw.trim();
-    if (!line || line.startsWith("#") || !line.includes("=")) continue;
-    if (line.startsWith("export ")) line = line.slice("export ".length);
-    const eq = line.indexOf("=");
-    const key = line.slice(0, eq).trim();
-    const value = line
-      .slice(eq + 1)
-      .trim()
-      .replace(/^['"]+|['"]+$/g, "");
-    if (key && env[key] === undefined) env[key] = value;
-  }
-  return file;
+  return loaded;
 }

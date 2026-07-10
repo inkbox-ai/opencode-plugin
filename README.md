@@ -249,10 +249,12 @@ inbound events. What it does:
   decline") and time out to a decline.
 - **Control commands** (whole-message): `/clear`, `/stop`, `/status`,
   `/health`, `/resume`, `/usage`.
-- **Voice** (when `gateway.voice.enabled`): the agent answers calls. With
-  `voice.realtime.enabled` and an OpenAI Realtime key
-  (`INKBOX_REALTIME_API_KEY`), calls run as a live raw-audio conversation with
-  in-call actions; otherwise Inkbox handles speech-to-text and text-to-speech.
+- **Voice** (on by default with the gateway): the agent answers calls. Realtime
+  auto-enables when an OpenAI key is present (`INKBOX_REALTIME_API_KEY`, or
+  `OPENAI_API_KEY` as the backstop) and runs the call as a live raw-audio
+  conversation with in-call actions; otherwise Inkbox handles speech-to-text
+  and text-to-speech. Opt out with `INKBOX_VOICE_ENABLED=false` (stop answering)
+  or `INKBOX_REALTIME_ENABLED=false` (force Inkbox STT/TTS).
   `inkbox_place_call` dials out with a purpose loaded into the call.
 
 Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
@@ -278,8 +280,9 @@ Install-time details:
 
 - `INKBOX_*` and `OPENAI_API_KEY` from the installing shell are snapshotted to
   `~/.inkbox-opencode/.env` (chmod 600) and loaded by the service; real
-  environment variables and `~/.inkbox/config` still win/backstop, and the
-  daemon also picks up a `./.env` in its working directory.
+  environment variables and `~/.inkbox/config` still win/backstop. A `./.env`
+  in the working directory layers underneath (see `.env.example`), filling any
+  vars the snapshot doesn't set.
 - A fork-based `inkbox-opencode start` daemon is stopped first so two gateways
   never fight over the tunnel.
 - To keep a Linux service alive while logged out, enable lingering once:

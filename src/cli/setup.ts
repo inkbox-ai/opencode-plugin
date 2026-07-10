@@ -27,6 +27,8 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   );
   print("");
   print("   Get credentials at https://inkbox.ai/console.");
+  print("   Optional knobs (voice, models, ports) live in .env.example —");
+  print("   copy it to your workspace as .env.");
   print("");
   print("2. Load the plugin");
   print("   Clone + build the repo, then in your opencode project add");
