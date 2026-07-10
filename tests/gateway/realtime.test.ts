@@ -154,6 +154,40 @@ describe("realtime function-call lifecycle", () => {
     expect(onHangup).toHaveBeenCalledTimes(1); // second press within window ends the call
   });
 
+  it("answers contact-read tools directly via onContactRead", async () => {
+    const fake = fakeSocket();
+    const onContactRead = vi.fn(async (kind: string) => `cards for ${kind}`);
+    openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: vi.fn(),
+        onConsult: vi.fn(async () => ""),
+        onContactRead,
+        onHangup: vi.fn(),
+        logger,
+      },
+      () => 0,
+      () => fake.ws as never,
+    );
+    fake.emit("open");
+    emitMessage(fake, {
+      type: "response.output_item.added",
+      item_id: "it-9",
+      item: { type: "function_call", call_id: "c-9", name: "inkbox_list_contacts" },
+    });
+    emitMessage(fake, {
+      type: "response.function_call_arguments.delta",
+      item_id: "it-9",
+      delta: '{"q":"ada"}',
+    });
+    emitMessage(fake, { type: "response.function_call_arguments.done", item_id: "it-9" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onContactRead).toHaveBeenCalledWith("list", { q: "ada" });
+    const out = fake.sent.find((s) => s.type === "conversation.item.create");
+    expect(out.item.output).toBe("cards for list");
+  });
+
   it("rejects ready when the socket closes before opening", async () => {
     const fake = fakeSocket();
     const bridge = openRealtimeBridge(

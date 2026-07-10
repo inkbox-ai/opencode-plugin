@@ -59,6 +59,24 @@ function contactDisplayName(contact: Contact): string | undefined {
   return full || undefined;
 }
 
+// Spoken-friendly summary of contact cards for direct reads on a live call.
+export function describeContacts(contacts: Contact[], max = 5): string {
+  if (contacts.length === 0) return "No matching contacts found.";
+  const lines = contacts.slice(0, max).map((c) => {
+    const name = contactDisplayName(c) ?? "Unnamed contact";
+    const bits = [c.companyName?.trim() ? `company ${c.companyName.trim()}` : ""];
+    const emails = (c.emails ?? []).map((e) => e.value).filter(Boolean);
+    const phones = (c.phones ?? []).map((p) => p.value).filter(Boolean);
+    if (emails.length) bits.push(`email ${emails.join(", ")}`);
+    if (phones.length) bits.push(`phone ${phones.join(", ")}`);
+    const notes = c.notes?.trim();
+    if (notes) bits.push(`notes: ${notes.length > 200 ? `${notes.slice(0, 200)}…` : notes}`);
+    return `${name} — ${bits.filter(Boolean).join("; ") || "no details on file"}`;
+  });
+  if (contacts.length > max) lines.push(`…and ${contacts.length - max} more matches.`);
+  return lines.join("\n");
+}
+
 // Resolves inbound sender addresses to Inkbox contacts and derives the
 // per-human session key. With an agent-scoped key, lookup results are
 // already access-filtered server-side.

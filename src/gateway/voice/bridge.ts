@@ -4,7 +4,12 @@ import { verifyWebhook } from "@inkbox/sdk";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { InkboxRuntime } from "../../client.js";
 import type { ResolvedConfig } from "../../config.js";
-import { type ContactResolver, contactCard, type ResolvedContact } from "../contacts.js";
+import {
+  type ContactResolver,
+  contactCard,
+  describeContacts,
+  type ResolvedContact,
+} from "../contacts.js";
 import type { GatewayLogger, SessionManager } from "../types.js";
 import { buildVoiceGreeting, buildVoiceInstructions, type CallMeta } from "./instructions.js";
 import { callEndedPrompt, createPostCallRegistry, postCallPrompt } from "./post-call.js";
@@ -202,6 +207,23 @@ export function createCallBridge(deps: CallBridgeDeps) {
           const answer = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${query}`);
           if (answer) ctx.transcript.push(`agent: ${answer}`);
           return answer ?? "Done.";
+        },
+        onContactRead: async (kind, args) => {
+          const client = await deps.inkbox.getClient();
+          if (kind === "list") {
+            const q = strOf(args.q);
+            return describeContacts(await client.contacts.list({ ...(q ? { q } : {}), limit: 5 }));
+          }
+          const filters = {
+            email: strOf(args.email),
+            phone: strOf(args.phone),
+            emailContains: strOf(args.emailContains),
+            phoneContains: strOf(args.phoneContains),
+          };
+          if (Object.values(filters).every((v) => v === undefined)) {
+            return "Provide one filter: email, phone, emailContains, or phoneContains.";
+          }
+          return describeContacts(await client.contacts.lookup(filters));
         },
         onHangup: () => {
           try {

@@ -7,6 +7,9 @@ export const REGISTER_ACTION_TOOL = "register_post_call_action";
 export const EDIT_ACTION_TOOL = "edit_post_call_action";
 export const DELETE_ACTION_TOOL = "delete_post_call_action";
 export const HANG_UP_TOOL = "hang_up_call";
+// Direct contact reads — instant answers on the live call, no agent loop.
+export const CONTACT_LOOKUP_TOOL = "inkbox_lookup_contact";
+export const CONTACT_LIST_TOOL = "inkbox_list_contacts";
 const HANGUP_WINDOW_MS = 10_000;
 
 export interface RealtimeConfig {
@@ -26,6 +29,9 @@ export interface RealtimeCallbacks {
   // Run a full agent turn in the caller's session; the returned text is
   // spoken back. Runs off the audio pump so speech never freezes.
   onConsult(query: string): Promise<string>;
+  // Direct contact read ("lookup" with filters, or "list" with q). Returns a
+  // spoken-friendly summary. Optional: without it the tools report failure.
+  onContactRead?(kind: "lookup" | "list", args: Record<string, unknown>): Promise<string>;
   // The model asked to end the call (after the two-step arm).
   onHangup(): void;
   logger: GatewayLogger;
@@ -82,6 +88,35 @@ export function realtimeTools() {
       description:
         "End the call. Call once to arm (say goodbye first), then again within a few seconds to actually hang up.",
       parameters: { type: "object", properties: {} },
+    },
+    {
+      type: "function",
+      name: CONTACT_LOOKUP_TOOL,
+      description:
+        "Look up a contact by exactly ONE filter: email, phone, emailContains, or " +
+        `phoneContains. Fast direct read. Use when the caller gives an email address or ` +
+        `phone number; to search by NAME use ${CONTACT_LIST_TOOL}.`,
+      parameters: {
+        type: "object",
+        properties: {
+          email: { type: "string", description: "Exact email address." },
+          phone: { type: "string", description: "Exact phone number, E.164 preferred." },
+          emailContains: { type: "string", description: "Substring of an email address." },
+          phoneContains: { type: "string", description: "Substring of a phone number." },
+        },
+      },
+    },
+    {
+      type: "function",
+      name: CONTACT_LIST_TOOL,
+      description:
+        "Search the contact book by name or free text. Fast direct read; returns up to " +
+        "five contact cards. Use when the caller asks who someone is or what email/phone " +
+        "is on file for a person, mentioning them by name.",
+      parameters: {
+        type: "object",
+        properties: { q: { type: "string", description: "Name or free-text search query." } },
+      },
     },
   ];
 }
@@ -285,6 +320,23 @@ export function openRealtimeBridge(
     }
     if (name === DELETE_ACTION_TOOL) {
       return respond(callId, registry.remove(String(args.id)) ? "Cancelled." : "No such action.");
+    }
+    if (name === CONTACT_LOOKUP_TOOL || name === CONTACT_LIST_TOOL) {
+      const kind = name === CONTACT_LOOKUP_TOOL ? "lookup" : "list";
+      const task = (async () => {
+        try {
+          const summary = cb.onContactRead
+            ? await cb.onContactRead(kind, args)
+            : "Contact reads are not available on this call.";
+          respond(callId, summary);
+        } catch (err) {
+          cb.logger.warn("realtime.contact_read_failed", { error: String(err) });
+          respond(callId, "The contact lookup failed.");
+        }
+      })();
+      consults.add(task);
+      void task.finally(() => consults.delete(task));
+      return;
     }
     if (name === CONSULT_TOOL) {
       // Run the agent turn off the audio pump so speech keeps flowing.

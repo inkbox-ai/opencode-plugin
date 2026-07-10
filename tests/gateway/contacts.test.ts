@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InkboxRuntime } from "../../src/client.js";
-import { createContactResolver, DEFAULT_CONTACT_CACHE_TTL_MS } from "../../src/gateway/contacts.js";
+import {
+  createContactResolver,
+  DEFAULT_CONTACT_CACHE_TTL_MS,
+  describeContacts,
+} from "../../src/gateway/contacts.js";
 import type { GatewayLogger } from "../../src/gateway/types.js";
 
 function makeContact(overrides: Record<string, unknown> = {}) {
@@ -27,6 +31,29 @@ function makeDeps(lookup: ReturnType<typeof vi.fn>) {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("describeContacts", () => {
+  it("summarizes cards with name, company, addresses, and notes", () => {
+    const out = describeContacts([
+      makeContact({
+        companyName: "Analytical Engines",
+        phones: [{ value: "+15550001111", label: null, isPrimary: true }],
+        notes: "Prefers morning calls.",
+      }) as never,
+    ]);
+    expect(out).toBe(
+      "Ada Lovelace — company Analytical Engines; email ada@example.com; " +
+        "phone +15550001111; notes: Prefers morning calls.",
+    );
+  });
+
+  it("reports an empty result and caps long lists", () => {
+    expect(describeContacts([])).toBe("No matching contacts found.");
+    const many = Array.from({ length: 7 }, (_, i) => makeContact({ id: `c-${i}` }) as never);
+    const out = describeContacts(many, 5);
+    expect(out).toContain("…and 2 more matches.");
+  });
 });
 
 describe("createContactResolver", () => {

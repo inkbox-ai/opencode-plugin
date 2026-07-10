@@ -1,6 +1,8 @@
 import type { ResolvedContact } from "../contacts.js";
 import {
   CONSULT_TOOL,
+  CONTACT_LIST_TOOL,
+  CONTACT_LOOKUP_TOOL,
   DELETE_ACTION_TOOL,
   EDIT_ACTION_TOOL,
   HANG_UP_TOOL,
@@ -79,7 +81,7 @@ export function buildVoiceInstructions(meta: CallMeta): string {
   } else {
     lines.push(
       "No matching contact record is loaded — you do NOT know who this is. " +
-        `Greet them neutrally; you may ask ${CONSULT_TOOL} to look them up by number if needed.`,
+        `Greet them neutrally; you may look them up by number with ${CONTACT_LOOKUP_TOOL} if needed.`,
     );
   }
 
@@ -106,6 +108,10 @@ export function buildVoiceInstructions(meta: CallMeta): string {
       `The text-based agent can: ${AGENT_CAPABILITIES.join("; ")}.`,
     `Do not promise work outside that list. If you are not sure something is possible, ` +
       `call ${CONSULT_TOOL} and ask instead of guessing.`,
+    `Exception — quick contact questions (who someone is, what email or phone is on ` +
+      `file): answer those yourself with ${CONTACT_LIST_TOOL} (search by name via q) or ` +
+      `${CONTACT_LOOKUP_TOOL} (exact email/phone), NOT ${CONSULT_TOOL}; the direct tools ` +
+      `answer instantly. Contact changes still go through ${CONSULT_TOOL} or after-call actions.`,
     "Never recite contact details or message history involving third parties to a " +
       "caller you have not recognized; offer a follow-up after the call instead.",
     `If the caller explicitly asks for work to happen after the call, or accepts an ` +

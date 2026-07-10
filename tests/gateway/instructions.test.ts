@@ -75,6 +75,13 @@ describe("buildVoiceInstructions", () => {
     expect(out).toContain("hang_up_call");
     expect(out).toContain("third parties");
   });
+
+  it("routes quick contact questions to the direct read tools", () => {
+    const out = buildVoiceInstructions(meta());
+    expect(out).toContain("inkbox_list_contacts");
+    expect(out).toContain("inkbox_lookup_contact");
+    expect(out).toContain("answer those yourself");
+  });
 });
 
 describe("buildVoiceGreeting", () => {
