@@ -332,7 +332,8 @@ function resolveGatewayConfig(
   return {
     enabled: opts.enabled === true,
     mode: opts.mode === "plugin" ? "plugin" : "sidecar",
-    projectDirectory: nonEmptyString(opts.projectDirectory),
+    projectDirectory:
+      nonEmptyString(opts.projectDirectory) ?? nonEmptyString(env.INKBOX_PROJECT_DIR),
     serverUrl: nonEmptyString(opts.serverUrl) ?? nonEmptyString(env.OPENCODE_SERVER_URL),
     host: nonEmptyString(opts.host) ?? nonEmptyString(env.INKBOX_GATEWAY_HOST) ?? "127.0.0.1",
     port: numeric(opts.port) ?? numeric(env.INKBOX_GATEWAY_PORT) ?? DEFAULT_GATEWAY_PORT,

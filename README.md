@@ -17,12 +17,19 @@ curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/inst
 
 This clones the plugin into `~/.inkbox-opencode/app`, builds it, installs it
 into your **global opencode config** (`~/.config/opencode`) with a plugin
-wrapper, and puts an `inkbox-opencode` launcher on your PATH. Re-running is
-safe — it updates in place. From a local checkout, run `./install.sh` instead;
-it uses the checkout in place.
+wrapper, puts an `inkbox-opencode` launcher on your PATH, and runs the
+**interactive setup wizard**: create a fresh Inkbox agent via self-signup (or
+bring an existing API key), enable iMessage, provision a dedicated phone
+number, wait for your START opt-in, validate an OpenAI key for Realtime
+voice, mint the webhook signing key, pick the agent's working directory, and
+offer to keep the gateway running on every boot. When it finishes, text,
+email, or call your agent and it answers.
 
-Then set credentials (below), run `inkbox-opencode doctor`, and restart
-opencode — the Inkbox tools load in every session.
+Re-running is safe — it updates in place (`--no-setup` installs only;
+`--start` launches the background gateway when done). From a local checkout,
+run `./install.sh` instead; it uses the checkout in place. Rerun the wizard
+anytime with `inkbox-opencode setup` (`setup --print` for the static
+checklist), and check the wiring with `inkbox-opencode doctor`.
 
 ### Manual install (per-project, or no installer)
 

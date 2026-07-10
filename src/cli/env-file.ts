@@ -19,6 +19,28 @@ export function envFileCandidates(
   return candidates;
 }
 
+// Set or replace one KEY=value line in an env file, creating the file (0600)
+// and its directory when missing. The wizard persists credentials with this.
+export function saveEnvVar(file: string, name: string, value: string): void {
+  let lines: string[] = [];
+  try {
+    lines = fs.readFileSync(file, "utf-8").split("\n");
+  } catch {
+    lines = [
+      "# Written by `inkbox-opencode setup`.",
+      "# Loaded by the gateway; real environment variables win.",
+    ];
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const line = `${name}=${value}`;
+  const idx = lines.findIndex((l) => l.startsWith(`${name}=`));
+  if (idx >= 0) lines[idx] = line;
+  else lines.push(line);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
 // Layer every candidate that exists into `env`, in precedence order — each
 // file only fills vars still missing, so an earlier file (and the real
 // environment above all) wins per key. Returns the loaded paths.

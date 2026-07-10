@@ -11,6 +11,7 @@ import { runDoctor } from "./doctor.js";
 import { loadEnvFile } from "./env-file.js";
 import { runForeground, runWhoami } from "./run.js";
 import { runSetup } from "./setup.js";
+import { runWizard } from "./wizard.js";
 
 // Plain human-readable logger for CLI/sidecar output. Structured extras are
 // appended compactly so foreground runs and daemon logs stay greppable.
@@ -38,7 +39,7 @@ Commands:
   autostart   Boot service management: autostart install | uninstall | status.
   doctor      Diagnose configuration and connectivity.
   whoami      Print the resolved Inkbox agent identity.
-  setup       Print the env vars and opencode.json the gateway needs.
+  setup       Interactive setup wizard (--print for the static checklist).
   uninstall   Stop the daemon, remove the boot service and local state.
 
 The gateway attaches to an opencode server at OPENCODE_SERVER_URL (or
@@ -83,8 +84,12 @@ export async function runCli(argv: string[]): Promise<number> {
       return runAutostart(argv[1]);
     case "whoami":
       return runWhoami(resolveConfig(undefined), cliLogger);
-    case "setup":
-      return runSetup(resolveConfig(undefined));
+    case "setup": {
+      // Interactive wizard on a terminal; static checklist when piped/--print.
+      const interactive = argv[1] !== "--print" && process.stdin.isTTY === true;
+      const config = resolveConfig(undefined);
+      return interactive ? runWizard(config) : runSetup(config);
+    }
     case "uninstall": {
       if (!uninstallAutostart()) console.log("No boot service installed.");
       return runUninstall();

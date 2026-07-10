@@ -5,10 +5,21 @@
 #
 # Clones (or updates) the plugin into ~/.inkbox-opencode/app, builds it,
 # installs it into your global opencode config (~/.config/opencode) with a
-# plugin wrapper, and puts an `inkbox-opencode` launcher on your PATH.
-# From a local checkout, run ./install.sh — it uses the checkout in place.
-# Re-running is safe: it updates the clone and reinstalls.
+# plugin wrapper, puts an `inkbox-opencode` launcher on your PATH, and runs
+# the interactive setup wizard. From a local checkout, run ./install.sh — it
+# uses the checkout in place. Re-running is safe: it updates and reinstalls.
+# Flags: --no-setup (install only), --start (start the background gateway).
 set -euo pipefail
+
+RUN_SETUP=1
+DO_START=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-setup) RUN_SETUP=0 ;;
+    --start) DO_START=1 ;;
+    *) printf 'unknown flag: %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
 
 REPO_SLUG="${INKBOX_OPENCODE_REPO:-inkbox-ai/opencode-plugin}"
 REPO_BRANCH="${INKBOX_OPENCODE_BRANCH:-main}"
@@ -63,6 +74,13 @@ mkdir -p "$OPENCODE_CONFIG_DIR/plugins"
   { [ -f package.json ] || npm init -y >/dev/null 2>&1; } &&
   npm install --silent --no-audit --no-fund --save "$TARBALL")
 
+# The packaged channel agent, so gateway sessions find it from any project.
+mkdir -p "$OPENCODE_CONFIG_DIR/agent"
+if [ ! -f "$OPENCODE_CONFIG_DIR/agent/inkbox-channel.md" ]; then
+  cp "$SOURCE_DIR/agents/inkbox-channel.md" "$OPENCODE_CONFIG_DIR/agent/"
+  say "Installed the inkbox-channel agent definition"
+fi
+
 WRAPPER="$OPENCODE_CONFIG_DIR/plugins/inkbox.ts"
 if [ -f "$WRAPPER" ]; then
   say "Keeping your existing plugin wrapper at $WRAPPER"
@@ -87,18 +105,34 @@ case ":$PATH:" in
   *) warn "$BIN_DIR is not on your PATH — add:  export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
-# --- 6. next steps ------------------------------------------------------------
+# --- 6. setup wizard ------------------------------------------------------------
+LAUNCHER="$BIN_DIR/inkbox-opencode"
+if [ "$RUN_SETUP" = "1" ]; then
+  # Read prompts from the terminal even when this script is piped to bash.
+  if [ -e /dev/tty ]; then
+    say "Running the setup wizard"
+    "$LAUNCHER" setup < /dev/tty ||
+      warn "setup did not finish; rerun anytime: inkbox-opencode setup"
+  else
+    warn "No terminal available (piped). Finish setup yourself: inkbox-opencode setup"
+  fi
+else
+  warn "Skipping setup (--no-setup). Run it later: inkbox-opencode setup"
+fi
+
+# --- done -----------------------------------------------------------------------
 cat <<EOF
 
-Installed. Next:
-
-  1. Credentials (or use ~/.inkbox/config):
-       export INKBOX_API_KEY=...     INKBOX_IDENTITY=...     INKBOX_SIGNING_KEY=...
-  2. Check the wiring:
-       inkbox-opencode doctor
-  3. Restart opencode — the Inkbox tools load in every session.
-  4. Optional always-on inbound gateway (replies to email/SMS/calls):
-       inkbox-opencode autostart install     # boot service; 'status' / 'uninstall' to manage
+inkbox-opencode is installed.
+  check:   inkbox-opencode doctor
+  daemon:  inkbox-opencode start | status | stop
+  boot:    inkbox-opencode autostart install
+  Restart opencode — the Inkbox tools load in every session.
 
 Docs: https://github.com/$REPO_SLUG#readme
 EOF
+
+if [ "$DO_START" = "1" ]; then
+  say "Starting the background gateway"
+  "$LAUNCHER" start || warn "Could not start; run 'inkbox-opencode doctor' then 'inkbox-opencode start'."
+fi

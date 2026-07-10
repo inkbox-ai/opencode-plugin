@@ -12,6 +12,7 @@ import { loadEnvFile } from "../../src/cli/env-file.js";
 import { runCli } from "../../src/cli/index.js";
 import { runForeground, runWhoami } from "../../src/cli/run.js";
 import { runSetup } from "../../src/cli/setup.js";
+import { runWizard } from "../../src/cli/wizard.js";
 
 // Config resolution is stubbed so dispatch tests never touch the real
 // environment or ~/.inkbox/config; the command impls ignore the value.
@@ -38,6 +39,10 @@ vi.mock("../../src/cli/doctor.js", () => ({
 
 vi.mock("../../src/cli/setup.js", () => ({
   runSetup: vi.fn(() => 0),
+}));
+
+vi.mock("../../src/cli/wizard.js", () => ({
+  runWizard: vi.fn(async () => 0),
 }));
 
 vi.mock("../../src/cli/env-file.js", () => ({
@@ -77,13 +82,29 @@ describe("runCli dispatch", () => {
 
   it("routes `whoami`, `setup`, and `uninstall`", async () => {
     await runCli(["whoami"]);
-    await runCli(["setup"]);
+    await runCli(["setup"]); // no TTY under vitest → static checklist
     await runCli(["uninstall"]);
     expect(runWhoami).toHaveBeenCalledTimes(1);
     expect(runSetup).toHaveBeenCalledTimes(1);
+    expect(runWizard).not.toHaveBeenCalled();
     expect(runUninstall).toHaveBeenCalledTimes(1);
     // Uninstall also tears down the boot service.
     expect(uninstallAutostart).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the interactive wizard for `setup` on a terminal", async () => {
+    const original = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      await runCli(["setup"]);
+      expect(runWizard).toHaveBeenCalledTimes(1);
+      expect(runSetup).not.toHaveBeenCalled();
+      // --print forces the checklist even on a terminal.
+      await runCli(["setup", "--print"]);
+      expect(runSetup).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: original, configurable: true });
+    }
   });
 
   it("reports the boot service as running even without a pid-file daemon", async () => {
