@@ -47,6 +47,13 @@ function makeManager() {
       create: vi.fn(async (_o: { body: { title: string }; query: { directory: string } }) => ({
         data: { id: `sess-${++created}` },
       })),
+      // Reused sessions are validated with get(); by default every id looks
+      // live and owned by this manager's directory.
+      get: vi.fn(
+        async (o: { path: { id: string }; query: { directory: string } }): Promise<unknown> => ({
+          data: { id: o.path.id, directory: "/proj" },
+        }),
+      ),
       prompt: vi.fn(
         async (_a: PromptArg): Promise<unknown> => ({
           data: { parts: [{ type: "text", text: "reply" }] },
@@ -101,6 +108,43 @@ describe("handleInbound", () => {
     await mgr.handleInbound(sms("second"));
     expect(opencode.session.create).toHaveBeenCalledTimes(1);
     expect(opencode.session.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a persisted session created in another directory and starts fresh", async () => {
+    const { mgr, opencode, state } = makeManager();
+    state.setSession("ck", "sess-old");
+    opencode.session.get.mockResolvedValueOnce({
+      data: { id: "sess-old", directory: "/somewhere/else" },
+    });
+
+    await mgr.handleInbound(sms("hello"));
+    expect(opencode.session.create).toHaveBeenCalledTimes(1);
+    expect(state.getSession("ck")).toBe("sess-1");
+    expect(opencode.session.prompt.mock.calls[0][0].path).toEqual({ id: "sess-1" });
+  });
+
+  it("drops a persisted session the server no longer knows and starts fresh", async () => {
+    const { mgr, opencode, state } = makeManager();
+    state.setSession("ck", "sess-gone");
+    opencode.session.get.mockResolvedValueOnce({ error: { name: "NotFound" } });
+
+    await mgr.handleInbound(sms("hello"));
+    expect(opencode.session.create).toHaveBeenCalledTimes(1);
+    expect(state.getSession("ck")).toBe("sess-1");
+  });
+
+  it("retries a failed prompt once on a brand-new session", async () => {
+    const { mgr, opencode, identity, state } = makeManager();
+    opencode.session.prompt
+      .mockResolvedValueOnce({ error: { name: "UnknownError" } })
+      .mockResolvedValueOnce({ data: { parts: [{ type: "text", text: "recovered" }] } });
+
+    await mgr.handleInbound(sms("hello"));
+    expect(opencode.session.create).toHaveBeenCalledTimes(2); // original + fresh retry
+    expect(state.getSession("ck")).toBe("sess-2");
+    expect(identity.sendText).toHaveBeenCalledTimes(1); // reply still delivered
+    const sent = identity.sendText.mock.calls[0][0] as { text: string };
+    expect(sent.text).toBe("recovered");
   });
 
   it("prompts against the stored session id, directory, and a text part", async () => {

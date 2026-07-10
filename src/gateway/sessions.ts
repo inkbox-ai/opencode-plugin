@@ -84,9 +84,30 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return entry;
   }
 
+  // A persisted session can rot: deleted server-side, or created against a
+  // different (possibly deleted) project directory in an earlier deployment.
+  // Prompting such a session 500s, so validate before reuse.
+  async function sessionUsable(id: string): Promise<boolean> {
+    try {
+      const res = await deps.opencode.session.get({
+        path: { id },
+        query: { directory: deps.directory },
+      });
+      if ((res as any)?.error) return false;
+      const dir = (res as any)?.data?.directory;
+      return dir === undefined || dir === deps.directory;
+    } catch {
+      return false;
+    }
+  }
+
   async function ensureSession(chatKey: string): Promise<string> {
     const existing = deps.state.getSession(chatKey);
-    if (existing) return existing;
+    if (existing) {
+      if (await sessionUsable(existing)) return existing;
+      deps.state.clearSession(chatKey);
+      deps.logger.warn("session.stale_dropped", { chatKey, sessionID: existing });
+    }
     const res = await deps.opencode.session.create({
       body: { title: `inkbox:${chatKey}` },
       query: { directory: deps.directory },
@@ -145,7 +166,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (turn.kind === "normal") entry.interruptNormal = false;
         try {
           const sessionID = await ensureSession(chatKey);
-          const out = await runPrompt(sessionID, turn.text, turn.agent);
+          let out: string | undefined;
+          try {
+            out = await runPrompt(sessionID, turn.text, turn.agent);
+          } catch (err) {
+            // A session that passed validation can still fail server-side
+            // (stale project state); one retry on a brand-new session keeps
+            // the contact reachable instead of failing the turn.
+            deps.logger.warn("turn.retry_fresh_session", { chatKey, error: String(err) });
+            deps.state.clearSession(chatKey);
+            out = await runPrompt(await ensureSession(chatKey), turn.text, turn.agent);
+          }
           // If a newer message interrupted this normal turn, drop its output.
           if (turn.kind === "normal" && entry.interruptNormal) {
             deps.logger.info("turn.interrupted", { chatKey });
