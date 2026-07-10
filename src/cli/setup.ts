@@ -1,5 +1,5 @@
 import type { ResolvedConfig } from "../config.js";
-import { DEFAULT_OPENCODE_SERVER_URL } from "./run.js";
+import { DEFAULT_OPENCODE_SERVER_URL } from "./serve.js";
 
 export interface SetupOptions {
   print?: (line: string) => void;
@@ -39,9 +39,16 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("   - Recipients must text START to your number to opt in to SMS.");
   print("");
   print("4. Start it");
-  print("     opencode serve --port 4096 &");
   print(`     node ${clone}/bin/inkbox-opencode.js start   # or 'run' to stay foreground`);
   print(`     node ${clone}/bin/inkbox-opencode.js status`);
+  print("   The gateway attaches to an `opencode serve` on :4096 if one is running;");
+  print(`   otherwise it launches its own managed server (port ${config.gateway.serve.port}).`);
+  print("");
+  print("5. Keep it running on boot (optional)");
+  print(`     node ${clone}/bin/inkbox-opencode.js autostart install`);
+  print("   Installs a systemd user service (Linux) or launchd agent (macOS) and");
+  print("   snapshots INKBOX_* / OPENAI_API_KEY from this shell to ~/.inkbox-opencode/.env.");
+  print("   To keep it alive while logged out on Linux: sudo loginctl enable-linger $USER");
   print("");
   print(`Run 'node ${clone}/bin/inkbox-opencode.js doctor' to verify everything is wired up.`);
   return 0;

@@ -48,4 +48,11 @@ describe("runSetup", () => {
     expect(out).toContain("START");
     expect(out).toContain("bin/inkbox-opencode.js doctor");
   });
+
+  it("documents the managed serve fallback and boot autostart", () => {
+    const { out } = render(makeConfig());
+    expect(out).toContain("autostart install");
+    expect(out).toMatch(/managed server \(port 4097\)/);
+    expect(out).toContain("loginctl enable-linger");
+  });
 });

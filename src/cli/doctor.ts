@@ -2,7 +2,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
-import { DEFAULT_OPENCODE_SERVER_URL, opencodeReachable } from "./run.js";
+import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
 
 export type Severity = "error" | "warning" | "info";
 
@@ -14,6 +14,8 @@ export interface Finding {
 export interface DoctorDeps {
   runtime?: InkboxRuntime;
   opencode?: OpencodeClient;
+  // Overrides the PATH lookup for the managed-serve binary check.
+  opencodeBinFound?: boolean;
   print?: (line: string) => void;
 }
 
@@ -68,19 +70,36 @@ export async function runDoctor(
     }
   }
 
-  const serverUrl = config.gateway.serverUrl ?? DEFAULT_OPENCODE_SERVER_URL;
+  // An explicitly configured server must answer; the default URL falling
+  // through to a managed `opencode serve` only needs the binary to exist.
+  const explicit = config.gateway.serverUrl;
+  const serverUrl = explicit ?? DEFAULT_OPENCODE_SERVER_URL;
   const opencode = deps.opencode ?? createOpencodeClient({ baseUrl: serverUrl });
   if (await opencodeReachable(opencode)) {
     add("info", `opencode server reachable at ${serverUrl}.`);
-  } else {
+  } else if (explicit) {
     add(
       "error",
-      `opencode server unreachable at ${serverUrl}. Start it with \`opencode serve\` and set gateway.serverUrl if it listens elsewhere.`,
+      `opencode server unreachable at ${serverUrl}. Start it with \`opencode serve\`, or drop gateway.serverUrl / OPENCODE_SERVER_URL to let the gateway launch its own.`,
     );
+  } else {
+    const { bin, port } = config.gateway.serve;
+    const found = deps.opencodeBinFound ?? opencodeBinAvailable(bin);
+    if (found) {
+      add(
+        "info",
+        `no opencode server at ${serverUrl}; the gateway will launch its own \`${bin} serve\` on port ${port}.`,
+      );
+    } else {
+      add(
+        "error",
+        `opencode binary "${bin}" not found on PATH — install opencode (npm install -g opencode-ai) or set gateway.serverUrl.`,
+      );
+    }
   }
 
   const ok = findings.every((f) => f.severity !== "error");
-  printReport(print, config, findings, serverUrl, ok);
+  printReport(print, config, findings, ok);
   return { ok, findings };
 }
 
@@ -88,10 +107,12 @@ function printReport(
   print: (line: string) => void,
   config: ResolvedConfig,
   findings: Finding[],
-  serverUrl: string,
   ok: boolean,
 ): void {
   const g = config.gateway;
+  const serverLine =
+    g.serverUrl ??
+    `${DEFAULT_OPENCODE_SERVER_URL} (default; managed \`${g.serve.bin} serve\` fallback on :${g.serve.port})`;
   print("Inkbox opencode gateway — doctor");
   print("");
   print("Findings:");
@@ -99,7 +120,7 @@ function printReport(
   print("");
   print("Resolved gateway settings:");
   print(`  mode:       ${g.mode}`);
-  print(`  serverUrl:  ${serverUrl}`);
+  print(`  serverUrl:  ${serverLine}`);
   print(`  publicUrl:  ${g.publicUrl ?? `(tunnel: ${g.tunnelName ?? "auto"})`}`);
   print(`  bind:       ${g.host}:${g.port}`);
   print(`  voice:      ${g.voice.enabled ? "enabled" : "disabled"}`);

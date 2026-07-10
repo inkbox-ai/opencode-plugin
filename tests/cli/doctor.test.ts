@@ -108,18 +108,49 @@ describe("runDoctor", () => {
     expect(messages).toContain("did not resolve");
   });
 
-  it("flags an unreachable opencode server as an error", async () => {
+  it("flags an unreachable explicitly-configured opencode server as an error", async () => {
     const { lines, print } = collect();
-    const result = await runDoctor(makeConfig(), {
-      runtime: healthyRuntime(),
-      opencode: unreachableOpencode(),
-      print,
-    });
+    const result = await runDoctor(
+      makeConfig({
+        gateway: { ...defaultGatewayConfig(), serverUrl: "http://127.0.0.1:59999" },
+      }),
+      {
+        runtime: healthyRuntime(),
+        opencode: unreachableOpencode(),
+        print,
+      },
+    );
     expect(result.ok).toBe(false);
     expect(
       result.findings.some((f) => f.severity === "error" && /unreachable/.test(f.message)),
     ).toBe(true);
     expect(lines.join("\n")).toContain("doctor: issues found");
+  });
+
+  it("treats a down default server as fine when the opencode binary exists", async () => {
+    const result = await runDoctor(makeConfig(), {
+      runtime: healthyRuntime(),
+      opencode: unreachableOpencode(),
+      opencodeBinFound: true,
+      print: () => {},
+    });
+    expect(result.ok).toBe(true);
+    expect(
+      result.findings.some((f) => f.severity === "info" && /launch its own/.test(f.message)),
+    ).toBe(true);
+  });
+
+  it("errors when nothing answers and the opencode binary is missing", async () => {
+    const result = await runDoctor(makeConfig(), {
+      runtime: healthyRuntime(),
+      opencode: unreachableOpencode(),
+      opencodeBinFound: false,
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((f) => f.severity === "error" && /not found on PATH/.test(f.message)),
+    ).toBe(true);
   });
 
   it("warns without failing when no signing key is set", async () => {

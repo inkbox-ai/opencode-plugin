@@ -1,7 +1,14 @@
 import { resolveConfig } from "../config.js";
 import type { GatewayLogger } from "../gateway/types.js";
+import {
+  type AutostartStatus,
+  autostartStatus,
+  installAutostart,
+  uninstallAutostart,
+} from "./autostart.js";
 import { daemonStatus, restartDaemon, runUninstall, startDaemon, stopDaemon } from "./daemon.js";
 import { runDoctor } from "./doctor.js";
+import { loadEnvFile } from "./env-file.js";
 import { runForeground, runWhoami } from "./run.js";
 import { runSetup } from "./setup.js";
 
@@ -27,13 +34,18 @@ Commands:
   start       Start the gateway as a background daemon.
   stop        Stop the background daemon.
   restart     Restart the background daemon.
-  status      Report whether the background daemon is running.
+  status      Report the background daemon and the boot service.
+  autostart   Boot service management: autostart install | uninstall | status.
   doctor      Diagnose configuration and connectivity.
   whoami      Print the resolved Inkbox agent identity.
   setup       Print the env vars and opencode.json the gateway needs.
-  uninstall   Stop the daemon and remove local gateway state.
+  uninstall   Stop the daemon, remove the boot service and local state.
 
-Credentials resolve from plugin options, env vars, then ~/.inkbox/config.
+The gateway attaches to an opencode server at OPENCODE_SERVER_URL (or
+http://127.0.0.1:4096); when neither answers it launches its own managed
+\`opencode serve\`. Credentials resolve from plugin options, env vars, an env
+file (INKBOX_OPENCODE_ENV_FILE, ./.env, ~/.inkbox-opencode/.env), then
+~/.inkbox/config.
 `;
 
 function isHelp(arg: string | undefined): boolean {
@@ -48,6 +60,10 @@ export async function runCli(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // Daemon-parity env loading: fill missing vars from the first env file so
+  // every command sees the same config the boot service would.
+  loadEnvFile();
+
   switch (command) {
     case "run":
       return runForeground(resolveConfig(undefined), cliLogger);
@@ -57,14 +73,22 @@ export async function runCli(argv: string[]): Promise<number> {
       return stopDaemon();
     case "restart":
       return restartDaemon();
-    case "status":
-      return daemonStatus();
+    case "status": {
+      const code = await daemonStatus();
+      const auto = autostartStatus();
+      printAutostart(auto);
+      return auto.active ? 0 : code;
+    }
+    case "autostart":
+      return runAutostart(argv[1]);
     case "whoami":
       return runWhoami(resolveConfig(undefined), cliLogger);
     case "setup":
       return runSetup(resolveConfig(undefined));
-    case "uninstall":
+    case "uninstall": {
+      if (!uninstallAutostart()) console.log("No boot service installed.");
       return runUninstall();
+    }
     case "doctor": {
       const { ok } = await runDoctor(resolveConfig(undefined));
       return ok ? 0 : 1;
@@ -72,6 +96,40 @@ export async function runCli(argv: string[]): Promise<number> {
     default:
       console.error(`Unknown command: ${command}\n`);
       console.error(USAGE);
+      return 2;
+  }
+}
+
+function printAutostart(auto: AutostartStatus): void {
+  if (!auto.supported) return;
+  if (!auto.installed) {
+    console.log("Boot service: not installed (`inkbox-opencode autostart install`).");
+    return;
+  }
+  const state = `${auto.enabled ? "enabled" : "disabled"}, ${auto.active ? "active" : "inactive"}`;
+  console.log(`Boot service: ${auto.path} (${state}).`);
+}
+
+async function runAutostart(action: string | undefined): Promise<number> {
+  switch (action ?? "status") {
+    case "install":
+      return (await installAutostart()) ? 0 : 1;
+    case "uninstall":
+      if (!uninstallAutostart()) console.log("No boot service installed.");
+      return 0;
+    case "status": {
+      const auto = autostartStatus();
+      if (!auto.supported) {
+        console.log("Boot autostart is not supported on this platform.");
+        return 1;
+      }
+      printAutostart(auto);
+      return auto.installed && auto.active ? 0 : 3;
+    }
+    default:
+      console.error(
+        `Unknown autostart action: ${action}\nUsage: inkbox-opencode autostart install | uninstall | status`,
+      );
       return 2;
   }
 }

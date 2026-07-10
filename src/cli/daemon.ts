@@ -205,8 +205,9 @@ export async function runUninstall(opts: DaemonOptions = {}): Promise<number> {
   removeFile(pidFile);
   removeFile(logFile);
   removeFile(path.join(home, "state.json"));
+  removeFile(path.join(home, ".env")); // credentials snapshot from `autostart install`
 
-  console.log("Removed local gateway state (pid, log, session map).");
+  console.log("Removed local gateway state (pid, log, session map, autostart env).");
   console.log("");
   console.log("To finish removing the gateway, do the following manually:");
   console.log("  1. Remove the .opencode/plugins/inkbox.ts wrapper (or its gateway options).");

@@ -183,4 +183,27 @@ describe("resolveConfig", () => {
       expect(neither.callWebsocketUrl).toBeUndefined();
     });
   });
+
+  describe("gateway managed serve", () => {
+    it("defaults to the opencode binary on port 4097", () => {
+      const cfg = resolveConfig({}, FULL_ENV);
+      expect(cfg.gateway.serve).toEqual({ bin: "opencode", port: 4097 });
+    });
+
+    it("resolves bin and port from env vars", () => {
+      const cfg = resolveConfig(
+        {},
+        { ...FULL_ENV, INKBOX_OPENCODE_BIN: "/opt/opencode", INKBOX_GATEWAY_SERVE_PORT: "5005" },
+      );
+      expect(cfg.gateway.serve).toEqual({ bin: "/opt/opencode", port: 5005 });
+    });
+
+    it("prefers gateway.serve options over env vars", () => {
+      const cfg = resolveConfig(
+        { gateway: { serve: { bin: "custom", port: 6006 } } },
+        { ...FULL_ENV, INKBOX_OPENCODE_BIN: "/opt/opencode", INKBOX_GATEWAY_SERVE_PORT: "5005" },
+      );
+      expect(cfg.gateway.serve).toEqual({ bin: "custom", port: 6006 });
+    });
+  });
 });

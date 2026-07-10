@@ -9,6 +9,7 @@ import {
   posixGuard,
   readPidFile,
   restartDaemon,
+  runUninstall,
   startDaemon,
   stopDaemon,
 } from "../../src/cli/daemon.js";
@@ -175,5 +176,20 @@ describe("restartDaemon", () => {
   it("aborts the restart when the platform guard blocks stop", async () => {
     setPlatform("win32");
     expect(await restartDaemon({ home })).toBe(1);
+  });
+});
+
+describe("runUninstall", () => {
+  it("removes pid, log, session map, and the autostart env snapshot", async () => {
+    fs.mkdirSync(home, { recursive: true });
+    const files = ["gateway.pid", "gateway.log", "state.json", ".env"].map((f) =>
+      path.join(home, f),
+    );
+    // A dead pid so uninstall doesn't try to signal anything real.
+    fs.writeFileSync(files[0], "999999\n");
+    for (const f of files.slice(1)) fs.writeFileSync(f, "x\n");
+    const { send } = fakeProcess(false);
+    expect(await runUninstall({ home, send })).toBe(0);
+    for (const f of files) expect(fs.existsSync(f)).toBe(false);
   });
 });

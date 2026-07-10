@@ -204,15 +204,21 @@ channel. It is off by default.
 
 Two ways to run it:
 
-- **Sidecar (recommended)** — a companion process alongside a running
-  `opencode serve`:
+- **Sidecar (recommended)** — a self-contained companion process:
 
   ```bash
-  opencode serve --port 4096 &
   node /path/to/opencode-plugin/bin/inkbox-opencode.js run
   # or manage it as a daemon:
   node /path/to/opencode-plugin/bin/inkbox-opencode.js start | status | stop
   ```
+
+  The sidecar needs an opencode server and finds one on its own: an explicit
+  `gateway.serverUrl` / `OPENCODE_SERVER_URL` must answer; otherwise it
+  attaches to a server already on `http://127.0.0.1:4096`, and failing that it
+  launches its own managed `opencode serve` (port `4097` by default; tune with
+  `gateway.serve.{bin,port}` or `INKBOX_OPENCODE_BIN` /
+  `INKBOX_GATEWAY_SERVE_PORT`). A managed server is stopped with the gateway,
+  and its death takes the gateway down so a service manager restarts the pair.
 
 - **In-plugin** — set `gateway.mode` to `"plugin"` and run inside
   `opencode serve` itself. This needs the Inkbox tunnel to work under the host
@@ -251,6 +257,38 @@ inbound events. What it does:
 
 Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
 identity, signing key, opencode server, tunnel/public URL).
+
+### Keep it running (boot autostart)
+
+Like the claude-code and codex bridges, the gateway can install itself as a
+boot/login service so the agent stays reachable without a shell:
+
+```bash
+node /path/to/opencode-plugin/bin/inkbox-opencode.js autostart install
+node /path/to/opencode-plugin/bin/inkbox-opencode.js autostart status | uninstall
+```
+
+On Linux this writes and enables a **systemd user unit**
+(`~/.config/systemd/user/inkbox-opencode.service`); on macOS, a **launchd
+agent** (`~/Library/LaunchAgents/ai.inkbox.opencode.plist`). The service runs
+`inkbox-opencode run` from the directory you installed in, launching its own
+managed `opencode serve` — one service is the whole always-on stack.
+
+Install-time details:
+
+- `INKBOX_*` and `OPENAI_API_KEY` from the installing shell are snapshotted to
+  `~/.inkbox-opencode/.env` (chmod 600) and loaded by the service; real
+  environment variables and `~/.inkbox/config` still win/backstop, and the
+  daemon also picks up a `./.env` in its working directory.
+- A fork-based `inkbox-opencode start` daemon is stopped first so two gateways
+  never fight over the tunnel.
+- To keep a Linux service alive while logged out, enable lingering once:
+  `sudo loginctl enable-linger $USER`.
+- `inkbox-opencode status` reports both the background daemon and the boot
+  service; `inkbox-opencode uninstall` removes the service and local state.
+
+One identity gets one tunnel: don't run an always-on gateway on the same
+identity your CI live suites use, or they will contend for it.
 
 ## Development
 

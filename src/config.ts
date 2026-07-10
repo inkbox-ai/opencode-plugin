@@ -82,6 +82,13 @@ export interface GatewayOptions {
   // opencode agent override keyed by contact id or channel name (contact id
   // wins); falls back to the gateway-wide agent.
   channelAgents?: Record<string, string>;
+  // Managed `opencode serve`: when no serverUrl is configured and nothing
+  // answers on the default URL, the sidecar launches its own server with
+  // this binary and port.
+  serve?: {
+    bin?: string;
+    port?: number;
+  };
   voice?: {
     enabled?: boolean;
     realtime?: {
@@ -116,6 +123,10 @@ export interface ResolvedGatewayConfig {
   textBatchWindowMs: number;
   channelPrompts: Record<string, string>;
   channelAgents: Record<string, string>;
+  serve: {
+    bin: string;
+    port: number;
+  };
   voice: {
     enabled: boolean;
     realtime: {
@@ -292,6 +303,9 @@ export function defaultGatewayConfig(): ResolvedGatewayConfig {
 }
 
 export const DEFAULT_GATEWAY_PORT = 8767;
+// Off the interactive default (4096) so the managed server never races a
+// user-run `opencode serve` for the same bind.
+export const DEFAULT_GATEWAY_SERVE_PORT = 4097;
 export const DEFAULT_PERMISSION_TIMEOUT_S = 600;
 export const DEFAULT_REALTIME_MODEL = "gpt-realtime-2";
 export const DEFAULT_REALTIME_VOICE = "cedar";
@@ -304,6 +318,7 @@ function resolveGatewayConfig(
   const opts: GatewayOptions = isRecord(options) ? (options as GatewayOptions) : {};
   const voice = isRecord(opts.voice) ? opts.voice : {};
   const realtime = isRecord(voice.realtime) ? voice.realtime : {};
+  const serve = isRecord(opts.serve) ? opts.serve : {};
   const envAllowedUsers = nonEmptyString(env.INKBOX_ALLOWED_USERS)
     ?.split(",")
     .map((s) => s.trim())
@@ -341,6 +356,11 @@ function resolveGatewayConfig(
       numeric(opts.textBatchWindowMs) ?? numeric(env.INKBOX_TEXT_BATCH_WINDOW_MS) ?? 0,
     channelPrompts: stringRecord(opts.channelPrompts),
     channelAgents: stringRecord(opts.channelAgents),
+    serve: {
+      bin: nonEmptyString(serve.bin) ?? nonEmptyString(env.INKBOX_OPENCODE_BIN) ?? "opencode",
+      port:
+        numeric(serve.port) ?? numeric(env.INKBOX_GATEWAY_SERVE_PORT) ?? DEFAULT_GATEWAY_SERVE_PORT,
+    },
     voice: {
       enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? false,
       realtime: {
