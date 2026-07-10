@@ -15,11 +15,18 @@ export interface CommandDeps {
 // Whole-message control commands texted by the human. Returns the reply text
 // to send back, or null when the message is not a command (so it flows to a
 // normal turn). Commands are recognized only as the ENTIRE message.
+// A command may offer a follow-up: `resume` carries the ordered session ids
+// the next numeric reply selects from.
+export interface CommandResult {
+  reply: string;
+  resume?: string[];
+}
+
 export async function handleCommand(
   deps: CommandDeps,
   chatKey: string,
   message: string,
-): Promise<string | null> {
+): Promise<string | CommandResult | null> {
   const cmd = message.trim().toLowerCase();
   if (!cmd.startsWith("/")) return null;
   const word = cmd.split(/\s+/)[0];
@@ -61,16 +68,19 @@ function formatHealth(h: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-async function resumeList(deps: CommandDeps): Promise<string> {
+async function resumeList(deps: CommandDeps): Promise<string | CommandResult> {
   try {
     const res = await deps.opencode.session.list({ query: { directory: deps.directory } });
     const list = ((res as any)?.data ?? res ?? []) as Array<{ id: string; title?: string }>;
     const recent = list.slice(0, 5);
     if (recent.length === 0) return "No recent conversations.";
-    return [
-      "Recent conversations (reply with a number to resume):",
-      ...recent.map((s, i) => `${i + 1}. ${s.title ?? s.id}`),
-    ].join("\n");
+    return {
+      reply: [
+        "Recent conversations (reply with a number to resume):",
+        ...recent.map((s, i) => `${i + 1}. ${s.title ?? s.id}`),
+      ].join("\n"),
+      resume: recent.map((s) => s.id),
+    };
   } catch (err) {
     deps.logger.warn("command.resume_failed", { error: String(err) });
     return "Couldn't list recent conversations.";

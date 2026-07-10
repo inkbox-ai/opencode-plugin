@@ -19,6 +19,8 @@ export interface RealtimeConfig {
 export interface RealtimeCallbacks {
   // Play μ-law audio (base64) back to the caller.
   onAudio(base64Ulaw: string): void;
+  // A spoken response finished; flush the caller-side playback.
+  onAudioDone?(): void;
   // Run a full agent turn in the caller's session; the returned text is
   // spoken back. Runs off the audio pump so speech never freezes.
   onConsult(query: string): Promise<string>;
@@ -85,9 +87,18 @@ export function realtimeTools() {
 export interface RealtimeBridge {
   // Feed caller μ-law audio (base64) into the model.
   pushAudio(base64Ulaw: string): void;
+  // Trigger the opening response once the caller leg is connected.
+  start(): void;
   close(): Promise<void>;
-  // Resolves when the socket is ready (session configured).
+  // Resolves when the session is configured, rejects if the socket fails to
+  // open — so the caller can fall back to Inkbox speech before committing.
   ready: Promise<void>;
+}
+
+interface FnCall {
+  callId: string;
+  name: string;
+  args: string;
 }
 
 // Open a bidirectional bridge to the OpenAI Realtime API. Caller audio is
@@ -109,12 +120,20 @@ export function openRealtimeBridge(
   );
   const hangup = createHangupArmer(HANGUP_WINDOW_MS, now);
   const consults = new Set<Promise<void>>();
+  // Function calls arrive across three events: output_item.added carries the
+  // name + call id, arguments.delta streams the JSON, arguments.done fires the
+  // dispatch. Accumulate by item/call id.
+  const fnCalls = new Map<string, FnCall>();
+  let opened = false;
   let resolveReady: () => void;
-  const ready = new Promise<void>((r) => {
-    resolveReady = r;
+  let rejectReady: (err: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
   });
 
   ws.on("open", () => {
+    opened = true;
     ws.send(
       JSON.stringify({
         type: "session.update",
@@ -130,9 +149,8 @@ export function openRealtimeBridge(
         },
       }),
     );
-    // Speak the opening proactively rather than waiting for the caller — a
-    // silent callee (voicemail) still hears the opening message.
-    ws.send(JSON.stringify({ type: "response.create" }));
+    // The opening response is triggered by start() once the caller leg is up,
+    // so the greeting audio isn't produced before there's anywhere to play it.
     resolveReady();
   });
 
@@ -148,21 +166,63 @@ export function openRealtimeBridge(
       case "response.audio.delta":
         if (typeof evt.delta === "string") cb.onAudio(evt.delta);
         break;
-      case "response.function_call_arguments.done":
-        void dispatchFunctionCall(evt);
+      case "response.output_audio.done":
+      case "response.audio.done":
+        cb.onAudioDone?.();
         break;
+      case "response.output_item.added": {
+        const item = evt.item ?? {};
+        if (item.type === "function_call") {
+          const key = evt.item_id ?? item.id ?? item.call_id ?? "";
+          fnCalls.set(key, {
+            callId: item.call_id ?? "",
+            name: item.name ?? "",
+            args: item.arguments ?? "",
+          });
+        }
+        break;
+      }
+      case "response.function_call_arguments.delta": {
+        const key = evt.item_id ?? evt.call_id ?? "";
+        const entry = fnCalls.get(key) ?? { callId: evt.call_id ?? "", name: "", args: "" };
+        if (!entry.callId && evt.call_id) entry.callId = evt.call_id;
+        if (typeof evt.delta === "string") entry.args += evt.delta;
+        fnCalls.set(key, entry);
+        break;
+      }
+      case "response.function_call_arguments.done": {
+        const key = evt.item_id ?? evt.call_id ?? "";
+        const entry = fnCalls.get(key) ?? fnCalls.get(evt.call_id ?? "");
+        fnCalls.delete(key);
+        void dispatchFunctionCall({
+          name: entry?.name ?? evt.name ?? "",
+          call_id: entry?.callId ?? evt.call_id ?? "",
+          arguments: entry?.args || evt.arguments || "",
+        });
+        break;
+      }
       case "error":
         cb.logger.warn("realtime.error", { message: String(evt.error?.message ?? "") });
         break;
     }
   });
 
-  ws.on("close", () => cb.logger.info("realtime.closed", {}));
-  ws.on("error", (err) => cb.logger.warn("realtime.socket_error", { error: String(err) }));
+  ws.on("close", () => {
+    cb.logger.info("realtime.closed", {});
+    if (!opened) rejectReady(new Error("realtime socket closed before open"));
+  });
+  ws.on("error", (err) => {
+    cb.logger.warn("realtime.socket_error", { error: String(err) });
+    if (!opened) rejectReady(err instanceof Error ? err : new Error(String(err)));
+  });
 
-  async function dispatchFunctionCall(evt: any): Promise<void> {
-    const name: string = evt.name;
-    const callId: string = evt.call_id;
+  async function dispatchFunctionCall(evt: {
+    name: string;
+    call_id: string;
+    arguments: string;
+  }): Promise<void> {
+    const name = evt.name;
+    const callId = evt.call_id;
     let args: any = {};
     try {
       args = evt.arguments ? JSON.parse(evt.arguments) : {};
@@ -220,6 +280,11 @@ export function openRealtimeBridge(
     pushAudio(base64Ulaw) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Ulaw }));
+      }
+    },
+    start() {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response.create" }));
       }
     },
     ready,

@@ -17,6 +17,9 @@ interface QueuedTurn {
   text: string;
   deliver: boolean;
   replyTarget?: ReplyTarget;
+  // True for a follow-up turn enqueued after a delivery failure, so a second
+  // failure doesn't spawn another recovery (bounded to one attempt).
+  recovered?: boolean;
   resolve: (out: string | undefined) => void;
   reject: (err: unknown) => void;
 }
@@ -109,9 +112,24 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             continue;
           }
           if (turn.deliver && turn.replyTarget && out !== undefined) {
-            await deliverReply(deps.inkbox, turn.replyTarget, out, deps.logger).catch((err) => {
+            try {
+              await deliverReply(deps.inkbox, turn.replyTarget, out, deps.logger);
+            } catch (err) {
               deps.logger.error("reply.failed", { chatKey, error: String(err) });
-            });
+              // One bounded recovery turn: tell the agent the send failed so it
+              // can shorten or switch channel. A recovery that also fails stops.
+              if (!turn.recovered && turn.replyTarget) {
+                entry.queue.push({
+                  kind: "normal",
+                  text: `Your previous reply could not be delivered (${err instanceof Error ? err.message : String(err)}). Send a shorter plain-text reply, or handle it another way.`,
+                  deliver: true,
+                  replyTarget: turn.replyTarget,
+                  recovered: true,
+                  resolve: () => {},
+                  reject: () => {},
+                });
+              }
+            }
           }
           turn.resolve(out);
         } catch (err) {

@@ -133,7 +133,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     },
   });
 
-  const events = subscribeEvents(opts.opencode, escalation, logger);
+  const events = subscribeEvents(opts.opencode, escalation, logger, opts.directory);
 
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
     return dispatchEvent(
@@ -164,8 +164,17 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       .catch((err) => logger.warn("external.turn_failed", { error: String(err) }));
   }
 
+  // Session ids a /resume awaits a numeric selection from, per contact.
+  const resumeCandidates = new Map<string, string[]>();
+
+  async function say(chatKey: string, text: string): Promise<void> {
+    const target = lastTarget.get(chatKey);
+    if (target) await deliverReply(opts.inkbox, target, text, logger).catch(() => {});
+  }
+
   // Intercept inbound before it becomes a turn: (1) a pending escalation
-  // answer consumes the message; (2) a control command replies directly.
+  // answer consumes the message; (2) a /resume selection; (3) a control
+  // command replies directly.
   function wrapSessions() {
     return {
       ...sessions,
@@ -178,6 +187,21 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           rfcMessageId: msg.rfcMessageId,
         });
         if (pending.tryConsume(msg.chatKey, msg.text)) return;
+
+        // A bare number right after /resume selects a session to switch to.
+        const candidates = resumeCandidates.get(msg.chatKey);
+        if (candidates) {
+          resumeCandidates.delete(msg.chatKey);
+          const pick = Number.parseInt(msg.text.trim(), 10);
+          const chosen = Number.isInteger(pick) ? candidates[pick - 1] : undefined;
+          if (chosen) {
+            state.setSession(msg.chatKey, chosen);
+            await say(msg.chatKey, "Resumed that conversation. Go ahead.");
+            return;
+          }
+          // Not a valid pick — fall through and treat as a normal message.
+        }
+
         const commandReply = await handleCommand(
           {
             opencode: opts.opencode,
@@ -191,8 +215,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           msg.text,
         );
         if (commandReply !== null) {
-          const target = lastTarget.get(msg.chatKey);
-          if (target) await deliverReply(opts.inkbox, target, commandReply, logger).catch(() => {});
+          const result = typeof commandReply === "string" ? { reply: commandReply } : commandReply;
+          if (result.resume && result.resume.length > 0) {
+            resumeCandidates.set(msg.chatKey, result.resume);
+          }
+          await say(msg.chatKey, result.reply);
           return;
         }
         await sessions.handleInbound(msg);
@@ -230,6 +257,7 @@ function subscribeEvents(
   opencode: OpencodeClient,
   escalation: ReturnType<typeof createEscalationBridge>,
   logger: GatewayLogger,
+  directory: string,
 ): { close(): void } {
   let stopped = false;
   (async () => {
@@ -237,7 +265,9 @@ function subscribeEvents(
     // gateway's lifetime — re-subscribe with a short backoff until closed.
     while (!stopped) {
       try {
-        const stream = await opencode.event.subscribe();
+        // Scope the stream to the gateway's project so permission events for
+        // its sessions are actually delivered.
+        const stream = await opencode.event.subscribe({ query: { directory } });
         for await (const evt of iterate(stream)) {
           if (stopped) break;
           const payload = (evt as any)?.payload ?? evt;

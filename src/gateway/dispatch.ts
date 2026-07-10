@@ -236,7 +236,11 @@ async function handleInbound(
     return true;
   }
 
-  await deps.sessions.handleInbound(msg);
+  // Kick off the turn without blocking the webhook response — a model run can
+  // take minutes, and holding the HTTP request open makes the provider retry.
+  void deps.sessions
+    .handleInbound(msg)
+    .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
 }
 
@@ -263,17 +267,19 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
     conversationId,
     from,
   });
-  await deps.sessions.handleInbound({
-    channel: "imessage",
-    chatKey,
-    from,
-    conversationId,
-    contactId,
-    contactName,
-    text: `[reaction: ${reaction}]`,
-    mediaPaths: [],
-    messageId: str(r?.id),
-  });
+  void deps.sessions
+    .handleInbound({
+      channel: "imessage",
+      chatKey,
+      from,
+      conversationId,
+      contactId,
+      contactName,
+      text: `[reaction: ${reaction}]`,
+      mediaPaths: [],
+      messageId: str(r?.id),
+    })
+    .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
 }
 
@@ -309,9 +315,11 @@ async function handleDeliveryFailure(
     from,
   });
   const reason = str(r?.error_detail) ?? str(r?.error_code) ?? str(r?.error_reason) ?? type;
-  await deps.sessions.runCapture(
-    chatKey,
-    `A message to ${from} failed to deliver (${type}: ${reason}). Consider retrying or switching channel.`,
-  );
+  void deps.sessions
+    .runCapture(
+      chatKey,
+      `A message to ${from} failed to deliver (${type}: ${reason}). Consider retrying or switching channel.`,
+    )
+    .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
 }

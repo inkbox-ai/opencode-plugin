@@ -66,20 +66,22 @@ export function callEndedPrompt(transcript: string): string {
 // to actually end the call (the first call arms it, letting the model say
 // goodbye first).
 export function createHangupArmer(windowMs: number, now: () => number) {
-  let armedAt = 0;
+  // null (not a timestamp) marks "not armed", so a clock value of 0 is still a
+  // valid arm time.
+  let armedAt: number | null = null;
   return {
     // Returns true when this call should actually end.
     press(): boolean {
       const t = now();
-      if (armedAt > 0 && t - armedAt <= windowMs) {
-        armedAt = 0;
+      if (armedAt !== null && t - armedAt <= windowMs) {
+        armedAt = null;
         return true;
       }
       armedAt = t;
       return false;
     },
     armed(): boolean {
-      return armedAt > 0;
+      return armedAt !== null;
     },
   };
 }

@@ -140,7 +140,11 @@ describe("/resume", () => {
 
     const out = await handleCommand(deps, "ck", "/resume");
     expect(list).toHaveBeenCalledWith({ query: { directory: "/proj" } });
-    expect(out).toContain("1. Trip planning");
-    expect(out).toContain("2. s2");
+    // /resume returns a structured result carrying the ordered session ids the
+    // next numeric reply selects from.
+    const result = out as { reply: string; resume?: string[] };
+    expect(result.reply).toContain("1. Trip planning");
+    expect(result.reply).toContain("2. s2");
+    expect(result.resume).toEqual(["s1", "s2"]);
   });
 });
