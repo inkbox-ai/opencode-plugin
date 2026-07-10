@@ -335,8 +335,8 @@ function resolveGatewayConfig(
       numeric(env.INKBOX_PERMISSION_TIMEOUT_S) ??
       DEFAULT_PERMISSION_TIMEOUT_S,
     mediaDir: nonEmptyString(opts.mediaDir) ?? nonEmptyString(env.INKBOX_OPENCODE_MEDIA_DIR),
-    agent: nonEmptyString(opts.agent),
-    model: nonEmptyString(opts.model),
+    agent: nonEmptyString(opts.agent) ?? nonEmptyString(env.INKBOX_GATEWAY_AGENT),
+    model: nonEmptyString(opts.model) ?? nonEmptyString(env.INKBOX_GATEWAY_MODEL),
     textBatchWindowMs:
       numeric(opts.textBatchWindowMs) ?? numeric(env.INKBOX_TEXT_BATCH_WINDOW_MS) ?? 0,
     channelPrompts: stringRecord(opts.channelPrompts),

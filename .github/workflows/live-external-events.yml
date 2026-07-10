@@ -1,0 +1,83 @@
+name: Live — external events (webhook → agent acts)
+
+# Boots the AUT gateway with external events enabled, POSTs a signed
+# GitHub-shaped webhook at its local listener instructing it to text the
+# remote identity, and verifies the SMS actually arrives. Real model + real
+# send, so this runs only on ready (non-draft) PRs + dispatch, and shares the
+# AUT tunnel lock with the other live suites.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the agent's SMS"
+        default: "200"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  external-events:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive).
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install -g opencode-ai@latest
+
+      - name: Boot the AUT gateway (real model, external events on)
+        env:
+          MODE: real
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INKBOX_WEBHOOK_SECRET_GITHUB: ${{ secrets.LIVE_GITHUB_WEBHOOK_SECRET }}
+        run: bash scripts/live-aut.sh
+
+      - name: Run external-event test
+        env:
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          INKBOX_WEBHOOK_SECRET_GITHUB: ${{ secrets.LIVE_GITHUB_WEBHOOK_SECRET }}
+          LIVE_REAL_MODEL: "1"
+          LIVE_REPLY_TIMEOUT_S: ${{ github.event.inputs.timeout_s || '200' }}
+        run: |
+          npx vitest run --config vitest.live.config.ts tests/live/external-event.test.ts
+
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$AUT_GATEWAY_LOG" || true
+          echo "=== serve.log ===";   tail -n 100 "$AUT_SERVE_LOG" || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$AUT_GATEWAY_PID" 2>/dev/null || true
+          kill "$AUT_SERVE_PID" 2>/dev/null || true
+
+      - name: Upload artifacts (on failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-events-logs
+          retention-days: 5
+          path: |
+            ${{ env.AUT_GATEWAY_LOG }}
+            ${{ env.AUT_SERVE_LOG }}
+          if-no-files-found: ignore
