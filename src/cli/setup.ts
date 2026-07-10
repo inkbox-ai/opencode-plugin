@@ -13,7 +13,6 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   const print = opts.print ?? ((line: string) => console.log(line));
   const have = (value: unknown) => (value ? "set" : "MISSING");
   const serverUrl = config.gateway.serverUrl ?? DEFAULT_OPENCODE_SERVER_URL;
-  const clone = "/path/to/opencode-plugin";
 
   print("Inkbox opencode gateway — setup");
   print("");
@@ -31,8 +30,8 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("   copy it to your workspace as .env.");
   print("");
   print("2. Load the plugin");
-  print("   Clone + build the repo, then in your opencode project add");
-  print("   .opencode/plugins/inkbox.ts (installed from the local clone):");
+  print("   The installer (install.sh) wires the global ~/.config/opencode for");
+  print("   you. For a per-project setup, add .opencode/plugins/inkbox.ts:");
   print("");
   for (const line of wrapperSnippet(serverUrl).split("\n")) print(`     ${line}`);
   print("");
@@ -41,18 +40,18 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("   - Recipients must text START to your number to opt in to SMS.");
   print("");
   print("4. Start it");
-  print(`     node ${clone}/bin/inkbox-opencode.js start   # or 'run' to stay foreground`);
-  print(`     node ${clone}/bin/inkbox-opencode.js status`);
+  print("     inkbox-opencode start   # or 'run' to stay foreground");
+  print("     inkbox-opencode status");
   print("   The gateway attaches to an `opencode serve` on :4096 if one is running;");
   print(`   otherwise it launches its own managed server (port ${config.gateway.serve.port}).`);
   print("");
   print("5. Keep it running on boot (optional)");
-  print(`     node ${clone}/bin/inkbox-opencode.js autostart install`);
+  print("     inkbox-opencode autostart install");
   print("   Installs a systemd user service (Linux) or launchd agent (macOS) and");
   print("   snapshots INKBOX_* / OPENAI_API_KEY from this shell to ~/.inkbox-opencode/.env.");
   print("   To keep it alive while logged out on Linux: sudo loginctl enable-linger $USER");
   print("");
-  print(`Run 'node ${clone}/bin/inkbox-opencode.js doctor' to verify everything is wired up.`);
+  print("Run 'inkbox-opencode doctor' to verify everything is wired up.");
   return 0;
 }
 

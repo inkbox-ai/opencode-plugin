@@ -8,6 +8,7 @@ import {
   pidAlive,
   posixGuard,
   readPidFile,
+  removeLauncherSymlinks,
   restartDaemon,
   runUninstall,
   startDaemon,
@@ -179,6 +180,26 @@ describe("restartDaemon", () => {
   });
 });
 
+describe("removeLauncherSymlinks", () => {
+  it("removes only symlinks that resolve into an Inkbox checkout", () => {
+    const bin = path.join(home, "bin");
+    const app = path.join(home, "inkbox-opencode-app");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(app, { recursive: true });
+    fs.writeFileSync(path.join(app, "cli.js"), "#!/usr/bin/env node\n");
+
+    const ours = path.join(bin, "inkbox-opencode");
+    fs.symlinkSync(path.join(app, "cli.js"), ours);
+    expect(removeLauncherSymlinks([bin])).toEqual([ours]);
+    expect(fs.existsSync(ours)).toBe(false);
+
+    // A same-named real file (not ours) is left alone.
+    fs.writeFileSync(ours, "someone else's binary\n");
+    expect(removeLauncherSymlinks([bin])).toEqual([]);
+    expect(fs.existsSync(ours)).toBe(true);
+  });
+});
+
 describe("runUninstall", () => {
   it("removes pid, log, session map, and the autostart env snapshot", async () => {
     fs.mkdirSync(home, { recursive: true });
@@ -189,7 +210,7 @@ describe("runUninstall", () => {
     fs.writeFileSync(files[0], "999999\n");
     for (const f of files.slice(1)) fs.writeFileSync(f, "x\n");
     const { send } = fakeProcess(false);
-    expect(await runUninstall({ home, send })).toBe(0);
+    expect(await runUninstall({ home, send, launcherDirs: [] })).toBe(0);
     for (const f of files) expect(fs.existsSync(f)).toBe(false);
   });
 });

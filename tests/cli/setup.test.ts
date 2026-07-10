@@ -46,7 +46,7 @@ describe("runSetup", () => {
     const { out } = render(makeConfig());
     expect(out).toMatch(/iMessage/i);
     expect(out).toContain("START");
-    expect(out).toContain("bin/inkbox-opencode.js doctor");
+    expect(out).toContain("inkbox-opencode doctor");
   });
 
   it("documents the managed serve fallback and boot autostart", () => {

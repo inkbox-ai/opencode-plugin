@@ -8,20 +8,38 @@ contacts, notes, and an encrypted credential vault — as native opencode tools.
 
 ## Install
 
-This plugin is distributed as source — clone and build it, then load it from a
-local wrapper. Build the clone:
+One line (needs git, Node 20+, and npm; the opencode CLI itself for
+sessions and the gateway's managed server):
 
 ```bash
-git clone https://github.com/inkbox-ai/opencode-plugin.git
-cd opencode-plugin
-npm install && npm run build
+curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh | bash
+```
+
+This clones the plugin into `~/.inkbox-opencode/app`, builds it, installs it
+into your **global opencode config** (`~/.config/opencode`) with a plugin
+wrapper, and puts an `inkbox-opencode` launcher on your PATH. Re-running is
+safe — it updates in place. From a local checkout, run `./install.sh` instead;
+it uses the checkout in place.
+
+Then set credentials (below), run `inkbox-opencode doctor`, and restart
+opencode — the Inkbox tools load in every session.
+
+### Manual install (per-project, or no installer)
+
+The plugin is distributed as source — clone and build it, then load it from a
+local wrapper:
+
+```bash
+git clone https://github.com/inkbox-ai/opencode-plugin.git ~/.inkbox-opencode/app
+cd ~/.inkbox-opencode/app
+npm install && npm run build && npm pack
 ```
 
 Then, from your opencode project (or your global `~/.config/opencode`
-directory), install the built clone and add a one-file plugin wrapper:
+directory), install the packed build and add a one-file plugin wrapper:
 
 ```bash
-npm install /path/to/opencode-plugin   # the clone you just built
+npm install ~/.inkbox-opencode/app/inkbox-opencode-plugin-*.tgz
 mkdir -p .opencode/plugins
 ```
 
@@ -138,7 +156,7 @@ directory with one config line:
 
 ```json
 {
-  "skills": { "paths": ["/path/to/opencode-plugin/skills"] }
+  "skills": { "paths": ["$HOME/.inkbox-opencode/app/skills"] }
 }
 ```
 
@@ -207,9 +225,9 @@ Two ways to run it:
 - **Sidecar (recommended)** — a self-contained companion process:
 
   ```bash
-  node /path/to/opencode-plugin/bin/inkbox-opencode.js run
+  inkbox-opencode run
   # or manage it as a daemon:
-  node /path/to/opencode-plugin/bin/inkbox-opencode.js start | status | stop
+  inkbox-opencode start | status | stop
   ```
 
   The sidecar needs an opencode server and finds one on its own: an explicit
@@ -266,8 +284,8 @@ Like the claude-code and codex bridges, the gateway can install itself as a
 boot/login service so the agent stays reachable without a shell:
 
 ```bash
-node /path/to/opencode-plugin/bin/inkbox-opencode.js autostart install
-node /path/to/opencode-plugin/bin/inkbox-opencode.js autostart status | uninstall
+inkbox-opencode autostart install
+inkbox-opencode autostart status | uninstall
 ```
 
 On Linux this writes and enables a **systemd user unit**

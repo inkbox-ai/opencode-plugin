@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { gatewayHome } from "../gateway/state.js";
 
@@ -22,6 +23,8 @@ export interface DaemonOptions {
   entry?: string;
   // Injectable signal sender; defaults to process.kill.
   send?: SendSignal;
+  // Dirs scanned for the launcher symlink on uninstall; tests use a sandbox.
+  launcherDirs?: string[];
 }
 
 export interface DaemonPaths {
@@ -194,6 +197,30 @@ export async function restartDaemon(opts: DaemonOptions = {}): Promise<number> {
   return startDaemon(opts);
 }
 
+// Remove the installer's `inkbox-opencode` launcher from the given dirs; only
+// unlinks symlinks that resolve into an Inkbox checkout, never a stranger's
+// binary of the same name. Returns the removed paths.
+export function removeLauncherSymlinks(
+  dirs: string[] = [
+    path.join(os.homedir(), ".local", "bin"),
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean),
+  ],
+): string[] {
+  const removed: string[] = [];
+  for (const dir of new Set(dirs)) {
+    const link = path.join(dir, "inkbox-opencode");
+    try {
+      if (fs.lstatSync(link).isSymbolicLink() && fs.realpathSync(link).includes("inkbox")) {
+        fs.rmSync(link);
+        removed.push(link);
+      }
+    } catch {
+      /* absent or unreadable — nothing to remove */
+    }
+  }
+  return removed;
+}
+
 // Stop the daemon and delete local gateway state, then point the user at the
 // manual steps (env vars, opencode.json) the CLI can't undo for them.
 export async function runUninstall(opts: DaemonOptions = {}): Promise<number> {
@@ -208,6 +235,9 @@ export async function runUninstall(opts: DaemonOptions = {}): Promise<number> {
   removeFile(path.join(home, ".env")); // credentials snapshot from `autostart install`
 
   console.log("Removed local gateway state (pid, log, session map, autostart env).");
+  for (const link of removeLauncherSymlinks(opts.launcherDirs)) {
+    console.log(`Removed launcher ${link}`);
+  }
   console.log("");
   console.log("To finish removing the gateway, do the following manually:");
   console.log("  1. Remove the .opencode/plugins/inkbox.ts wrapper (or its gateway options).");
