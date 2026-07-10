@@ -42,6 +42,7 @@ console.log(boxes[0].emailAddress.split('@')[0]);
 echo "AUT handle: $HANDLE"
 
 echo "==> staging project in $WORKDIR"
+mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 git init -q . 2>/dev/null || true
 npm init -y >/dev/null 2>&1 || true
@@ -84,8 +85,16 @@ fi
 SERVE_LOG="$WORKDIR/serve.log"
 GATEWAY_LOG="$WORKDIR/gateway.log"
 
+# The plugin's TOOLS run inside the opencode server, so its credentials must
+# live here too — not only on the sidecar. Without this, an agent tool call
+# like inkbox_send_sms 401s while sidecar-delivered replies still work.
 echo "==> starting opencode serve on :$SERVE_PORT"
-(cd "$WORKDIR" && nohup opencode serve --port "$SERVE_PORT" > "$SERVE_LOG" 2>&1 &
+(cd "$WORKDIR" && \
+  INKBOX_API_KEY="$AUT_INKBOX_API_KEY" \
+  INKBOX_IDENTITY="$HANDLE" \
+  INKBOX_SIGNING_KEY="$AUT_INKBOX_SIGNING_KEY" \
+  INKBOX_BASE_URL="$BASE_URL" \
+  nohup opencode serve --port "$SERVE_PORT" > "$SERVE_LOG" 2>&1 &
  echo $! > "$WORKDIR/serve.pid")
 for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:$SERVE_PORT/config" >/dev/null 2>&1 && break
