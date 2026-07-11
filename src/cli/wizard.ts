@@ -86,6 +86,7 @@ const errText = (err: unknown): string => (err instanceof Error ? err.message : 
 // node readline can leak the markers into the answer — which turns a pasted
 // verification code or API key into permanent rejection. Strip them.
 export function sanitizePasted(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching the ESC byte is the point
   return value.replace(/\u001b?\[\s*20[01]~/g, "");
 }
 
