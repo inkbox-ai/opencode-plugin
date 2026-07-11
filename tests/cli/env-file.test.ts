@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { envFileCandidates, loadEnvFile } from "../../src/cli/env-file.js";
+import { envFileCandidates, loadEnvFile, saveEnvVar } from "../../src/cli/env-file.js";
 
 let cwd: string;
 let home: string;
@@ -95,5 +95,35 @@ describe("loadEnvFile", () => {
     const env = makeEnv();
     expect(loadEnvFile(env, cwd)).toEqual([path.join(home, ".env")]);
     expect(env.INKBOX_IDENTITY).toBe("state");
+  });
+
+  it("records which file supplied each var, and nothing for shell-env vars", () => {
+    fs.writeFileSync(path.join(cwd, ".env"), "INKBOX_API_KEY=from-file\nINKBOX_IDENTITY=bob\n");
+    const env = makeEnv({ INKBOX_API_KEY: "from-shell" });
+    const sources = new Map<string, string>();
+    loadEnvFile(env, cwd, sources);
+    expect(sources.get("INKBOX_IDENTITY")).toBe(path.join(cwd, ".env"));
+    expect(sources.has("INKBOX_API_KEY")).toBe(false); // shell won; no file source
+  });
+});
+
+describe("saveEnvVar", () => {
+  it("replaces a hand-written `export NAME=` line instead of shadowing it", () => {
+    const file = path.join(home, ".env");
+    fs.writeFileSync(file, "export INKBOX_API_KEY=old\nINKBOX_IDENTITY=bob\n");
+    saveEnvVar(file, "INKBOX_API_KEY", "new");
+    const env = makeEnv();
+    loadEnvFile(env, cwd);
+    expect(env.INKBOX_API_KEY).toBe("new"); // first-occurrence-wins load must see the new value
+    expect(env.INKBOX_IDENTITY).toBe("bob");
+  });
+
+  it("collapses duplicate lines for the same var down to the saved value", () => {
+    const file = path.join(home, ".env");
+    fs.writeFileSync(file, "export INKBOX_API_KEY=older\nINKBOX_API_KEY=old\n");
+    saveEnvVar(file, "INKBOX_API_KEY", "new");
+    const text = fs.readFileSync(file, "utf-8");
+    expect(text.match(/INKBOX_API_KEY/g)).toHaveLength(1);
+    expect(text).toContain("INKBOX_API_KEY=new");
   });
 });

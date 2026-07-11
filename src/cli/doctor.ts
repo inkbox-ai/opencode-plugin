@@ -16,6 +16,10 @@ export interface DoctorDeps {
   opencode?: OpencodeClient;
   // Overrides the PATH lookup for the managed-serve binary check.
   opencodeBinFound?: boolean;
+  // Provenance inputs for the credentials block: the process env plus the
+  // per-var file-source map recorded by loadEnvFile at CLI start.
+  env?: NodeJS.ProcessEnv;
+  envSources?: Map<string, string>;
   print?: (line: string) => void;
 }
 
@@ -99,14 +103,46 @@ export async function runDoctor(
   }
 
   const ok = findings.every((f) => f.severity !== "error");
-  printReport(print, config, findings, ok);
+  const creds = credentialLines(config, deps.env ?? process.env, deps.envSources ?? new Map());
+  printReport(print, config, findings, creds, ok);
   return { ok, findings };
+}
+
+// Name the source each resolved credential actually came from — a stale
+// shell export shadowing the wizard-written env file is invisible otherwise.
+function credentialLines(
+  config: ResolvedConfig,
+  env: NodeJS.ProcessEnv,
+  sources: Map<string, string>,
+): string[] {
+  const from = (value: string, ...names: string[]): string => {
+    for (const name of names) {
+      if (env[name] === value) return sources.get(name) ?? `shell environment ($${name})`;
+    }
+    return "plugin options or ~/.inkbox/config";
+  };
+  const secret = (v: string) => `…${v.slice(-6)}`;
+  return [
+    config.apiKey
+      ? `  api key:     ${secret(config.apiKey)}  — from ${from(config.apiKey, "INKBOX_API_KEY")}`
+      : "  api key:     (not set)",
+    config.identity
+      ? `  identity:    ${config.identity}  — from ${from(config.identity, "INKBOX_IDENTITY", "INKBOX_AGENT_IDENTITY", "INKBOX_AGENT_HANDLE")}`
+      : "  identity:    (not set)",
+    config.signingKey
+      ? `  signing key: ${secret(config.signingKey)}  — from ${from(config.signingKey, "INKBOX_SIGNING_KEY")}`
+      : "  signing key: (not set)",
+    ...(config.baseUrl
+      ? [`  base url:    ${config.baseUrl}  — from ${from(config.baseUrl, "INKBOX_BASE_URL")}`]
+      : []),
+  ];
 }
 
 function printReport(
   print: (line: string) => void,
   config: ResolvedConfig,
   findings: Finding[],
+  creds: string[],
   ok: boolean,
 ): void {
   const g = config.gateway;
@@ -117,6 +153,9 @@ function printReport(
   print("");
   print("Findings:");
   for (const f of findings) print(`  [${MARK[f.severity]}] ${f.message}`);
+  print("");
+  print("Credentials (resolved):");
+  for (const line of creds) print(line);
   print("");
   print("Resolved gateway settings:");
   print(`  mode:       ${g.mode}`);

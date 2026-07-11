@@ -325,6 +325,81 @@ describe("runWizard", () => {
     expect(savedEnv(d.envFilePath).INKBOX_REALTIME_ENABLED).toBe("false");
   });
 
+  it("warns when a differing shell export will shadow the saved key", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO([
+      false, // no key → signup
+      "me@example.com",
+      "test-agent",
+      "123456",
+      false, // iMessage no
+      false, // provision no
+      false, // have signing key? no
+      true, // mint
+      "", // project dir
+      false, // no boot autostart
+      false, // no background start
+    ]);
+    const d = deps(world, io, { env: { INKBOX_API_KEY: "ApiKey_stale" } });
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    const out = lines.join("\n");
+    expect(out).toContain("your shell exports INKBOX_API_KEY");
+    expect(out).toContain("unset INKBOX_API_KEY");
+    expect(savedEnv(d.envFilePath).INKBOX_API_KEY).toBe("ApiKey_new"); // file still gets the fresh key
+  });
+
+  it("points at the higher-precedence env file that shadows a saved var", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO([
+      false, // no key → signup
+      "me@example.com",
+      "test-agent",
+      "123456",
+      false, // iMessage no
+      false, // provision no
+      false, // have signing key? no
+      true, // mint
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io, {
+      env: { INKBOX_API_KEY: "ApiKey_stale" },
+      envSources: new Map([["INKBOX_API_KEY", "/somewhere/.env"]]),
+    });
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    const out = lines.join("\n");
+    expect(out).toContain("/somewhere/.env");
+    expect(out).toContain("loads ahead of");
+  });
+
+  it("stays quiet when the old value lives in the wizard's own env file", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO([
+      false, // no key → signup
+      "me@example.com",
+      "test-agent",
+      "123456",
+      false, // iMessage no
+      false, // provision no
+      false, // have signing key? no
+      true, // mint
+      "",
+      false,
+      false,
+    ]);
+    const envFilePath = path.join(tmp, ".env");
+    const d = deps(world, io, {
+      env: { INKBOX_API_KEY: "ApiKey_stale" },
+      envSources: new Map([["INKBOX_API_KEY", envFilePath]]),
+    });
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    const out = lines.join("\n");
+    expect(out).not.toContain("warning: your shell exports");
+    expect(out).not.toContain("loads ahead of");
+    expect(savedEnv(envFilePath).INKBOX_API_KEY).toBe("ApiKey_new");
+  });
+
   it("keeps going when number provisioning is rejected (plan gating)", async () => {
     const world = fakeWorld();
     world.identity.provisionPhoneNumber.mockRejectedValueOnce(new Error("payment required"));

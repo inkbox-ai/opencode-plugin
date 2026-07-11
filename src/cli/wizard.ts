@@ -37,6 +37,9 @@ export interface WizardDeps {
   io?: WizardIO;
   env?: NodeJS.ProcessEnv;
   envFilePath?: string;
+  // Which env vars were filled from which env file at CLI start (see
+  // loadEnvFile). Vars set in `env` but absent here came from the shell.
+  envSources?: Map<string, string>;
   sdk?: (baseUrl: string | undefined) => WizardSdk;
   fetchFn?: typeof fetch;
   installAutostartFn?: typeof installAutostart;
@@ -48,7 +51,9 @@ export interface WizardDeps {
 interface Ctx {
   io: WizardIO;
   env: NodeJS.ProcessEnv;
+  initialEnv: NodeJS.ProcessEnv;
   envFile: string;
+  envSources: Map<string, string>;
   sdk: WizardSdk;
   baseUrl: string | undefined;
   fetchFn: typeof fetch;
@@ -100,8 +105,10 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
   const c: Ctx = {
     io,
     env,
+    initialEnv: { ...env },
     envFile:
       deps.envFilePath ?? env.INKBOX_OPENCODE_ENV_FILE ?? path.join(gatewayHome(env), ".env"),
+    envSources: deps.envSources ?? new Map(),
     sdk: (deps.sdk ?? defaultSdk)(baseUrl),
     baseUrl,
     fetchFn: deps.fetchFn ?? fetch,
@@ -119,7 +126,29 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
 
 function save(c: Ctx, name: string, value: string): void {
   saveEnvVar(c.envFile, name, value);
+  warnIfShadowed(c, name, value);
   c.env[name] = value; // later steps (and autostart's snapshot) see it live
+}
+
+// A var already set when the process started keeps winning over the file we
+// just wrote (real env > earlier env files > the wizard's file), so a stale
+// shell export or higher-precedence .env silently undoes the setup for every
+// future process — the classic symptom is a wizard that works end-to-end
+// followed by a doctor/gateway that 401s with an old key.
+function warnIfShadowed(c: Ctx, name: string, value: string): void {
+  const previous = c.initialEnv[name];
+  if (previous === undefined || previous === value) return;
+  const source = c.envSources.get(name);
+  if (source && path.resolve(source) === path.resolve(c.envFile)) return; // just replaced it
+  const { io } = c;
+  if (source) {
+    io.print(`  warning: ${name} is also set in ${source}, which loads ahead of`);
+    io.print(`  ${c.envFile} — remove it there or that stale value wins.`);
+  } else {
+    io.print(`  warning: your shell exports ${name}, which overrides the value just`);
+    io.print("  saved for every new process (doctor, the gateway). Remove the export");
+    io.print(`  from your shell profile (e.g. ~/.zshrc) and run \`unset ${name}\`.`);
+  }
 }
 
 async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {

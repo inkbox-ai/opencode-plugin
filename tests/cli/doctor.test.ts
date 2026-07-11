@@ -165,6 +165,25 @@ describe("runDoctor", () => {
     ).toBe(true);
   });
 
+  it("names the source each credential resolved from, without leaking secrets", async () => {
+    const { lines, print } = collect();
+    await runDoctor(
+      makeConfig({ apiKey: "ApiKey_abcdef123456", identity: "agent", signingKey: undefined }),
+      {
+        runtime: healthyRuntime(),
+        opencode: reachableOpencode(),
+        env: { INKBOX_API_KEY: "ApiKey_abcdef123456", INKBOX_IDENTITY: "agent" },
+        envSources: new Map([["INKBOX_API_KEY", "/home/u/.inkbox-opencode/.env"]]),
+        print,
+      },
+    );
+    const out = lines.join("\n");
+    expect(out).toContain("…123456  — from /home/u/.inkbox-opencode/.env");
+    expect(out).toContain("agent  — from shell environment ($INKBOX_IDENTITY)");
+    expect(out).toContain("signing key: (not set)");
+    expect(out).not.toContain("ApiKey_abcdef123456"); // only the suffix is shown
+  });
+
   it("echoes the resolved gateway settings", async () => {
     const { lines, print } = collect();
     await runDoctor(makeConfig(), {

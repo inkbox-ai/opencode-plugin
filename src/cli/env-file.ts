@@ -32,10 +32,22 @@ export function saveEnvVar(file: string, name: string, value: string): void {
     ];
   }
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  // Match the same shapes loadEnvFile parses (`NAME=` with an optional
+  // `export ` prefix) — a hand-written `export NAME=old` line must be
+  // replaced, not shadowed, or the first-occurrence-wins load keeps it.
+  const matches = (l: string) => {
+    let t = l.trim();
+    if (t.startsWith("export ")) t = t.slice("export ".length);
+    return t.startsWith(`${name}=`);
+  };
   const line = `${name}=${value}`;
-  const idx = lines.findIndex((l) => l.startsWith(`${name}=`));
-  if (idx >= 0) lines[idx] = line;
-  else lines.push(line);
+  const idx = lines.findIndex(matches);
+  if (idx >= 0) {
+    lines[idx] = line;
+    lines = lines.filter((l, i) => i === idx || !matches(l)); // drop stale duplicates
+  } else {
+    lines.push(line);
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
@@ -44,9 +56,12 @@ export function saveEnvVar(file: string, name: string, value: string): void {
 // Layer every candidate that exists into `env`, in precedence order — each
 // file only fills vars still missing, so an earlier file (and the real
 // environment above all) wins per key. Returns the loaded paths.
+// `sources`, when passed, records which file supplied each var — a var set in
+// `env` but absent from the map came from the real environment.
 export function loadEnvFile(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  sources?: Map<string, string>,
 ): string[] {
   const loaded: string[] = [];
   for (const file of envFileCandidates(env, cwd)) {
@@ -67,7 +82,10 @@ export function loadEnvFile(
         .slice(eq + 1)
         .trim()
         .replace(/^['"]+|['"]+$/g, "");
-      if (key && env[key] === undefined) env[key] = value;
+      if (key && env[key] === undefined) {
+        env[key] = value;
+        sources?.set(key, file);
+      }
     }
   }
   return loaded;

@@ -62,8 +62,10 @@ export async function runCli(argv: string[]): Promise<number> {
   }
 
   // Daemon-parity env loading: fill missing vars from the first env file so
-  // every command sees the same config the boot service would.
-  loadEnvFile();
+  // every command sees the same config the boot service would. The sources
+  // map feeds setup/doctor provenance (which file — or the shell — won a var).
+  const envSources = new Map<string, string>();
+  loadEnvFile(process.env, process.cwd(), envSources);
 
   switch (command) {
     case "run":
@@ -88,14 +90,14 @@ export async function runCli(argv: string[]): Promise<number> {
       // Interactive wizard on a terminal; static checklist when piped/--print.
       const interactive = argv[1] !== "--print" && process.stdin.isTTY === true;
       const config = resolveConfig(undefined);
-      return interactive ? runWizard(config) : runSetup(config);
+      return interactive ? runWizard(config, { envSources }) : runSetup(config);
     }
     case "uninstall": {
       if (!uninstallAutostart()) console.log("No boot service installed.");
       return runUninstall();
     }
     case "doctor": {
-      const { ok } = await runDoctor(resolveConfig(undefined));
+      const { ok } = await runDoctor(resolveConfig(undefined), { envSources });
       return ok ? 0 : 1;
     }
     default:
