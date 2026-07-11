@@ -54,6 +54,9 @@ const DEFAULT_ENABLED = [
   "inkbox_list_notes",
   "inkbox_get_note",
   "inkbox_create_note",
+  "inkbox_list_mail_contact_rules",
+  "inkbox_list_phone_contact_rules",
+  "inkbox_list_imessage_contact_rules",
   "inkbox_whoami",
   "inkbox_doctor",
 ].sort();
@@ -72,14 +75,6 @@ const OPT_IN = [
   "inkbox_place_call",
   "inkbox_update_note",
   "inkbox_delete_note",
-  "inkbox_list_mail_contact_rules",
-  "inkbox_create_mail_contact_rule",
-  "inkbox_update_mail_contact_rule",
-  "inkbox_delete_mail_contact_rule",
-  "inkbox_list_phone_contact_rules",
-  "inkbox_create_phone_contact_rule",
-  "inkbox_update_phone_contact_rule",
-  "inkbox_delete_phone_contact_rule",
   "inkbox_list_contact_access",
   "inkbox_grant_contact_access",
   "inkbox_revoke_contact_access",
@@ -116,10 +111,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 56 tools", () => {
+  it("ships exactly the expected 51 tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(56);
+    expect(names).toHaveLength(51);
   });
 
   it("has no duplicate tool names", () => {
