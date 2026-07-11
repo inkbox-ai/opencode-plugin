@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { type Finding, runDoctor } from "../../src/cli/doctor.js";
@@ -182,6 +185,62 @@ describe("runDoctor", () => {
     expect(out).toContain("agent  — from shell environment ($INKBOX_IDENTITY)");
     expect(out).toContain("signing key: (not set)");
     expect(out).not.toContain("ApiKey_abcdef123456"); // only the suffix is shown
+  });
+
+  it("calls out a shell export shadowing a different key in the wizard's env file", async () => {
+    // Dima's setup: the wizard saved a fresh key to the state-dir .env, but a
+    // stale shell export wins for every new process and the API 401s.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-cwd-"));
+    try {
+      fs.writeFileSync(path.join(home, ".env"), "INKBOX_API_KEY=ApiKey_fresh\n");
+      const runtime = {
+        getClient: vi.fn(async () => {
+          throw new Error("Inkbox API error (401): Unauthorized");
+        }),
+        getIdentity: vi.fn(async () => {
+          throw new Error("Inkbox API error (401): Unauthorized");
+        }),
+      } as any;
+      const result = await runDoctor(makeConfig({ apiKey: "ApiKey_stale" }), {
+        runtime,
+        opencode: reachableOpencode(),
+        env: { INKBOX_OPENCODE_HOME: home, INKBOX_API_KEY: "ApiKey_stale" },
+        envSources: new Map(), // nothing loaded from files → the shell won
+        cwd,
+        print: () => {},
+      });
+      const shadow = result.findings.find((f) => /exported by your shell/.test(f.message));
+      expect(shadow?.severity).toBe("warning");
+      expect(shadow?.message).toContain("$INKBOX_API_KEY");
+      expect(shadow?.message).toContain(path.join(home, ".env"));
+      expect(shadow?.message).toContain("unset INKBOX_API_KEY");
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("stays quiet about shadowing when the values agree", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-cwd-"));
+    try {
+      fs.writeFileSync(path.join(home, ".env"), "INKBOX_API_KEY=ApiKey_same\n");
+      const result = await runDoctor(makeConfig({ apiKey: "ApiKey_same" }), {
+        runtime: healthyRuntime(),
+        opencode: reachableOpencode(),
+        env: { INKBOX_OPENCODE_HOME: home, INKBOX_API_KEY: "ApiKey_same" },
+        envSources: new Map([["INKBOX_API_KEY", path.join(home, ".env")]]),
+        cwd,
+        print: () => {},
+      });
+      expect(result.findings.some((f) => /overrides a different value/.test(f.message))).toBe(
+        false,
+      );
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it("echoes the resolved gateway settings", async () => {

@@ -53,6 +53,39 @@ export function saveEnvVar(file: string, name: string, value: string): void {
   fs.chmodSync(file, 0o600);
 }
 
+function parseEnvText(text: string): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const raw of text.split("\n")) {
+    let line = raw.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    if (line.startsWith("export ")) line = line.slice("export ".length);
+    const eq = line.indexOf("=");
+    const key = line.slice(0, eq).trim();
+    const value = line
+      .slice(eq + 1)
+      .trim()
+      .replace(/^['"]+|['"]+$/g, "");
+    if (key) pairs.push([key, value]);
+  }
+  return pairs;
+}
+
+// One file's vars, first occurrence winning — exactly what loadEnvFile would
+// take from it. Used by doctor's shadowed-credential check.
+export function readEnvFile(file: string): Record<string, string> {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf-8");
+  } catch {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of parseEnvText(text)) {
+    if (!(key in out)) out[key] = value;
+  }
+  return out;
+}
+
 // Layer every candidate that exists into `env`, in precedence order — each
 // file only fills vars still missing, so an earlier file (and the real
 // environment above all) wins per key. Returns the loaded paths.
@@ -72,17 +105,8 @@ export function loadEnvFile(
       continue;
     }
     loaded.push(file);
-    for (const raw of text.split("\n")) {
-      let line = raw.trim();
-      if (!line || line.startsWith("#") || !line.includes("=")) continue;
-      if (line.startsWith("export ")) line = line.slice("export ".length);
-      const eq = line.indexOf("=");
-      const key = line.slice(0, eq).trim();
-      const value = line
-        .slice(eq + 1)
-        .trim()
-        .replace(/^['"]+|['"]+$/g, "");
-      if (key && env[key] === undefined) {
+    for (const [key, value] of parseEnvText(text)) {
+      if (env[key] === undefined) {
         env[key] = value;
         sources?.set(key, file);
       }

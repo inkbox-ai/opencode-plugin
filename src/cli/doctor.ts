@@ -2,6 +2,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
+import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
 
 export type Severity = "error" | "warning" | "info";
@@ -16,10 +17,12 @@ export interface DoctorDeps {
   opencode?: OpencodeClient;
   // Overrides the PATH lookup for the managed-serve binary check.
   opencodeBinFound?: boolean;
-  // Provenance inputs for the credentials block: the process env plus the
-  // per-var file-source map recorded by loadEnvFile at CLI start.
+  // Provenance inputs for the credentials block and the shadowed-credential
+  // check: the process env plus the per-var file-source map recorded by
+  // loadEnvFile at CLI start.
   env?: NodeJS.ProcessEnv;
   envSources?: Map<string, string>;
+  cwd?: string;
   print?: (line: string) => void;
 }
 
@@ -74,6 +77,21 @@ export async function runDoctor(
     }
   }
 
+  // Stale-credential shadowing: a var that resolves from the shell (or an
+  // earlier env file) while a lower-precedence file defines a DIFFERENT value
+  // is the classic silently-401 setup — the wizard wrote a fresh key, but an
+  // old export still wins. Only checked when the CLI hands us the source map,
+  // so unit callers stay hermetic.
+  if (deps.envSources) {
+    for (const f of shadowFindings(
+      deps.env ?? process.env,
+      deps.cwd ?? process.cwd(),
+      deps.envSources,
+    )) {
+      findings.push(f);
+    }
+  }
+
   // An explicitly configured server must answer; the default URL falling
   // through to a managed `opencode serve` only needs the binary to exist.
   const explicit = config.gateway.serverUrl;
@@ -106,6 +124,38 @@ export async function runDoctor(
   const creds = credentialLines(config, deps.env ?? process.env, deps.envSources ?? new Map());
   printReport(print, config, findings, creds, ok);
   return { ok, findings };
+}
+
+const SHADOWABLE_VARS = ["INKBOX_API_KEY", "INKBOX_IDENTITY", "INKBOX_SIGNING_KEY", "INKBOX_BASE_URL"];
+
+// Flag credentials whose winning source overrides a different value in a
+// lower-precedence env file. The fresh value is usually the one in the file
+// (the wizard writes there), so say who wins and how to get rid of it.
+function shadowFindings(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  sources: Map<string, string>,
+): Finding[] {
+  const findings: Finding[] = [];
+  const candidates = envFileCandidates(env, cwd);
+  for (const name of SHADOWABLE_VARS) {
+    const winner = env[name];
+    if (winner === undefined) continue;
+    const winnerFile = sources.get(name); // absent → the shell environment won
+    const below = winnerFile ? candidates.indexOf(winnerFile) + 1 : 0;
+    for (const file of candidates.slice(below)) {
+      const value = readEnvFile(file)[name];
+      if (value === undefined || value === winner) continue;
+      findings.push({
+        severity: "warning",
+        message: winnerFile
+          ? `$${name} comes from ${winnerFile}, which overrides a different value in ${file} — if Inkbox rejects a stale credential, update or remove it in ${winnerFile}.`
+          : `$${name} is exported by your shell, which overrides a different value in ${file} — if Inkbox rejects a stale credential, remove the export (run \`unset ${name}\` and check ~/.zshrc).`,
+      });
+      break; // one finding per var is enough
+    }
+  }
+  return findings;
 }
 
 // Name the source each resolved credential actually came from — a stale
