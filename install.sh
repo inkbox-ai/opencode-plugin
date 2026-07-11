@@ -88,9 +88,13 @@ else
   cat > "$WRAPPER" <<'EOF'
 // Inkbox plugin wrapper — written by install.sh; edit freely (never overwritten).
 // Credentials resolve from env vars or ~/.inkbox/config; options: see README.
+// inkbox_place_call is enabled so the agent can dial out (calls stay gated
+// by outbound approval like every other send).
 import InkboxPlugin from "@inkbox/opencode-plugin";
 
-export default async (input: any) => InkboxPlugin(input, {});
+export default async (input: any) => InkboxPlugin(input, {
+  tools: { enable: ["inkbox_place_call"] },
+});
 EOF
   say "Wrote plugin wrapper $WRAPPER"
 fi

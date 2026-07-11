@@ -203,8 +203,29 @@ describe("buildIdentitySystem", () => {
       dedicatedNumber: "+15551230000",
       imessageEnabled: true,
     });
-    expect(sys).toContain("scout / scout@agents.inkbox.ai / +15551230000 / iMessage (shared line)");
+    expect(sys).toContain(
+      "scout / scout@agents.inkbox.ai / +15551230000 / iMessage (shared line — texts and calls)",
+    );
     expect(sys).toMatch(/never say you cannot access them/);
+  });
+
+  it("teaches both calling lines, in both directions", () => {
+    const sys = buildIdentitySystem({
+      dedicatedNumber: "+15551230000",
+      imessageEnabled: true,
+    });
+    expect(sys).toContain("Voice calls work both ways");
+    expect(sys).toContain("your dedicated number +15551230000");
+    expect(sys).toContain("shared iMessage line");
+    expect(sys).toContain("inkbox_place_call");
+  });
+
+  it("mentions only the calling lines that exist", () => {
+    const imessageOnly = buildIdentitySystem({ imessageEnabled: true });
+    expect(imessageOnly).toContain("shared iMessage line");
+    expect(imessageOnly).not.toContain("dedicated number");
+    const noLines = buildIdentitySystem({ emailAddress: "a@b.c" });
+    expect(noLines).not.toContain("Voice calls");
   });
 
   it("falls back cleanly when nothing is provisioned", () => {
@@ -222,7 +243,7 @@ describe("buildChannelPrompt", () => {
 
   it("lists every provisioned address on the identity line", () => {
     expect(full).toContain(
-      "reachable at: scout / scout@agents.inkbox.ai / +15551230000 / iMessage (shared line).",
+      "reachable at: scout / scout@agents.inkbox.ai / +15551230000 / iMessage (shared line — texts and calls).",
     );
   });
 

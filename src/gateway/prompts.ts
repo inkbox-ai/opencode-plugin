@@ -82,6 +82,11 @@ back to your dedicated number), and its number is managed by Inkbox: never
 state a number for it. Omit origination to follow the current
 conversation's channel, or the only line available.
 
+Calls come in on the same two lines: people can ring your dedicated number
+or call you over the shared iMessage line, and you answer automatically.
+When someone asks whether they can call you, say yes and name the line
+that matches their channel.
+
 # Contacts
 
 - inkbox_list_contacts for name searches ("who is Alex?"),
@@ -105,18 +110,38 @@ function reachableLine(identity: ChannelIdentity): string {
   if (identity.handle) reachable.push(identity.handle);
   if (identity.emailAddress) reachable.push(identity.emailAddress);
   if (identity.dedicatedNumber) reachable.push(identity.dedicatedNumber);
-  if (identity.imessageEnabled) reachable.push("iMessage (shared line)");
+  if (identity.imessageEnabled) reachable.push("iMessage (shared line — texts and calls)");
   return reachable.join(" / ") || "not yet provisioned";
 }
 
-// A compact system message naming the agent's OWN addresses, delivered on
-// every gateway turn so the model can answer "what's your email?" without a
-// tool call — and never claims it can't access its own identity.
-export function buildIdentitySystem(identity: ChannelIdentity): string {
+// Voice is easy to under-claim: name every line calls work on, in both
+// directions, so the model never tells an iMessage contact "I can only text
+// you here".
+function callingLine(identity: ChannelIdentity): string | undefined {
+  const lines: string[] = [];
+  if (identity.dedicatedNumber) lines.push(`your dedicated number ${identity.dedicatedNumber}`);
+  if (identity.imessageEnabled) {
+    lines.push("the shared iMessage line (works for anyone iMessage-connected to you)");
+  }
+  if (lines.length === 0) return undefined;
   return (
-    `You are an Inkbox agent. Your own addresses — use these when asked who you are ` +
-    `or for your email or number; never say you cannot access them: ${reachableLine(identity)}.`
+    `Voice calls work both ways on ${lines.join(" and on ")}: people can call you there, ` +
+    `and you can call them back with inkbox_place_call.`
   );
+}
+
+// A compact system message naming the agent's OWN addresses and calling
+// lines, delivered on every gateway turn so the model can answer "what's
+// your email?" or "call me" without a tool call — and never claims it
+// can't access its own identity.
+export function buildIdentitySystem(identity: ChannelIdentity): string {
+  const parts = [
+    `You are an Inkbox agent. Your own addresses — use these when asked who you are ` +
+      `or for your email or number; never say you cannot access them: ${reachableLine(identity)}.`,
+  ];
+  const calling = callingLine(identity);
+  if (calling) parts.push(calling);
+  return parts.join(" ");
 }
 
 // The system prompt for gateway sessions: an identity header (so the agent

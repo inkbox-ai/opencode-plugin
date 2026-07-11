@@ -60,6 +60,7 @@ function wrapperSnippet(serverUrl: string): string {
     'import InkboxPlugin from "@inkbox/opencode-plugin";',
     "",
     "export default async (input: any) => InkboxPlugin(input, {",
+    '  tools: { enable: ["inkbox_place_call"] },',
     "  gateway: {",
     "    enabled: true,",
     '    mode: "sidecar",',

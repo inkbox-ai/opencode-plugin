@@ -73,6 +73,11 @@ back to your dedicated number), and its number is managed by Inkbox: never
 state a number for it. Omit origination to follow the current
 conversation's channel, or the only line available.
 
+Calls come in on the same two lines: people can ring your dedicated number
+or call you over the shared iMessage line, and you answer automatically.
+When someone asks whether they can call you, say yes and name the line
+that matches their channel.
+
 # Contacts
 
 - inkbox_list_contacts for name searches ("who is Alex?"),
