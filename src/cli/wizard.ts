@@ -82,6 +82,13 @@ function defaultSdk(baseUrl: string | undefined): WizardSdk {
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+// Terminals in bracketed-paste mode wrap pastes in ESC[200~ ... ESC[201~, and
+// node readline can leak the markers into the answer — which turns a pasted
+// verification code or API key into permanent rejection. Strip them.
+export function sanitizePasted(value: string): string {
+  return value.replace(/\u001b?\[\s*20[01]~/g, "");
+}
+
 export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): Promise<number> {
   const env = deps.env ?? process.env;
   const io = deps.io ?? (await makeTerminalIO());
@@ -251,7 +258,15 @@ async function selfSignupFlow(c: Ctx): Promise<ResolvedIdentity | undefined> {
       break;
     } catch (err) {
       used += 1;
-      io.print(`  Wrong code (${used}/${MAX_ATTEMPTS} attempts used): ${errText(err)}`);
+      const detail = errText(err);
+      io.print(`  Verification failed (${used}/${MAX_ATTEMPTS} attempts used): ${detail}`);
+      // The identity cap is enforced at verify time (the migration into your
+      // org), so a full org looks exactly like a rejected code. Say so.
+      if (/capacit|limit|cannot admit|quota/i.test(detail)) {
+        io.print("  This looks like your account is at its identity limit, not a wrong code.");
+        io.print("  Free a slot in the Inkbox console (claim or delete an agent), then");
+        io.print("  type 'resend' and enter the fresh code.");
+      }
       if (used >= MAX_ATTEMPTS) io.print("  This code is now dead. Type 'resend' for a fresh one.");
     }
   }
@@ -614,14 +629,14 @@ async function makeTerminalIO(): Promise<TerminalIO> {
         process.stdout.write(`${question}${suffix}: `);
         muted = true;
         try {
-          const answer = await rl.question("");
+          const answer = sanitizePasted(await rl.question(""));
           process.stdout.write("\n");
           return answer || opts.def || "";
         } finally {
           muted = false;
         }
       }
-      const answer = await rl.question(`${question}${suffix}: `);
+      const answer = sanitizePasted(await rl.question(`${question}${suffix}: `));
       return answer || opts.def || "";
     },
     async confirm(question, def) {

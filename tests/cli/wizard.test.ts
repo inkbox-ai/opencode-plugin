@@ -2,7 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runWizard, type WizardDeps, type WizardIO, type WizardSdk } from "../../src/cli/wizard.js";
+import {
+  runWizard,
+  sanitizePasted,
+  type WizardDeps,
+  type WizardIO,
+  type WizardSdk,
+} from "../../src/cli/wizard.js";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 
 let tmp: string;
@@ -132,6 +138,14 @@ function savedEnv(file: string): Record<string, string> {
   return out;
 }
 
+describe("sanitizePasted", () => {
+  it("strips bracketed-paste markers around pasted values", () => {
+    expect(sanitizePasted("\u001b[200~123456\u001b[201~")).toBe("123456");
+    expect(sanitizePasted("[200~ApiKey_abc[201~")).toBe("ApiKey_abc");
+    expect(sanitizePasted("plain")).toBe("plain");
+  });
+});
+
 describe("runWizard", () => {
   it("exits early when already configured and reconfigure is declined", async () => {
     const world = fakeWorld();
@@ -177,6 +191,30 @@ describe("runWizard", () => {
     expect(d.installAutostartFn).toHaveBeenCalledWith(
       expect.objectContaining({ projectDirectory: tmp }),
     );
+  });
+
+  it("explains an identity-limit failure instead of calling it a wrong code", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    world.verify
+      .mockRejectedValueOnce(new Error("HTTP 409: organization at capacity, cannot admit 1"))
+      .mockResolvedValueOnce({ claimStatus: "claimed" });
+    const { io, lines } = scriptedIO([
+      false, // no key → signup
+      "me@example.com",
+      "test-agent",
+      "123456", // fails on the capacity error
+      "123456", // succeeds after (e.g. a slot was freed)
+      false, // iMessage no
+      false, // realtime no
+      false, // have signing key? no
+      true, // mint
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io);
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    expect(lines.join("\n")).toContain("identity limit, not a wrong code");
   });
 
   it("supports resend after burning the verification attempts", async () => {
