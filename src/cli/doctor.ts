@@ -126,7 +126,12 @@ export async function runDoctor(
   return { ok, findings };
 }
 
-const SHADOWABLE_VARS = ["INKBOX_API_KEY", "INKBOX_IDENTITY", "INKBOX_SIGNING_KEY", "INKBOX_BASE_URL"];
+const SHADOWABLE_VARS = [
+  "INKBOX_API_KEY",
+  "INKBOX_IDENTITY",
+  "INKBOX_SIGNING_KEY",
+  "INKBOX_BASE_URL",
+];
 
 // Flag credentials whose winning source overrides a different value in a
 // lower-precedence env file. The fresh value is usually the one in the file
