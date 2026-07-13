@@ -1,6 +1,6 @@
 // The tunnel listener returned by connect() is inert until wait() drives its
 // data plane — openTransport must start it and gate on "connected".
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn();
 vi.mock("@inkbox/sdk/tunnels/connect", () => ({
@@ -8,7 +8,7 @@ vi.mock("@inkbox/sdk/tunnels/connect", () => ({
 }));
 
 import { defaultGatewayConfig } from "../../src/config.js";
-import { openTransport } from "../../src/gateway/transport.js";
+import { installTunnelWarnFilter, openTransport } from "../../src/gateway/transport.js";
 
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -140,5 +140,73 @@ describe("openTransport tunnel driving", () => {
     const transport = await openTransport(opts);
     expect(transport.publicUrl).toBe("https://static.example");
     expect(connectMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("installTunnelWarnFilter", () => {
+  const savedWarn = console.warn;
+  let sink: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    // A fresh, untagged spy stands in as the "original" console.warn, so the
+    // filter wraps it and every passthrough is observable.
+    sink = vi.fn();
+    console.warn = sink;
+    installTunnelWarnFilter();
+  });
+
+  afterEach(() => {
+    console.warn = savedWarn;
+  });
+
+  it("suppresses the expected intake idle-cap warning", () => {
+    console.warn("/_system/intake slot=2 -> status=408 reason=intake-idle-cap");
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  it("keeps 401 warnings visible", () => {
+    const line = "/_system/intake slot=2 -> status=401 reason=owner-token-invalid";
+    console.warn(line);
+    expect(sink).toHaveBeenCalledWith(line);
+  });
+
+  it("keeps status=408 with a different reason visible", () => {
+    console.warn("/_system/intake slot=2 -> status=408 reason=intake-superseded");
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unrelated warnings, extra args included, visible", () => {
+    const err = new Error("boom");
+    console.warn("tunnel runtime: h2 session error", err);
+    expect(sink).toHaveBeenCalledWith("tunnel runtime: h2 session error", err);
+  });
+
+  it("passes a non-string first argument through even if it mentions the markers", () => {
+    const err = new Error("/_system/intake slot=2 -> status=408 reason=intake-idle-cap");
+    console.warn(err);
+    expect(sink).toHaveBeenCalledWith(err);
+  });
+
+  it("is idempotent: a second install keeps the same wrapper and a single layer", () => {
+    const wrapped = console.warn;
+    installTunnelWarnFilter();
+    expect(console.warn).toBe(wrapped);
+    console.warn("still one layer");
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("is installed by openTransport before the tunnel connects", async () => {
+    const listener = makeListener();
+    const opts = makeOpts(listener);
+    // Undo the beforeEach install: openTransport must wrap the bare spy itself.
+    console.warn = sink;
+
+    const pending = openTransport(opts);
+    await new Promise((r) => setTimeout(r, 0));
+    (connectMock.mock.calls[0][1] as { onStatus: (s: string) => void }).onStatus("connected");
+    await pending;
+
+    console.warn("/_system/intake slot=0 -> status=408 reason=intake-idle-cap");
+    expect(sink).not.toHaveBeenCalled();
   });
 });
