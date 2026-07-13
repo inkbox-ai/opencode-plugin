@@ -17,6 +17,33 @@ export interface Transport {
 // loudly instead of leaving a gateway that 403s all inbound traffic.
 const TUNNEL_CONNECT_TIMEOUT_MS = 15_000;
 
+// The tunnel server idle-caps parked intake slots on a timer, and the SDK
+// reports each one via bare console.warn — on a healthy gateway that one
+// line repeats forever and buries real warnings. A warn call is dropped only
+// when its first argument contains all three markers.
+const IDLE_CAP_WARNING_MARKERS = ["/_system/intake slot=", "status=408", "reason=intake-idle-cap"];
+
+// Tags the wrapped console.warn so repeat installs (gateway restarts within
+// one process) recognize it and no-op instead of stacking wrappers.
+const WARN_FILTER_TAG = Symbol.for("inkbox.tunnelWarnFilter");
+
+// Replace console.warn with a filter that drops the expected idle-cap line
+// and forwards everything else — 401s, disconnects, non-string args — to the
+// original warn unchanged (fail-open). Idempotent.
+export function installTunnelWarnFilter(): void {
+  const original = console.warn as typeof console.warn & { [WARN_FILTER_TAG]?: true };
+  if (original[WARN_FILTER_TAG]) return;
+  const filtered = ((...args: unknown[]) => {
+    const first = args[0];
+    if (typeof first === "string" && IDLE_CAP_WARNING_MARKERS.every((m) => first.includes(m))) {
+      return;
+    }
+    original(...args);
+  }) as typeof console.warn & { [WARN_FILTER_TAG]?: true };
+  filtered[WARN_FILTER_TAG] = true;
+  console.warn = filtered;
+}
+
 // Bring up the inbound transport: either the Inkbox tunnel (forwarding to the
 // local webhook server) or a caller-provided public URL. `ownsProcess` is
 // false when running inside a host we don't control (in-plugin mode), which
@@ -42,6 +69,10 @@ export async function openTransport(opts: {
       "Gateway needs a tunnel name (defaults to the identity handle) or a publicUrl. Set gateway.tunnelName or gateway.publicUrl.",
     );
   }
+
+  // Must be in place before connect(): the SDK's runtime starts warning as
+  // soon as the data plane parks its intake slots.
+  installTunnelWarnFilter();
 
   const client = await opts.inkbox.getClient();
   let onConnected: () => void = () => {};
