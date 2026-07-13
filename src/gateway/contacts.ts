@@ -1,6 +1,6 @@
 import type { Contact } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
-import type { Channel, GatewayLogger } from "./types.js";
+import type { Channel, GatewayLogger, SenderAgentIdentity } from "./types.js";
 
 // Contact identity for an inbound sender. Empty when the address does not
 // resolve to exactly one contact (missing, ambiguous, or lookup failure).
@@ -16,10 +16,21 @@ export interface ResolvedContact {
 }
 
 // One-line contact card for [inkbox:...] frame tags: the addresses the agent
-// may use for this person. Unresolved senders are marked explicitly so the
-// model asks or looks the person up instead of guessing an address.
-export function contactCard(c: ResolvedContact): string {
-  if (!c.contactId) return "contact=unknown_in_inkbox";
+// may use for this person. A contactless sender resolved to a peer agent
+// identity is labeled with that identity; otherwise unresolved senders are
+// marked explicitly so the model asks or looks the person up instead of
+// guessing an address.
+export function contactCard(c: ResolvedContact, agent?: SenderAgentIdentity): string {
+  if (!c.contactId) {
+    if (agent) {
+      // Handle and display name are remote-controlled strings — quote both.
+      const parts = [`contact_agent_identity_id=${agent.id}`];
+      if (agent.handle) parts.push(`contact_agent_handle=${JSON.stringify(agent.handle)}`);
+      if (agent.displayName) parts.push(`contact_name=${JSON.stringify(agent.displayName)}`);
+      return parts.join(" ");
+    }
+    return "contact=unknown_in_inkbox";
+  }
   const parts = [`contact_id=${c.contactId}`];
   if (c.contactName) parts.push(`contact_name=${JSON.stringify(c.contactName)}`);
   if (c.contactCompany) parts.push(`contact_company=${JSON.stringify(c.contactCompany)}`);

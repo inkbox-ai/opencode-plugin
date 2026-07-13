@@ -1,5 +1,6 @@
 // Event routing: channel selection, sender filtering (self/control/allowlist),
-// reactions, deduped delivery-failure captures, external events, and media.
+// reactions, deduped delivery-failure captures, sender agent identities,
+// external events, and media.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
@@ -226,6 +227,148 @@ describe("dispatchEvent delivery failures", () => {
     expect(deps.sessions.runCapture).toHaveBeenCalledWith(
       "ck",
       expect.stringContaining("+15551112222"),
+    );
+  });
+
+  it("acks text.delivery_unconfirmed without waking the agent", async () => {
+    // Carrier uncertainty, not a failure: a capture would prompt a resend of
+    // a message that usually landed.
+    const deps = makeDeps();
+    const ok = await dispatchEvent(
+      deps,
+      event("text.delivery_unconfirmed", {
+        text_message: {
+          id: "msg-100",
+          remote_phone_number: "+15551112222",
+          error_code: "delivery_unconfirmed",
+        },
+      }),
+    );
+
+    expect(ok).toBe(true);
+    expect(deps.sessions.runCapture).not.toHaveBeenCalled();
+    expect(deps.sessions.handleInbound).not.toHaveBeenCalled();
+  });
+});
+
+describe("dispatchEvent sender agent identity", () => {
+  // A backend-resolved peer agent on the event, keyed like the webhook payload.
+  const identity = { id: "agent-42", agent_handle: "atlas-agent", display_name: "Atlas" };
+
+  function noContactDeps(over: Partial<DispatchDeps> = {}): DispatchDeps {
+    return makeDeps({
+      contacts: { resolve: vi.fn(async () => ({})), chatKeyFor: vi.fn(() => "ck") },
+      ...over,
+    });
+  }
+
+  function sms(agentIdentities: unknown[]): VerifiedEvent {
+    return event("text.received", {
+      text_message: {
+        id: "tm-9",
+        remote_phone_number: "+15551112222",
+        text: "hey from another agent",
+        conversation_id: "sms-conv-9",
+        media: null,
+      },
+      contacts: [],
+      agent_identities: agentIdentities,
+    });
+  }
+
+  function mail(agentIdentities: unknown[]): VerifiedEvent {
+    return event("message.received", {
+      message: { id: "m-9", from_address: "atlas@agents.inkbox.ai", body: "coordinating" },
+      contacts: [],
+      agent_identities: agentIdentities,
+    });
+  }
+
+  it("attaches the single resolved identity of a contactless SMS sender", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(deps, sms([identity]));
+
+    expect(deps.sessions.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderAgent: { id: "agent-42", handle: "atlas-agent", displayName: "Atlas" },
+      }),
+    );
+  });
+
+  it("omits the identity when the sender resolves to a contact", async () => {
+    const deps = makeDeps();
+    await dispatchEvent(deps, sms([identity]));
+
+    const msg = vi.mocked(deps.sessions.handleInbound).mock.calls[0][0];
+    expect(msg.contactId).toBe("c1");
+    expect(msg.senderAgent).toBeUndefined();
+  });
+
+  it("omits the identity when several resolve (group of agents)", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(
+      deps,
+      sms([identity, { id: "agent-43", agent_handle: "nova-agent", display_name: "Nova" }]),
+    );
+
+    const msg = vi.mocked(deps.sessions.handleInbound).mock.calls[0][0];
+    expect(msg.senderAgent).toBeUndefined();
+    expect(msg.group?.participantCount).toBe(2);
+  });
+
+  it("omits an identity entry that carries no id", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(deps, sms([{ agent_handle: "no-id-agent" }]));
+
+    expect(vi.mocked(deps.sessions.handleInbound).mock.calls[0][0].senderAgent).toBeUndefined();
+  });
+
+  it("trusts a mail identity only from the from bucket matching the sender", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(
+      deps,
+      mail([{ ...identity, bucket: "from", address: "Atlas@agents.inkbox.ai" }]),
+    );
+
+    expect(deps.sessions.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderAgent: { id: "agent-42", handle: "atlas-agent", displayName: "Atlas" },
+      }),
+    );
+  });
+
+  it("ignores a mail identity resolved for a recipient bucket", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(
+      deps,
+      mail([{ ...identity, bucket: "to", address: "me@agents.inkbox.ai" }]),
+    );
+
+    expect(vi.mocked(deps.sessions.handleInbound).mock.calls[0][0].senderAgent).toBeUndefined();
+  });
+
+  it("names a contactless reaction sender by their identity", async () => {
+    const deps = noContactDeps();
+    await dispatchEvent(
+      deps,
+      event("imessage.reaction_received", {
+        reaction: {
+          id: "rx-9",
+          conversation_id: "conv-9",
+          remote_number: "+15551112222",
+          reaction: "loved",
+          target_message_id: "im-9",
+        },
+        contacts: [],
+        agent_identities: [identity],
+      }),
+    );
+
+    expect(deps.sessions.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderAgent: { id: "agent-42", handle: "atlas-agent", displayName: "Atlas" },
+        text: expect.stringContaining("Atlas reacted with a 'loved' tapback"),
+      }),
     );
   });
 });

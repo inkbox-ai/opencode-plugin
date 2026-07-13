@@ -183,8 +183,9 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
     fields.push(`participants=${JSON.stringify(msg.group.participants.join(", "))}`);
   }
   // The contact card carries the addresses the agent may reach this person
-  // at, so cross-channel follow-ups never have to guess.
-  fields.push("|", contactCard(msg));
+  // at, so cross-channel follow-ups never have to guess. A contactless
+  // sender resolved to a peer agent identity is named by that identity.
+  fields.push("|", contactCard(msg, msg.senderAgent));
 
   const lines = [`[${fields.join(" ")}]`];
   if (directive) lines.push(`Operator directive for this channel: ${directive}`);

@@ -2,6 +2,7 @@ import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import type { BurstBuffer } from "./burst.js";
 import type { ContactResolver } from "./contacts.js";
+import { normalizeAddress } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
 import { downloadMedia, mediaDir } from "./media.js";
 import { SILENT } from "./prompts.js";
@@ -9,6 +10,7 @@ import type {
   Channel,
   GatewayLogger,
   InboundMessage,
+  SenderAgentIdentity,
   SessionManager,
   VerifiedEvent,
 } from "./types.js";
@@ -58,11 +60,16 @@ export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): P
     case "imessage.reaction_received":
       return handleReaction(deps, event);
     case "text.delivery_failed":
-    case "text.delivery_unconfirmed":
     case "imessage.delivery_failed":
     case "message.bounced":
     case "message.failed":
       return handleDeliveryFailure(deps, type, event);
+    // Carrier uncertainty, not a failure — the message usually landed, so a
+    // capture here would prompt a resend of a message that was delivered.
+    // Ack and log only.
+    case "text.delivery_unconfirmed":
+      deps.logger.info("dispatch.delivery_unconfirmed", { type });
+      return true;
     default:
       deps.logger.info("dispatch.ignored", { type });
       return true;
@@ -220,6 +227,15 @@ async function handleInbound(
 
   const participants = countParticipants(event.body);
 
+  // A sender with no contact match may still be a recognized peer agent —
+  // label the turn with the resolved identity instead of unknown_in_inkbox.
+  // Skipped for phone-channel groups, where a lone identity may belong to a
+  // participant other than the sender.
+  const senderAgent =
+    contactId || (channel !== "email" && participants > 1)
+      ? undefined
+      : senderAgentIdentity(channel, event.body, from);
+
   const msg: InboundMessage = {
     channel,
     chatKey,
@@ -230,6 +246,7 @@ async function handleInbound(
     messageId: info.messageId,
     rfcMessageId: info.rfcMessageId,
     ...resolved,
+    ...(senderAgent ? { senderAgent } : {}),
     text: info.text,
     mediaPaths,
     ...(participants > 1
@@ -283,6 +300,35 @@ function participantNames(body: Record<string, unknown>): string[] {
   return names;
 }
 
+// The sender's backend-resolved peer agent identity, trusted only when it is
+// unambiguous: exactly one identity on the event, and for mail only the
+// `from`-bucket entry whose address matches the sender (mail resolves
+// identities per recipient bucket). Zero or many matches means unknown.
+function senderAgentIdentity(
+  channel: Exclude<Channel, "voice">,
+  body: Record<string, unknown>,
+  from: string,
+): SenderAgentIdentity | undefined {
+  const data = record(body.data);
+  const entries = (Array.isArray(data?.agent_identities) ? data.agent_identities : [])
+    .map((entry) => record(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry && str(entry.id)));
+  const matches =
+    channel === "email"
+      ? entries.filter(
+          (entry) =>
+            str(entry.bucket) === "from" &&
+            normalizeAddress(str(entry.address) ?? "") === normalizeAddress(from),
+        )
+      : entries;
+  if (matches.length !== 1) return undefined;
+  const id = str(matches[0].id);
+  if (!id) return undefined;
+  const handle = str(matches[0].agent_handle);
+  const displayName = str(matches[0].display_name);
+  return { id, ...(handle ? { handle } : {}), ...(displayName ? { displayName } : {}) };
+}
+
 async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   const r = resourceOf(event.body, "reaction");
   const from = str(r?.remote_number);
@@ -298,9 +344,12 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
     conversationId,
     from,
   });
+  const senderAgent = resolved.contactId
+    ? undefined
+    : senderAgentIdentity("imessage", event.body, from);
   // Reactions carry reply-restraint guidance: a tapback is a lightweight
   // signal, and most warrant no visible reply at all.
-  const who = resolved.contactName ?? from;
+  const who = resolved.contactName ?? senderAgent?.displayName ?? senderAgent?.handle ?? from;
   const text = [
     `[reaction: ${reaction}${targetMessageId ? ` target_message_id=${targetMessageId}` : ""}]`,
     `${who} reacted with a '${reaction}' tapback to your message.`,
@@ -315,6 +364,7 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       from,
       conversationId,
       ...resolved,
+      ...(senderAgent ? { senderAgent } : {}),
       text,
       mediaPaths: [],
       messageId: str(r?.id),
