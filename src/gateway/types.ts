@@ -26,6 +26,15 @@ export interface GatewayDeps {
 
 export type Channel = "email" | "sms" | "imessage" | "voice";
 
+// A peer agent identity the backend resolved for an inbound sender. Webhooks
+// carry these under `data.agent_identities`; a sender with no contact match
+// but exactly one resolved identity is labeled with it instead of unknown.
+export interface SenderAgentIdentity {
+  id: string;
+  handle?: string;
+  displayName?: string;
+}
+
 // A verified, parsed inbound message ready for session dispatch.
 export interface InboundMessage {
   channel: Channel;
@@ -48,6 +57,9 @@ export interface InboundMessage {
   contactEmails?: string[];
   contactPhones?: string[];
   contactNotes?: string;
+  // The sender's resolved peer agent identity; set only when no contact
+  // matched and the identity is unambiguous.
+  senderAgent?: SenderAgentIdentity;
   text: string;
   // Local paths of downloaded attachments/media, appended to the framed
   // message so the agent can read them.
