@@ -8,9 +8,18 @@ name: Live — voice calls (Inkbox STT/TTS + Realtime)
 # caller. Real model + real calls — the priciest suite — so it runs only on
 # ready (non-draft) PRs + manual dispatch, and shares the AUT tunnel lock.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the call/transcript"
+        required: false
+        type: string
+        default: "220"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       timeout_s:
@@ -22,15 +31,13 @@ permissions:
 
 concurrency:
   # Same group as the other live suites: only one holder of the AUT tunnel.
-  group: inkbox-live-aut-tunnel
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   voice:
     runs-on: ubuntu-latest
-    # Skip fork PRs (no secrets) and draft PRs (expensive).
-    if: >-
-      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT + driver identities → one at a time
@@ -38,8 +45,8 @@ jobs:
         scenario: [inbound_inkbox, outbound_realtime]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -81,7 +88,7 @@ jobs:
           LIVE_REAL_MODEL: "1"
           VOICE_SCENARIO: ${{ matrix.scenario }}
           VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
-          LIVE_VOICE_TIMEOUT_S: ${{ github.event.inputs.timeout_s || '220' }}
+          LIVE_VOICE_TIMEOUT_S: ${{ inputs.timeout_s || '220' }}
         run: |
           npx vitest run --config vitest.live.config.ts tests/live/voice.test.ts
 
@@ -103,7 +110,7 @@ jobs:
 
       - name: Upload artifacts (on failure only)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: voice-logs-${{ matrix.scenario }}
           retention-days: 5

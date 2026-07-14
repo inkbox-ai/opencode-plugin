@@ -9,17 +9,23 @@ name: Live — agent channels (email + SMS)
 # PR is READY (non-draft). The unattended cadence chains off the scheduled
 # canary via workflow_run, so live and the host stay in lock-step.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the reply"
+        required: false
+        type: string
+        default: "150"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  workflow_run:
-    workflows: ["Canary — plugin vs opencode latest"]
-    types: [completed]
 
 permissions:
   contents: read
@@ -27,17 +33,13 @@ permissions:
 concurrency:
   # Only ONE client may hold the AUT's Inkbox tunnel at a time, so EVERY live
   # tunnel workflow MUST use this exact group — they queue behind each other.
-  group: inkbox-live-aut-tunnel
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   live:
     runs-on: ubuntu-latest
-    # Skip fork PRs (no secrets), draft PRs (expensive), and canary chains
-    # where the canary FAILED (never take the tunnel against a broken host).
-    if: >-
-      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false)) &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
@@ -45,8 +47,8 @@ jobs:
         mode: [mock, real]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -79,7 +81,7 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
           LIVE_REAL_MODEL: ${{ matrix.mode == 'real' && '1' || '' }}
-          LIVE_REPLY_TIMEOUT_S: ${{ github.event.inputs.timeout_s || '150' }}
+          LIVE_REPLY_TIMEOUT_S: ${{ inputs.timeout_s || '150' }}
         run: |
           npx vitest run --config vitest.live.config.ts \
             tests/live/email-reply.test.ts tests/live/sms.test.ts
@@ -102,7 +104,7 @@ jobs:
 
       - name: Upload artifacts (on failure only)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-logs-${{ matrix.mode }}
           retention-days: 5
@@ -111,18 +113,3 @@ jobs:
             ${{ env.AUT_SERVE_LOG }}
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
-
-  # Alert only when an unattended (canary-chained) run fails; PRs and manual
-  # dispatch stay silent — the check is visible inline there.
-  notify:
-    needs: [live]
-    if: always() && needs.live.result == 'failure' && github.event_name == 'workflow_run'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify chat webhook on scheduled failure
-        # Non-blocking: a flaky webhook must never flip the suite result.
-        run: |
-          [ -z "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" ] && exit 0
-          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
-            -H 'Content-Type: application/json' \
-            -d '{"text": "⚠️ FAILED — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
