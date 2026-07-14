@@ -36,7 +36,10 @@ describe.skipIf(!LIVE)("live email reply", () => {
     });
 
     const reply = await pollUntil("email reply", () =>
-      newInboundEmailFrom(remote, remoteEmail, autEmail, before),
+      newInboundEmailFrom(remote, remoteEmail, autEmail, before, (message) => {
+        const content = `${message.subject ?? ""}\n${message.snippet ?? ""}`;
+        return content.includes("REPLY_OK") && content.includes(tag);
+      }),
     );
     const body = `${reply.subject ?? ""}\n${reply.snippet ?? ""}`;
     assertNotErrorReply(body, "email");
@@ -61,7 +64,9 @@ describe.skipIf(!LIVE)("live email reply", () => {
     });
 
     const reply = await pollUntil("email reply", () =>
-      newInboundEmailFrom(remote, remoteEmail, autEmail, before),
+      newInboundEmailFrom(remote, remoteEmail, autEmail, before, (message) =>
+        `${message.subject ?? ""}\n${message.snippet ?? ""}`.toLowerCase().includes("confirmed"),
+      ),
     );
     const body = `${reply.subject ?? ""}\n${reply.snippet ?? ""}`;
     assertNotErrorReply(body, "email");

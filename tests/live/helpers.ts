@@ -87,12 +87,14 @@ export async function newInboundEmailFrom(
   mailbox: string,
   fromAddress: string,
   before: Set<string>,
+  accept?: (message: { id: string; subject?: string; snippet?: string }) => boolean,
 ): Promise<{ id: string; subject?: string; snippet?: string } | undefined> {
   const want = fromAddress.toLowerCase();
   for await (const m of c.messages.list(mailbox, { direction: "inbound" as never, pageSize: 30 })) {
     const msg = m as { id: string; fromAddress?: string; subject?: string; snippet?: string };
     if (before.has(msg.id)) continue;
-    if ((msg.fromAddress ?? "").toLowerCase() === want) return msg;
+    if ((msg.fromAddress ?? "").toLowerCase() !== want) continue;
+    if (!accept || accept(msg)) return msg;
   }
   return undefined;
 }
