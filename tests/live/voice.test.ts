@@ -8,6 +8,7 @@
 //   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
 //   outbound_realtime — driver texts "call me"; agent calls back on Realtime.
 import { readFileSync } from "node:fs";
+import { PhoneRuleAction, PhoneRuleMatchType } from "@inkbox/sdk";
 import { describe, expect, it } from "vitest";
 import {
   AUT_KEY,
@@ -35,6 +36,27 @@ function driverState(): DriverState {
   return JSON.parse(readFileSync(STATE_FILE, "utf-8"));
 }
 
+async function ensureDriverAllowed(
+  aut: ReturnType<typeof client>,
+  driverNumber: string,
+): Promise<void> {
+  const mailbox = (await aut.mailboxes.list())[0];
+  if (!mailbox) throw new Error("AUT identity has no mailbox");
+  const handle = mailbox.emailAddress.split("@", 1)[0];
+  const rules = await aut.phoneIdentityContactRules.list(handle);
+  const activeAllow = rules.some(
+    (rule) =>
+      rule.matchTarget === driverNumber && rule.action === "allow" && rule.status === "active",
+  );
+  if (!activeAllow) {
+    await aut.phoneIdentityContactRules.create(handle, {
+      action: PhoneRuleAction.ALLOW,
+      matchType: PhoneRuleMatchType.EXACT_NUMBER,
+      matchTarget: driverNumber,
+    });
+  }
+}
+
 const tail = (s: string) => s.replace(/\D/g, "").slice(-10);
 
 describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
@@ -46,6 +68,11 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const remote = client(REMOTE_KEY as string);
       const aut = client(AUT_KEY as string);
       const autPhone = await phoneOf(aut);
+
+      // Server-side contact rules run before the plugin or its local allow-all
+      // setting. Whitelisted smoke identities therefore need the driver allowed
+      // explicitly or the call is rejected before either media WS connects.
+      await ensureDriverAllowed(aut, st.number);
 
       // Place the call to the agent, handing Inkbox the driver's own media WS.
       const call = await remote.calls.place({
