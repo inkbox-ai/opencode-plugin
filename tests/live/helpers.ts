@@ -144,6 +144,7 @@ export async function waitTwoWayCall(
   callId: string,
   timeoutMs = TIMEOUT_MS,
 ): Promise<string> {
+  const terminalFailureStatuses = new Set(["canceled", "failed"]);
   return pollUntil(
     "two-way call transcript",
     async () => {
@@ -151,7 +152,21 @@ export async function waitTwoWayCall(
         agent: [],
         driver: [],
       }));
-      return agent.length > 0 && drv.length > 0 ? agent.join(" | ") : undefined;
+      if (agent.length > 0 && drv.length > 0) return agent.join(" | ");
+
+      const call = await driver.calls.get(callId).catch(() => undefined);
+      const status = (call?.status ?? "").toLowerCase();
+      if (terminalFailureStatuses.has(status)) {
+        throw new Error(
+          `two-way call ended before both parties spoke: ${JSON.stringify({
+            status: call?.status,
+            hangupReason: call?.hangupReason,
+            startedAt: call?.startedAt,
+            endedAt: call?.endedAt,
+          })}`,
+        );
+      }
+      return undefined;
     },
     timeoutMs,
   );

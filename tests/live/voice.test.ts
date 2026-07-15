@@ -14,6 +14,7 @@ import {
   AUT_KEY,
   autSpeechMode,
   client,
+  inboundTextsFrom,
   LIVE,
   phoneOf,
   pollUntil,
@@ -186,6 +187,11 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         );
 
       const before = new Set((await inboundFromAut()).map((c) => c.id));
+      const beforeTexts = new Set(
+        (await inboundTextsFrom(remote, st.number_id, autPhone.number)).map(
+          (message) => message.id,
+        ),
+      );
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
         text: "Please call me right now by phone — give me a ring.",
@@ -193,11 +199,18 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
 
       let call: Awaited<ReturnType<typeof inboundFromAut>>[number] | undefined;
       try {
-        call = await pollUntil(
-          "agent call-back",
-          async () => (await inboundFromAut()).find((c) => !before.has(c.id)),
-          VOICE_TIMEOUT_MS,
-        );
+        try {
+          call = await pollUntil(
+            "agent call-back",
+            async () => (await inboundFromAut()).find((c) => !before.has(c.id)),
+            VOICE_TIMEOUT_MS,
+          );
+        } catch (error) {
+          const replies = (await inboundTextsFrom(remote, st.number_id, autPhone.number)).filter(
+            (message) => !beforeTexts.has(message.id),
+          );
+          throw new Error(`${String(error)}; AUT SMS replies=${JSON.stringify(replies)}`);
+        }
         const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
         expect(agentSaid.length).toBeGreaterThan(0);
 
