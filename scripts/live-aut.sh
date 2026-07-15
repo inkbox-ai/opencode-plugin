@@ -83,7 +83,7 @@ else
   cat > opencode.json <<'EOF'
 { "$schema": "https://opencode.ai/config.json" }
 EOF
-  GATEWAY_MODEL="openai/gpt-4o"
+  GATEWAY_MODEL="openai/gpt-5.4-mini"
 fi
 
 SERVE_LOG="$WORKDIR/serve.log"
