@@ -32,6 +32,31 @@ interface DriverState {
   number_id: string;
   handle: string;
 }
+
+const callSummary = (call: {
+  id: string;
+  direction: string;
+  status: string;
+  localPhoneNumber: string | null;
+  remotePhoneNumber: string;
+  clientWebsocketUrl: string | null;
+  useInkboxTts: boolean | null;
+  useInkboxStt: boolean | null;
+  hangupReason: string | null;
+  isBlocked: boolean;
+}) => ({
+  id: call.id,
+  direction: call.direction,
+  status: call.status,
+  localPhoneNumber: call.localPhoneNumber,
+  remotePhoneNumber: call.remotePhoneNumber,
+  clientWebsocketUrl: call.clientWebsocketUrl,
+  useInkboxTts: call.useInkboxTts,
+  useInkboxStt: call.useInkboxStt,
+  hangupReason: call.hangupReason,
+  isBlocked: call.isBlocked,
+});
+
 function driverState(): DriverState {
   return JSON.parse(readFileSync(STATE_FILE, "utf-8"));
 }
@@ -80,7 +105,29 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         fromNumber: st.number,
         clientWebsocketUrl: st.ws_url,
       });
-      const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
+      console.info(`inbound call placed: ${JSON.stringify(callSummary(call))}`);
+      let agentSaid: string;
+      try {
+        agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
+      } catch (error) {
+        const [driverCall, autCalls, incomingAction, rules] = await Promise.all([
+          remote.calls.get(call.id).catch((cause) => ({ error: String(cause) })),
+          aut.calls.list({ limit: 10 }).catch((cause) => [{ error: String(cause) }]),
+          aut.incomingCallAction.get().catch((cause) => ({ error: String(cause) })),
+          aut.phoneIdentityContactRules
+            .list((await aut.mailboxes.list())[0]?.emailAddress.split("@", 1)[0] ?? "")
+            .catch((cause) => [{ error: String(cause) }]),
+        ]);
+        throw new Error(
+          `${String(error)}; inbound diagnostics=${JSON.stringify({
+            placedCall: callSummary(call),
+            driverCall,
+            autCalls,
+            incomingAction,
+            rules,
+          })}`,
+        );
+      }
       expect(agentSaid.length).toBeGreaterThan(0);
 
       const mode = await autSpeechMode(aut, "inbound", st.number);
