@@ -84,6 +84,31 @@ async function ensureDriverAllowed(
 
 const tail = (s: string) => s.replace(/\D/g, "").slice(-10);
 
+async function hangupCall(
+  inkbox: ReturnType<typeof client>,
+  callId: string | undefined,
+): Promise<void> {
+  if (!callId) return;
+  try {
+    await inkbox.calls.hangup(callId);
+    return;
+  } catch (hangupError) {
+    let status = "unknown";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        status = ((await inkbox.calls.get(callId)).status ?? "").toLowerCase();
+      } catch {
+        status = "unknown";
+      }
+      if (["completed", "canceled", "failed"].includes(status)) return;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(
+      `failed to hang up live test call ${callId}; status=${JSON.stringify(status)}; error=${String(hangupError)}`,
+    );
+  }
+}
+
 describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
   it.skipIf(SCENARIO !== "inbound_inkbox")(
     "inbound: driver calls, agent answers via Inkbox STT/TTS and replies",
@@ -106,36 +131,40 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         clientWebsocketUrl: st.ws_url,
       });
       console.info(`inbound call placed: ${JSON.stringify(callSummary(call))}`);
-      let agentSaid: string;
       try {
-        agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
-      } catch (error) {
-        const [driverCall, autCalls, incomingAction, rules] = await Promise.all([
-          remote.calls.get(call.id).catch((cause) => ({ error: String(cause) })),
-          aut.calls.list({ limit: 10 }).catch((cause) => [{ error: String(cause) }]),
-          aut.incomingCallAction.get().catch((cause) => ({ error: String(cause) })),
-          aut.phoneIdentityContactRules
-            .list((await aut.mailboxes.list())[0]?.emailAddress.split("@", 1)[0] ?? "")
-            .catch((cause) => [{ error: String(cause) }]),
-        ]);
-        throw new Error(
-          `${String(error)}; inbound diagnostics=${JSON.stringify({
-            placedCall: callSummary(call),
-            driverCall,
-            autCalls,
-            incomingAction,
-            rules,
-          })}`,
-        );
-      }
-      expect(agentSaid.length).toBeGreaterThan(0);
+        let agentSaid: string;
+        try {
+          agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
+        } catch (error) {
+          const [driverCall, autCalls, incomingAction, rules] = await Promise.all([
+            remote.calls.get(call.id).catch((cause) => ({ error: String(cause) })),
+            aut.calls.list({ limit: 10 }).catch((cause) => [{ error: String(cause) }]),
+            aut.incomingCallAction.get().catch((cause) => ({ error: String(cause) })),
+            aut.phoneIdentityContactRules
+              .list((await aut.mailboxes.list())[0]?.emailAddress.split("@", 1)[0] ?? "")
+              .catch((cause) => [{ error: String(cause) }]),
+          ]);
+          throw new Error(
+            `${String(error)}; inbound diagnostics=${JSON.stringify({
+              placedCall: callSummary(call),
+              driverCall,
+              autCalls,
+              incomingAction,
+              rules,
+            })}`,
+          );
+        }
+        expect(agentSaid.length).toBeGreaterThan(0);
 
-      const mode = await autSpeechMode(aut, "inbound", st.number);
-      expect(mode, "no answered inbound AUT call with the driver").toBeDefined();
-      expect(
-        mode?.tts && mode?.stt,
-        `inbound should be Inkbox STT/TTS, got ${JSON.stringify(mode)}`,
-      ).toBe(true);
+        const mode = await autSpeechMode(aut, "inbound", st.number);
+        expect(mode, "no answered inbound AUT call with the driver").toBeDefined();
+        expect(
+          mode?.tts && mode?.stt,
+          `inbound should be Inkbox STT/TTS, got ${JSON.stringify(mode)}`,
+        ).toBe(true);
+      } finally {
+        await hangupCall(remote, call.id);
+      }
     },
   );
 
@@ -162,20 +191,25 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         text: "Please call me right now by phone — give me a ring.",
       });
 
-      const call = await pollUntil(
-        "agent call-back",
-        async () => (await inboundFromAut()).find((c) => !before.has(c.id)),
-        VOICE_TIMEOUT_MS,
-      );
-      const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
-      expect(agentSaid.length).toBeGreaterThan(0);
+      let call: Awaited<ReturnType<typeof inboundFromAut>>[number] | undefined;
+      try {
+        call = await pollUntil(
+          "agent call-back",
+          async () => (await inboundFromAut()).find((c) => !before.has(c.id)),
+          VOICE_TIMEOUT_MS,
+        );
+        const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
+        expect(agentSaid.length).toBeGreaterThan(0);
 
-      const mode = await autSpeechMode(aut, "outbound", st.number);
-      expect(mode, "no answered outbound AUT call with the driver").toBeDefined();
-      expect(
-        mode?.tts === false && mode?.stt === false,
-        `outbound should be Realtime, got ${JSON.stringify(mode)}`,
-      ).toBe(true);
+        const mode = await autSpeechMode(aut, "outbound", st.number);
+        expect(mode, "no answered outbound AUT call with the driver").toBeDefined();
+        expect(
+          mode?.tts === false && mode?.stt === false,
+          `outbound should be Realtime, got ${JSON.stringify(mode)}`,
+        ).toBe(true);
+      } finally {
+        await hangupCall(remote, call?.id);
+      }
     },
   );
 });
