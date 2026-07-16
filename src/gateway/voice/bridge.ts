@@ -391,7 +391,12 @@ export function createCallBridge(deps: CallBridgeDeps) {
               0,
               ctx.transcript.length,
               ...stored.map((segment) => {
-                const party = segment.party === "remote" ? "caller" : segment.party;
+                const party =
+                  segment.party === "remote"
+                    ? "caller"
+                    : segment.party === "local"
+                      ? "agent"
+                      : segment.party;
                 return `${party}: ${segment.text}`;
               }),
             );
