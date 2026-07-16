@@ -26,6 +26,8 @@ export interface RealtimeCallbacks {
   onAudioDone?(): void;
   // The caller started talking over the model — clear queued playback.
   onBargeIn?(): void;
+  // Completed Realtime transcripts used for post-call recovery.
+  onTranscript?(party: "caller" | "agent", text: string): void;
   // Run a full agent turn in the caller's session; the returned text is
   // spoken back. Runs off the audio pump so speech never freezes.
   onConsult(query: string): Promise<string>;
@@ -229,6 +231,17 @@ export function openRealtimeBridge(
       case "response.audio.done":
         cb.onAudioDone?.();
         break;
+      case "conversation.item.input_audio_transcription.completed": {
+        const text = String(evt.transcript ?? "").trim();
+        if (text) cb.onTranscript?.("caller", text);
+        break;
+      }
+      case "response.output_audio_transcript.done":
+      case "response.audio_transcript.done": {
+        const text = String(evt.transcript ?? "").trim();
+        if (text) cb.onTranscript?.("agent", text);
+        break;
+      }
       case "response.output_item.added": {
         const item = evt.item ?? {};
         if (item.type === "function_call") {
@@ -295,6 +308,7 @@ export function openRealtimeBridge(
   }): Promise<void> {
     const name = evt.name;
     const callId = evt.call_id;
+    cb.logger.info("realtime.function_call", { name });
     let args: any = {};
     try {
       args = evt.arguments ? JSON.parse(evt.arguments) : {};
