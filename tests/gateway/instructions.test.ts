@@ -73,6 +73,7 @@ describe("buildVoiceInstructions", () => {
     expect(out).toContain("consult_agent");
     expect(out).toContain("Do not promise work outside that list");
     expect(out).toContain("register_post_call_action");
+    expect(out).toContain("There is no implicit background queue");
     expect(out).toContain("hang_up_call");
     expect(out).toContain("third parties");
   });

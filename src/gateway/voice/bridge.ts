@@ -37,6 +37,10 @@ const GREETING = "Hi, you've reached the assistant. How can I help?";
 // How long to wait for the OpenAI session (connect + session.update round
 // trip) before falling back to Inkbox speech. Cold TLS/DNS can eat seconds.
 const REALTIME_READY_TIMEOUT_MS = 10_000;
+const CALL_STATUS_POLL_MS = 2_000;
+const TRANSCRIPT_RETRY_MS = 500;
+const TRANSCRIPT_ATTEMPTS = 5;
+const ENDED_CALL_STATUSES = new Set(["completed", "failed", "canceled"]);
 
 // Owns the /phone/media/ws endpoint. The upgrade is authenticated with the
 // Inkbox webhook signature over the X-Call-Context header, and the caller
@@ -205,6 +209,9 @@ export function createCallBridge(deps: CallBridgeDeps) {
         onAudio: (b64) => callWs && sendMedia(callWs, b64),
         onAudioDone: () => callWs && sendAudioDone(callWs),
         onBargeIn: () => callWs && sendClear(callWs),
+        onTranscript: (party, text) => {
+          ctx.transcript.push(`${party}: ${text}`);
+        },
         onConsult: async (query) => {
           ctx.transcript.push(`caller: ${query}`);
           const answer = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${query}`);
@@ -277,6 +284,21 @@ export function createCallBridge(deps: CallBridgeDeps) {
       realtime.start(buildVoiceGreeting(meta));
     }
 
+    let finishCall: () => void = () => {};
+    const callEnded = new Promise<void>((resolve) => {
+      let finished = false;
+      finishCall = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+      ws.once("close", finishCall);
+      ws.once("error", (err) => {
+        deps.logger.warn("call.socket_error", { callId: ctx.callId, error: String(err) });
+        finishCall();
+      });
+    });
+
     ws.on("message", (data) => {
       const frame = parseFrame(data);
       if (!frame) return;
@@ -316,6 +338,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
         return;
       }
       if (frame.event === "stop" || frame.event === "closed" || frame.event === "hangup") {
+        finishCall();
         try {
           ws.close();
         } catch {
@@ -324,8 +347,69 @@ export function createCallBridge(deps: CallBridgeDeps) {
       }
     }
 
-    await new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    let poll: ReturnType<typeof setInterval> | undefined;
+    if (ctx.callId) {
+      let checking = false;
+      const client = await deps.inkbox.getClient();
+      poll = setInterval(() => {
+        if (checking) return;
+        checking = true;
+        void client.calls
+          .get(ctx.callId as string)
+          .then((call) => {
+            if (ENDED_CALL_STATUSES.has(String(call.status).toLowerCase())) finishCall();
+          })
+          .catch((err) => {
+            deps.logger.warn("call.status_check_failed", {
+              callId: ctx.callId,
+              error: String(err),
+            });
+          })
+          .finally(() => {
+            checking = false;
+          });
+      }, CALL_STATUS_POLL_MS);
+      poll.unref?.();
+    }
+
+    await callEnded;
+    if (poll) clearInterval(poll);
+    try {
+      ws.close();
+    } catch {
+      /* already closing */
+    }
     await realtime?.close();
+
+    if (ctx.callId) {
+      const client = await deps.inkbox.getClient();
+      for (let attempt = 1; attempt <= TRANSCRIPT_ATTEMPTS; attempt++) {
+        try {
+          const stored = await client.calls.transcripts(ctx.callId);
+          if (stored.length > 0) {
+            ctx.transcript.splice(
+              0,
+              ctx.transcript.length,
+              ...stored.map((segment) => {
+                const party = segment.party === "remote" ? "caller" : segment.party;
+                return `${party}: ${segment.text}`;
+              }),
+            );
+            break;
+          }
+        } catch (err) {
+          if (attempt === TRANSCRIPT_ATTEMPTS) {
+            deps.logger.warn("call.transcript_fetch_failed", {
+              callId: ctx.callId,
+              error: String(err),
+            });
+          }
+        }
+        if (attempt < TRANSCRIPT_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, TRANSCRIPT_RETRY_MS));
+        }
+      }
+    }
     deps.logger.info("call.ended", { chatKey: ctx.chatKey });
 
     // Post-call: run queued actions, or a reflection turn, off the closed call.
