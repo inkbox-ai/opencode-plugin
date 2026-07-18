@@ -30,20 +30,6 @@ function makeCtx() {
 
 function makeClient() {
   return {
-    contacts: {
-      access: {
-        list: vi.fn(async () => [
-          { id: "grant-1", contactId: "contact-1", identityId: "identity-1", wildcard: false },
-        ]),
-        grant: vi.fn(async () => ({
-          id: "grant-2",
-          contactId: "contact-1",
-          identityId: "identity-2",
-          wildcard: false,
-        })),
-        revoke: vi.fn(async () => undefined),
-      },
-    },
     notes: {
       access: {
         list: vi.fn(async () => [
@@ -68,12 +54,9 @@ function outputText(result: unknown): string {
 }
 
 describe("accessTools", () => {
-  it("registers the six access tools in the access group", () => {
+  it("registers the three note access tools in the access group", () => {
     const tools = accessTools(makeDeps(makeClient()));
     expect(tools.map((t) => t.name)).toEqual([
-      "inkbox_list_contact_access",
-      "inkbox_grant_contact_access",
-      "inkbox_revoke_contact_access",
       "inkbox_list_note_access",
       "inkbox_grant_note_access",
       "inkbox_revoke_note_access",
@@ -89,130 +72,6 @@ describe("accessTools", () => {
     for (const tool of tools) {
       expect(tool.defaultEnabled).toBe(false);
     }
-  });
-
-  describe("inkbox_list_contact_access", () => {
-    it("lists grants for the contact and reports the count", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_list_contact_access");
-      const result = await tool.definition.execute({ contactId: "contact-1" }, makeCtx());
-      expect(client.contacts.access.list).toHaveBeenCalledWith("contact-1");
-      const text = outputText(result);
-      expect(text).toContain("Returned 1 contact access grant(s).");
-      expect(text).toContain('"identityId": "identity-1"');
-    });
-
-    it("declares a schema that requires contactId", () => {
-      const tool = findTool(accessTools(makeDeps(makeClient())), "inkbox_list_contact_access");
-      const schema = z.object(tool.definition.args);
-      expect(schema.safeParse({ contactId: "contact-1" }).success).toBe(true);
-      expect(schema.safeParse({}).success).toBe(false);
-      expect(schema.safeParse({ contactId: 42 }).success).toBe(false);
-    });
-  });
-
-  describe("inkbox_grant_contact_access", () => {
-    it("grants a specific identity access to the contact", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      const result = await tool.definition.execute(
-        { contactId: "contact-1", identityId: "identity-2" },
-        makeCtx(),
-      );
-      expect(client.contacts.access.grant).toHaveBeenCalledWith("contact-1", {
-        identityId: "identity-2",
-        wildcard: false,
-      });
-      const text = outputText(result);
-      expect(text).toContain("Granted contact access.");
-      expect(text).toContain('"identityId": "identity-2"');
-    });
-
-    it("grants wildcard access without an identityId", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      await tool.definition.execute({ contactId: "contact-1", wildcard: true }, makeCtx());
-      expect(client.contacts.access.grant).toHaveBeenCalledWith("contact-1", {
-        identityId: undefined,
-        wildcard: true,
-      });
-    });
-
-    it("trims surrounding whitespace from identityId before granting", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      await tool.definition.execute(
-        { contactId: "contact-1", identityId: "  identity-2  " },
-        makeCtx(),
-      );
-      expect(client.contacts.access.grant).toHaveBeenCalledWith("contact-1", {
-        identityId: "identity-2",
-        wildcard: false,
-      });
-    });
-
-    it("rejects passing both identityId and wildcard=true", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      await expect(
-        tool.definition.execute(
-          { contactId: "contact-1", identityId: "identity-2", wildcard: true },
-          makeCtx(),
-        ),
-      ).rejects.toThrow("Pass either identityId or wildcard=true, not both.");
-      expect(client.contacts.access.grant).not.toHaveBeenCalled();
-    });
-
-    it("rejects when neither identityId nor wildcard=true is given", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      await expect(tool.definition.execute({ contactId: "contact-1" }, makeCtx())).rejects.toThrow(
-        "identityId is required unless wildcard=true.",
-      );
-      expect(client.contacts.access.grant).not.toHaveBeenCalled();
-    });
-
-    it("treats a whitespace-only identityId as missing", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_grant_contact_access");
-      await expect(
-        tool.definition.execute({ contactId: "contact-1", identityId: "   " }, makeCtx()),
-      ).rejects.toThrow("identityId is required unless wildcard=true.");
-      expect(client.contacts.access.grant).not.toHaveBeenCalled();
-    });
-
-    it("declares a schema with optional identityId and boolean wildcard", () => {
-      const tool = findTool(accessTools(makeDeps(makeClient())), "inkbox_grant_contact_access");
-      const schema = z.object(tool.definition.args);
-      expect(schema.safeParse({ contactId: "c", identityId: "i" }).success).toBe(true);
-      expect(schema.safeParse({ contactId: "c", wildcard: true }).success).toBe(true);
-      expect(schema.safeParse({ contactId: "c" }).success).toBe(true);
-      expect(schema.safeParse({}).success).toBe(false);
-      expect(schema.safeParse({ contactId: "c", wildcard: "yes" }).success).toBe(false);
-    });
-  });
-
-  describe("inkbox_revoke_contact_access", () => {
-    it("revokes the identity's access and summarizes it", async () => {
-      const client = makeClient();
-      const tool = findTool(accessTools(makeDeps(client)), "inkbox_revoke_contact_access");
-      const result = await tool.definition.execute(
-        { contactId: "contact-1", identityId: "identity-1" },
-        makeCtx(),
-      );
-      expect(client.contacts.access.revoke).toHaveBeenCalledWith("contact-1", "identity-1");
-      expect(outputText(result)).toContain(
-        "Revoked identity identity-1 access to contact contact-1.",
-      );
-    });
-
-    it("declares a schema that requires contactId and identityId", () => {
-      const tool = findTool(accessTools(makeDeps(makeClient())), "inkbox_revoke_contact_access");
-      const schema = z.object(tool.definition.args);
-      expect(schema.safeParse({ contactId: "c", identityId: "i" }).success).toBe(true);
-      expect(schema.safeParse({ contactId: "c" }).success).toBe(false);
-      expect(schema.safeParse({ identityId: "i" }).success).toBe(false);
-    });
   });
 
   describe("inkbox_list_note_access", () => {

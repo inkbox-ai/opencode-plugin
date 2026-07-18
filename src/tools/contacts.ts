@@ -40,7 +40,10 @@ const createContactArgs = {
   familyName: z.string().describe("Family/last name.").optional(),
   companyName: z.string().describe("Company or organization.").optional(),
   jobTitle: z.string().describe("Job title.").optional(),
-  notes: z.string().describe("Free-form contact notes.").optional(),
+  notes: z
+    .string()
+    .describe("User-managed contact notes, separate from generated contact facts.")
+    .optional(),
   emails: z.array(contactEmailSchema).describe("Email addresses.").optional(),
   phones: z.array(contactPhoneSchema).describe("Phone numbers.").optional(),
 };
@@ -128,10 +131,8 @@ function buildContactWritePayload(args: ContactWriteArgs): Record<string, unknow
   return payload;
 }
 
-// Contacts are an org-level address book filtered server-side by per-identity
-// access grants. With an agent-scoped key, list/lookup/get already return only
-// the contacts this identity has access to — we don't filter client-side.
-// Grant management lives in the opt-in "access" tool group.
+// Contacts and generated contact facts are organization-wide. Correspondence
+// remains scoped to the configured identity's authorized channel history.
 export function contactTools(deps: ToolDeps): RegisteredTool[] {
   const { runtime } = deps;
   return [
@@ -141,7 +142,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       defaultEnabled: true,
       definition: {
         description:
-          "Reverse-lookup contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains. Returns contacts this identity has access to.",
+          "Reverse-lookup organization-wide contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains.",
         args: lookupContactArgs,
         async execute(args: LookupContactArgs, _ctx) {
           return runTool(async () => {
@@ -174,8 +175,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       group: "contacts",
       defaultEnabled: true,
       definition: {
-        description:
-          "List contacts this identity has access to. Optional free-text search via `q`; results scoped by per-identity grants.",
+        description: "List organization-wide contacts. Optional free-text search via `q`.",
         args: listContactsArgs,
         async execute(args: ListContactsArgs, _ctx) {
           return runTool(async () => {
