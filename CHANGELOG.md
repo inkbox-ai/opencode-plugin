@@ -28,3 +28,6 @@ Initial release.
 - Local-file media on `inkbox_send_email` (`attachmentPaths`),
   `inkbox_send_sms`/`inkbox_send_imessage` (`mediaPaths`); `inkbox_place_call`
   carries a call purpose and opening message.
+- Realtime voice follow-ups recover from completed calls even when the media
+  socket stays open, using the persisted call transcript to execute promised
+  post-call work.

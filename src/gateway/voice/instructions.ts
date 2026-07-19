@@ -118,6 +118,8 @@ export function buildVoiceInstructions(meta: CallMeta): string {
     `If the caller explicitly asks for work to happen after the call, or accepts an ` +
       `after-call deferral, call ${REGISTER_ACTION_TOOL}. Tell the caller the action is ` +
       `queued for after the call; do not claim it has already been completed.`,
+    `Never say work is queued, in progress, or will run later unless ${CONSULT_TOOL} or ` +
+      `${REGISTER_ACTION_TOOL} returned success. There is no implicit background queue.`,
     `If the caller changes or cancels previously queued after-call work, call ` +
       `${EDIT_ACTION_TOOL} or ${DELETE_ACTION_TOOL} with the id returned when it was queued.`,
     `If ${CONSULT_TOOL} completes or queues work that matches a previously registered ` +

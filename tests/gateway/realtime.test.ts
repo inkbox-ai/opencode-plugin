@@ -86,6 +86,36 @@ describe("realtime session configuration", () => {
 });
 
 describe("realtime function-call lifecycle", () => {
+  it("captures completed caller and agent transcripts", () => {
+    const fake = fakeSocket();
+    const onTranscript = vi.fn();
+    openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: vi.fn(),
+        onTranscript,
+        onConsult: vi.fn(async () => ""),
+        onHangup: vi.fn(),
+        logger,
+      },
+      () => 0,
+      () => fake.ws as never,
+    );
+
+    emitMessage(fake, {
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "do this after the call",
+    });
+    emitMessage(fake, {
+      type: "response.output_audio_transcript.done",
+      transcript: "I queued it",
+    });
+
+    expect(onTranscript).toHaveBeenNthCalledWith(1, "caller", "do this after the call");
+    expect(onTranscript).toHaveBeenNthCalledWith(2, "agent", "I queued it");
+  });
+
   it("accumulates name + call id + args across the three events before dispatching", async () => {
     const fake = fakeSocket();
     const onConsult = vi.fn(async () => "the answer");
