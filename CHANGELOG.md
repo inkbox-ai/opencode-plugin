@@ -4,6 +4,7 @@
 
 Initial release.
 
+- Requires `@inkbox/sdk` 0.5.0 or newer.
 - 56 `inkbox_*` tools across email, SMS/MMS, iMessage, calls, contacts, notes,
   contact rules, access grants, encrypted vault, and diagnostics. 24 are
   enabled by default; the rest are opt-in via the `tools.enable` plugin option

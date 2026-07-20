@@ -25,7 +25,11 @@ echo "==> creating throwaway project in $WORKDIR"
 cd "$WORKDIR"
 git init -q .
 npm init -y >/dev/null
-npm install --silent "$TARBALL"
+if [ -n "${INKBOX_SDK_PATH:-}" ]; then
+  npm install --silent "$INKBOX_SDK_PATH" "$TARBALL"
+else
+  npm install --silent "$TARBALL"
+fi
 
 mkdir -p .opencode/plugins
 # The wrapper loads the packaged plugin exactly as opencode would, then drops

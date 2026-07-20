@@ -10,11 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: inkbox-ai/inkbox
+          ref: 8f4b37c56cd153a2acc6cfabe27dbbeb43510f00
+          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: |
+          npm ci --prefix .ci/inkbox/sdk/typescript
+          npm run build --prefix .ci/inkbox/sdk/typescript
+          npm install --no-save --package-lock=false \
+            ./.ci/inkbox/sdk/typescript \
+            @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -26,12 +36,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: inkbox-ai/inkbox
+          ref: 8f4b37c56cd153a2acc6cfabe27dbbeb43510f00
+          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm install -D @opencode-ai/plugin@latest
+      - run: |
+          npm ci --prefix .ci/inkbox/sdk/typescript
+          npm run build --prefix .ci/inkbox/sdk/typescript
+          npm install --no-save --package-lock=false \
+            ./.ci/inkbox/sdk/typescript \
+            @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
+      - run: |
+          npm install --no-save --package-lock=false \
+            ./.ci/inkbox/sdk/typescript \
+            @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
       - run: npx vitest run tests/contract
 
@@ -39,10 +62,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: inkbox-ai/inkbox
+          ref: 8f4b37c56cd153a2acc6cfabe27dbbeb43510f00
+          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: |
+          npm ci --prefix .ci/inkbox/sdk/typescript
+          npm run build --prefix .ci/inkbox/sdk/typescript
+          npm install --no-save --package-lock=false \
+            ./.ci/inkbox/sdk/typescript \
+            @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm install -g opencode-ai@latest
-      - run: bash scripts/smoke-loader.sh
+      - run: INKBOX_SDK_PATH="$PWD/.ci/inkbox/sdk/typescript" bash scripts/smoke-loader.sh
