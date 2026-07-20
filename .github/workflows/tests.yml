@@ -78,4 +78,4 @@ jobs:
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm install -g opencode-ai@latest
-      - run: bash scripts/smoke-loader.sh
+      - run: INKBOX_SDK_PATH="$PWD/.ci/inkbox/sdk/typescript" bash scripts/smoke-loader.sh
