@@ -75,6 +75,9 @@ const OPT_IN = [
   "inkbox_place_call",
   "inkbox_update_note",
   "inkbox_delete_note",
+  "inkbox_list_contact_access",
+  "inkbox_grant_contact_access",
+  "inkbox_revoke_contact_access",
   "inkbox_list_note_access",
   "inkbox_grant_note_access",
   "inkbox_revoke_note_access",
@@ -108,10 +111,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 48 tools", () => {
+  it("ships exactly the expected 51 tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(48);
+    expect(names).toHaveLength(51);
   });
 
   it("has no duplicate tool names", () => {

@@ -111,7 +111,7 @@ groups are enabled.
 
 ## Tools
 
-27 tools are enabled by default; 21 more are opt-in (see
+27 tools are enabled by default; 24 more are opt-in (see
 [Enabling more tools](#enabling-more-tools)). Names are stable — treat renames
 as breaking.
 
@@ -124,11 +124,9 @@ as breaking.
 | `contacts` | `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact` | — |
 | `notes` | `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note` | `inkbox_update_note`, `inkbox_delete_note` |
 | `contact-rules` | `inkbox_list_mail_contact_rules`, `inkbox_list_phone_contact_rules`, `inkbox_list_imessage_contact_rules` (read-only: rule changes are console-only) | — |
-| `access` | — | `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access` |
+| `access` | — | `inkbox_list_contact_access`, `inkbox_grant_contact_access`, `inkbox_revoke_contact_access`, `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access` |
 | `vault` | — | `inkbox_credentials_list`, and by exact name only: `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code` |
 | `diagnostics` | `inkbox_whoami`, `inkbox_doctor` | — |
-
-Contacts and generated contact facts are organization-wide. Contact `notes` remain user-managed profile text, separate from source-grounded generated facts. Correspondence still follows the configured identity's channel permissions. Unified correspondence and generated-fact tools are deferred until the installed SDK exposes those resources; this plugin does not use raw API calls as a substitute.
 
 ### Enabling more tools
 
