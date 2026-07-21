@@ -22,9 +22,8 @@ by a human in the Inkbox console (https://inkbox.ai/console/contact-rules).
 
 1. When the user asks "who is blocked?", "can X reach you?", or "why didn't
    my email arrive?" — list the rules for the matching channel and read the
-   result: `action: "block"` rejects matching traffic, `action: "allow"`
-   permits it when a whitelist posture is active, `status: "paused"` means
-   the rule exists but is not enforced.
+   result: `action: "block"` rejects matching traffic and `action: "allow"`
+   permits it when a whitelist posture is active.
 2. Match types: mail rules use `exact_email` or `domain`; phone and iMessage
    rules use `exact_number` (E.164, e.g. `+15551234567`). Phone rules apply
    to both SMS and voice on the dedicated number.
