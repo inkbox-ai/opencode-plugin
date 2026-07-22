@@ -4,9 +4,9 @@
 
 Initial release.
 
-- Requires `@inkbox/sdk` 0.5.0 or newer.
-- 56 `inkbox_*` tools across email, SMS/MMS, iMessage, calls, contacts, notes,
-  contact rules, access grants, encrypted vault, and diagnostics. 24 are
+- Requires `@inkbox/sdk` 0.5.1 or newer.
+- 48 `inkbox_*` tools across email, SMS/MMS, iMessage, calls, contacts, notes,
+  contact rules, note access grants, encrypted vault, and diagnostics. 27 are
   enabled by default; the rest are opt-in via the `tools.enable` plugin option
   (`inkbox_doctor` reports what is off and how to enable it).
 - Outbound sends and calls gate through opencode's native permission prompts,
