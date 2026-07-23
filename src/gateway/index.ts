@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
 import { createContactResolver } from "./contacts.js";
@@ -70,6 +71,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     logger,
     directory: opts.directory,
   });
+  const a2a = createA2AHandler({
+    inkbox: opts.inkbox,
+    sessions,
+    state,
+    logger,
+  });
 
   // Last delivery target per human, so escalation questions reach them on the
   // channel they last used.
@@ -121,6 +128,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   try {
     await reconcileSubscriptions(deps, transport.publicUrl);
+    await a2a.catchUp();
   } catch (err) {
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
@@ -162,6 +170,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       : undefined;
 
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
+    if (a2a.handles(event)) return a2a.handle(event);
     return dispatchEvent(
       {
         config: opts.config,

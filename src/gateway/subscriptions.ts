@@ -19,6 +19,13 @@ export const IMESSAGE_EVENT_TYPES = [
   "imessage.reaction_received",
   "imessage.delivery_failed",
 ];
+export const A2A_EVENT_TYPES = [
+  "a2a.task.created",
+  "a2a.task.message",
+  "a2a.task.canceled",
+  "a2a.sent_task.updated",
+];
+export const IDENTITY_EVENT_TYPES = [...IMESSAGE_EVENT_TYPES, ...A2A_EVENT_TYPES];
 
 export interface ReconcileResult {
   created: number;
@@ -121,9 +128,11 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber) {
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
-  if (identity.imessageEnabled) {
-    await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
-  }
+  await reconcileOwner(
+    "identity",
+    { agentIdentityId: identity.id },
+    identity.imessageEnabled ? IDENTITY_EVENT_TYPES : A2A_EVENT_TYPES,
+  );
 
   if (deps.config.gateway.voice.enabled) {
     await wireIncomingCalls(deps, identity, base, webhookUrl);

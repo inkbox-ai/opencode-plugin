@@ -1,4 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import type { StateStore } from "./state.js";
@@ -103,6 +104,8 @@ export interface SessionManager {
   // Run an already-framed turn and return the assistant text without
   // delivering it anywhere (used by the voice bridge to speak the reply).
   runText(chatKey: string, framedText: string): Promise<string | undefined>;
+  runA2A(chatKey: string, framedText: string, context: ActiveA2ATurn): Promise<string | undefined>;
+  abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
   resetSession(chatKey: string): Promise<void>;
   abortTurn(chatKey: string): Promise<boolean>;

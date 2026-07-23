@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { activeA2ATurn } from "../a2a-context.js";
+import { findDelegationByTask, promoteAfterSend, recordBeforeSend } from "../a2a-delegations.js";
 import { runTool } from "../errors.js";
 import { formatJson } from "../format.js";
 import { approveOutbound } from "../permissions.js";
@@ -27,10 +29,18 @@ const replyArgs = {
   text: z.string().min(1).describe("Reply text."),
   messageId: z.string().describe("Stable idempotency id.").optional(),
 };
+const completeArgs = {
+  text: z.string().min(1).describe("Final answer."),
+};
+const failArgs = {
+  reason: z.string().min(1).describe("Failure reason."),
+};
 
 type CallArgs = z.infer<z.ZodObject<typeof callArgs>>;
 type CheckArgs = z.infer<z.ZodObject<typeof checkArgs>>;
 type ReplyArgs = z.infer<z.ZodObject<typeof replyArgs>>;
+type CompleteArgs = z.infer<z.ZodObject<typeof completeArgs>>;
+type FailArgs = z.infer<z.ZodObject<typeof failArgs>>;
 
 async function clientFor(deps: ToolDeps): Promise<any> {
   const identity = await deps.runtime.getIdentity();
@@ -62,15 +72,28 @@ export function a2aTools(deps: ToolDeps): RegisteredTool[] {
             });
             const a2a = await clientFor(deps);
             try {
+              const identity = await deps.runtime.getIdentity();
               const target = await a2a.fetchCard(args.cardUrl);
-              return formatJson(
-                await a2a.send(target, {
-                  text: args.text,
-                  contextId: args.contextId,
-                  taskId: args.taskId,
-                  messageId: args.messageId,
-                }),
-              );
+              const messageId = args.messageId ?? crypto.randomUUID();
+              const pendingKey = recordBeforeSend({
+                identityId: String(identity.id),
+                rpcUrl: String(target.rpcUrl),
+                cardUrl: args.cardUrl,
+                contextId: args.contextId,
+                taskId: args.taskId,
+                messageId,
+                sessionId: ctx.sessionID,
+              });
+              const result = await a2a.send(target, {
+                text: args.text,
+                contextId: args.contextId,
+                taskId: args.taskId,
+                messageId,
+              });
+              if (result.task?.id && result.task?.contextId) {
+                promoteAfterSend(pendingKey, String(result.task.contextId), String(result.task.id));
+              }
+              return formatJson(result);
             } finally {
               a2a.close?.();
             }
@@ -118,14 +141,28 @@ export function a2aTools(deps: ToolDeps): RegisteredTool[] {
             });
             const a2a = await clientFor(deps);
             try {
+              const identity = await deps.runtime.getIdentity();
               const target = await a2a.fetchCard(args.cardUrl);
-              return formatJson(
-                await a2a.send(target, {
-                  taskId: args.taskId,
-                  text: args.text,
-                  messageId: args.messageId,
-                }),
-              );
+              const existing = findDelegationByTask(args.taskId);
+              const messageId = args.messageId ?? crypto.randomUUID();
+              const pendingKey = recordBeforeSend({
+                identityId: String(identity.id),
+                rpcUrl: String(target.rpcUrl),
+                cardUrl: args.cardUrl,
+                contextId: existing?.contextId,
+                taskId: args.taskId,
+                messageId,
+                sessionId: ctx.sessionID ?? existing?.sessionId,
+              });
+              const result = await a2a.send(target, {
+                taskId: args.taskId,
+                text: args.text,
+                messageId,
+              });
+              if (result.task?.contextId) {
+                promoteAfterSend(pendingKey, String(result.task.contextId), args.taskId);
+              }
+              return formatJson(result);
             } finally {
               a2a.close?.();
             }
@@ -133,5 +170,63 @@ export function a2aTools(deps: ToolDeps): RegisteredTool[] {
         },
       },
     },
+    {
+      name: "inkbox_a2a_complete",
+      group: "a2a",
+      defaultEnabled: true,
+      definition: {
+        description: "Complete the active inbound A2A task with a final answer.",
+        args: completeArgs,
+        async execute(args: CompleteArgs, ctx) {
+          return inboundIntent(deps, ctx.sessionID, "complete", args.text);
+        },
+      },
+    },
+    {
+      name: "inkbox_a2a_ask_caller",
+      group: "a2a",
+      defaultEnabled: true,
+      definition: {
+        description: "Ask the caller for more input on the active inbound A2A task.",
+        args: completeArgs,
+        async execute(args: CompleteArgs, ctx) {
+          return inboundIntent(deps, ctx.sessionID, "ask_caller", args.text);
+        },
+      },
+    },
+    {
+      name: "inkbox_a2a_fail",
+      group: "a2a",
+      defaultEnabled: true,
+      definition: {
+        description: "Fail the active inbound A2A task with a reason.",
+        args: failArgs,
+        async execute(args: FailArgs, ctx) {
+          return inboundIntent(deps, ctx.sessionID, "fail", args.reason);
+        },
+      },
+    },
   ];
+}
+
+async function inboundIntent(
+  deps: ToolDeps,
+  sessionID: string,
+  intent: "complete" | "ask_caller" | "fail",
+  text: string,
+): Promise<string> {
+  return runTool(async () => {
+    const context = activeA2ATurn(sessionID);
+    if (!context) {
+      throw new Error("This tool is only available during an inbound A2A task");
+    }
+    const identity = await deps.runtime.getIdentity();
+    const reply = (identity as any).a2aReply;
+    if (typeof reply !== "function") {
+      throw new Error("This A2A tool requires @inkbox/sdk with identity.a2aReply() support.");
+    }
+    const result = await reply.call(identity, context.taskId, { intent, text });
+    context.replyIntentCommitted = true;
+    return formatJson(result);
+  });
 }
