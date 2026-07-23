@@ -2,9 +2,12 @@
 
 ## 0.1.1 (unreleased)
 
-- Adds identity-bound A2A 1.0 tools for sending, checking, waiting on, and
-  replying to remote tasks. Outbound calls and replies use the existing
-  approval and recipient-allowlist controls.
+- Adds identity-bound A2A 1.0 client tools plus durable inbound task serving:
+  context-scoped sessions, restart catch-up, task-addressed cancellation, and
+  explicit complete/ask/fail intents. Outbound calls and replies use the
+  existing approval and recipient-allowlist controls.
+- A2A features require `@inkbox/sdk` 0.5.5 or newer. The plugin keeps its
+  existing base dependency range for installations that do not use A2A.
 
 ## 0.1.0 (unreleased)
 

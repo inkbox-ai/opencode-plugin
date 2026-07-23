@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import {
-  IMESSAGE_EVENT_TYPES,
+  A2A_EVENT_TYPES,
+  IDENTITY_EVENT_TYPES,
   MAILBOX_EVENT_TYPES,
   PHONE_EVENT_TYPES,
   reconcileSubscriptions,
@@ -148,7 +149,7 @@ describe("reconcileSubscriptions", () => {
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
-      eventTypes: IMESSAGE_EVENT_TYPES,
+      eventTypes: IDENTITY_EVENT_TYPES,
     });
     expect(subs.update).not.toHaveBeenCalled();
   });
@@ -170,7 +171,7 @@ describe("reconcileSubscriptions", () => {
         id: "sub-im",
         agentIdentityId: "ident-1",
         url: WEBHOOK_URL,
-        eventTypes: IMESSAGE_EVENT_TYPES,
+        eventTypes: IDENTITY_EVENT_TYPES,
       },
     ]);
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
@@ -193,8 +194,12 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ phoneNumber: null, imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 0, updated: 0, unchanged: 1 });
-    expect(subs.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ created: 1, updated: 0, unchanged: 1 });
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: A2A_EVENT_TYPES,
+    });
     expect(subs.update).not.toHaveBeenCalled();
   });
 
@@ -234,14 +239,18 @@ describe("reconcileSubscriptions", () => {
     );
   });
 
-  it("skips the imessage subscription when iMessage is disabled", async () => {
+  it("keeps the identity A2A subscription when iMessage is disabled", async () => {
     const subs = makeSubscriptions();
     const identity = makeIdentity({ imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 2, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
-    expect(owners.some((o: Record<string, unknown>) => "agentIdentityId" in o)).toBe(false);
+    expect(owners).toContainEqual({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: A2A_EVENT_TYPES,
+    });
   });
 
   it("does not touch the incoming-call action when voice is disabled", async () => {

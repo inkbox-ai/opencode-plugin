@@ -111,13 +111,13 @@ groups are enabled.
 
 ## Tools
 
-30 tools are enabled by default; 21 more are opt-in (see
+33 tools are enabled by default; 21 more are opt-in (see
 [Enabling more tools](#enabling-more-tools)). Names are stable — treat renames
 as breaking.
 
 | Group | Enabled by default | Opt-in |
 |---|---|---|
-| `a2a` | `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply` | — |
+| `a2a` | `inkbox_a2a_call`, `inkbox_a2a_check`, `inkbox_a2a_reply`, `inkbox_a2a_complete`, `inkbox_a2a_ask_caller`, `inkbox_a2a_fail` | — |
 | `email` | `inkbox_send_email`, `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread` | `inkbox_forward_email`, `inkbox_mark_emails_read` |
 | `sms` | `inkbox_send_sms`, `inkbox_list_text_conversations`, `inkbox_get_text_conversation` | `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read` |
 | `imessage` | `inkbox_send_imessage`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation` | `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`, `inkbox_mark_imessage_conversation_read` |

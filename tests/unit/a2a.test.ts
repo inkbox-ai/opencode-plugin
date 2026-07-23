@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { clearActiveA2ATurn, setActiveA2ATurn } from "../../src/a2a-context.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { a2aTools } from "../../src/tools/a2a.js";
 
 function makeCtx() {
   return {
+    sessionID: "session-1",
     ask: vi.fn(async () => {}),
     abort: new AbortController().signal,
   } as any;
@@ -12,14 +14,25 @@ function makeCtx() {
 function makeDeps() {
   const a2a = {
     fetchCard: vi.fn(async (url: string) => ({ rpcUrl: `${url}/rpc` })),
-    send: vi.fn(async () => ({ kind: "task", task: { id: "task-1" } })),
+    send: vi.fn(async () => ({
+      kind: "task",
+      task: { id: "task-1", contextId: "context-1" },
+    })),
     getTask: vi.fn(async () => ({ id: "task-1", status: { state: "TASK_STATE_WORKING" } })),
     wait: vi.fn(async () => ({ id: "task-1", status: { state: "TASK_STATE_COMPLETED" } })),
     close: vi.fn(),
   };
-  const identity = { a2aClient: vi.fn(async () => a2a) };
+  const identity = {
+    id: "identity-1",
+    a2aClient: vi.fn(async () => a2a),
+    a2aReply: vi.fn(async (taskId: string, options: unknown) => ({
+      id: taskId,
+      ...(options as object),
+    })),
+  };
   return {
     a2a,
+    identity,
     deps: {
       runtime: {
         getIdentity: vi.fn(async () => identity),
@@ -45,6 +58,10 @@ function getTool(name: string, deps: any) {
 }
 
 describe("a2aTools", () => {
+  beforeEach(() => {
+    process.env.INKBOX_OPENCODE_HOME = `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-tools-${crypto.randomUUID()}`;
+  });
+
   it("sends a task behind the outbound approval gate", async () => {
     const { a2a, deps } = makeDeps();
     const ctx = makeCtx();
@@ -108,5 +125,34 @@ describe("a2aTools", () => {
       { rpcUrl: "https://target.example/card/rpc" },
       expect.objectContaining({ taskId: "task-1", text: "More context." }),
     );
+  });
+
+  it("gates inbound intents to the active A2A session", async () => {
+    const { deps, identity } = makeDeps();
+    const ctx = makeCtx();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    const tool = getTool("inkbox_a2a_ask_caller", deps);
+
+    await expect(tool.definition.execute({ text: "Which region?" }, ctx)).rejects.toThrow(
+      /only available/,
+    );
+    setActiveA2ATurn("session-1", context);
+    try {
+      const result = await tool.definition.execute({ text: "Which region?" }, ctx);
+      expect(result).toContain("ask_caller");
+    } finally {
+      clearActiveA2ATurn("session-1", context);
+    }
+
+    expect(identity.a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "ask_caller",
+      text: "Which region?",
+    });
+    expect(context.replyIntentCommitted).toBe(true);
   });
 });
