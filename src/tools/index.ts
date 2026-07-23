@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
+import { a2aTools } from "./a2a.js";
 import { accessTools } from "./access.js";
 import { callReadTools } from "./call-reads.js";
 import { contactRuleTools } from "./contact-rules.js";
@@ -23,6 +24,7 @@ const EMPTY_GATING: GatingSummary = { enabled: [], disabledByDefault: [], groups
 
 function buildGroups(deps: ToolDeps, getGating: () => GatingSummary): RegisteredTool[] {
   return [
+    ...a2aTools(deps),
     ...sendEmailTools(deps),
     ...forwardEmailTools(deps),
     ...emailReadTools(deps),

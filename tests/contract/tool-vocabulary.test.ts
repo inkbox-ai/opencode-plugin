@@ -32,6 +32,9 @@ function stubDeps(): ToolDeps {
 }
 
 const DEFAULT_ENABLED = [
+  "inkbox_a2a_call",
+  "inkbox_a2a_check",
+  "inkbox_a2a_reply",
   "inkbox_send_email",
   "inkbox_send_sms",
   "inkbox_send_imessage",
@@ -93,6 +96,7 @@ const SENSITIVE = [
 ].sort();
 
 const GROUPS = [
+  "a2a",
   "email",
   "sms",
   "imessage",
@@ -108,10 +112,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 48 tools", () => {
+  it("ships exactly the expected 51 tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(48);
+    expect(names).toHaveLength(51);
   });
 
   it("has no duplicate tool names", () => {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (unreleased)
+
+- Adds identity-bound A2A 1.0 tools for sending, checking, waiting on, and
+  replying to remote tasks. Outbound calls and replies use the existing
+  approval and recipient-allowlist controls.
+
 ## 0.1.0 (unreleased)
 
 Initial release.
