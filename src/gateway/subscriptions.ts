@@ -19,6 +19,13 @@ export const IMESSAGE_EVENT_TYPES = [
   "imessage.reaction_received",
   "imessage.delivery_failed",
 ];
+export const A2A_EVENT_TYPES = [
+  "a2a.task.created",
+  "a2a.task.message",
+  "a2a.task.canceled",
+  "a2a.sent_task.updated",
+];
+export const IDENTITY_EVENT_TYPES = [...IMESSAGE_EVENT_TYPES, ...A2A_EVENT_TYPES];
 
 export interface ReconcileResult {
   created: number;
@@ -40,6 +47,15 @@ function sameEventTypes(a: string[], b: string[]): boolean {
   const setA = new Set(a);
   const setB = new Set(b);
   return setA.size === setB.size && [...setA].every((e) => setB.has(e));
+}
+
+function isUnsupportedA2AEventTypes(err: unknown): boolean {
+  const message = inkboxErrorMessage(err);
+  return (
+    A2A_EVENT_TYPES.some((eventType) => message.includes(eventType)) &&
+    (message.includes("Validation error (422)") ||
+      message.includes("does not belong to any known channel"))
+  );
 }
 
 function normalizePublicUrl(publicUrl: string): string {
@@ -108,6 +124,21 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (kind === "identity" && isUnsupportedA2AEventTypes(err)) {
+        const fallbackEventTypes = eventTypes.filter(
+          (eventType) => !A2A_EVENT_TYPES.includes(eventType),
+        );
+        deps.logger.warn(
+          "Inkbox API does not support A2A webhook events yet; " +
+            (fallbackEventTypes.length
+              ? "reconciling the identity subscription without A2A events"
+              : "skipping the A2A-only identity subscription"),
+        );
+        if (fallbackEventTypes.length) {
+          await reconcileOwner(kind, owner, fallbackEventTypes);
+        }
+        return;
+      }
       throw new Error(
         `Failed to reconcile ${kind} webhook subscription for ${webhookUrl}: ` +
           inkboxErrorMessage(err),
@@ -121,9 +152,11 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber) {
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
-  if (identity.imessageEnabled) {
-    await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
-  }
+  await reconcileOwner(
+    "identity",
+    { agentIdentityId: identity.id },
+    identity.imessageEnabled ? IDENTITY_EVENT_TYPES : A2A_EVENT_TYPES,
+  );
 
   if (deps.config.gateway.voice.enabled) {
     await wireIncomingCalls(deps, identity, base, webhookUrl);

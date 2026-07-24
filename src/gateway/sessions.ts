@@ -1,4 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
+import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
@@ -22,6 +23,7 @@ interface QueuedTurn {
   // True for a follow-up turn enqueued after a delivery failure, so a second
   // failure doesn't spawn another recovery (bounded to one attempt).
   recovered?: boolean;
+  a2aContext?: ActiveA2ATurn;
   resolve: (out: string | undefined) => void;
   reject: (err: unknown) => void;
 }
@@ -34,6 +36,7 @@ interface PerKey {
   runningKind?: TurnKind;
   // Set to interrupt the in-flight normal turn so its partial output is dropped.
   interruptNormal: boolean;
+  runningA2ATaskId?: string;
 }
 
 export interface SessionManagerDeps {
@@ -166,6 +169,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (turn.kind === "normal") entry.interruptNormal = false;
         try {
           const sessionID = await ensureSession(chatKey);
+          if (turn.a2aContext) {
+            entry.runningA2ATaskId = turn.a2aContext.taskId;
+            setActiveA2ATurn(sessionID, turn.a2aContext);
+          }
           let out: string | undefined;
           try {
             out = await runPrompt(sessionID, turn.text, turn.agent);
@@ -207,6 +214,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         } catch (err) {
           deps.logger.error("turn.failed", { chatKey, error: String(err) });
           turn.reject(err);
+        } finally {
+          const sessionID = deps.state.getSession(chatKey);
+          if (sessionID && turn.a2aContext) {
+            clearActiveA2ATurn(sessionID, turn.a2aContext);
+          }
+          entry.runningA2ATaskId = undefined;
         }
       }
     } finally {
@@ -285,6 +298,45 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         });
         void drain(chatKey);
       });
+    },
+
+    async runA2A(chatKey, framedText, context) {
+      if (closing) return undefined;
+      const entry = per(chatKey);
+      return new Promise<string | undefined>((resolve, reject) => {
+        entry.queue.push({
+          kind: "capture",
+          text: framedText,
+          deliver: false,
+          a2aContext: context,
+          resolve,
+          reject,
+        });
+        void drain(chatKey);
+      });
+    },
+
+    async abortA2A(chatKey, taskId) {
+      const entry = keys.get(chatKey);
+      if (!entry) return false;
+      const kept: QueuedTurn[] = [];
+      let removed = false;
+      for (const turn of entry.queue) {
+        if (turn.a2aContext?.taskId === taskId) {
+          turn.resolve(undefined);
+          removed = true;
+        } else {
+          kept.push(turn);
+        }
+      }
+      entry.queue = kept;
+      if (entry.runningA2ATaskId !== taskId) return removed;
+      const sessionID = deps.state.getSession(chatKey);
+      if (!sessionID) return removed;
+      await deps.opencode.session
+        .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+        .catch(() => {});
+      return true;
     },
 
     async resetSession(chatKey) {
