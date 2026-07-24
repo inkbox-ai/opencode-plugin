@@ -122,4 +122,38 @@ describe("createA2AHandler", () => {
 
     expect(runCapture).toHaveBeenCalledWith("contact-1", expect.stringContaining("Which region?"));
   });
+
+  it("continues startup when the A2A API is not deployed yet", async () => {
+    const unavailable = Object.assign(new Error("HTTP 404: Not Found"), {
+      statusCode: 404,
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const identity = {
+      a2aTask: vi.fn(),
+      a2aReply: vi.fn(),
+      iterA2ATasks: vi.fn(() => ({
+        [Symbol.asyncIterator]: () => ({
+          next: vi.fn(async () => {
+            throw unavailable;
+          }),
+        }),
+      })),
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {} as any,
+      state: createStateStore(
+        `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+      ),
+      logger,
+    });
+
+    await expect(handler.catchUp()).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith("a2a.api_unavailable", {
+      error: "Error: HTTP 404: Not Found",
+    });
+  });
 });

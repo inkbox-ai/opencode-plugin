@@ -46,6 +46,16 @@ function registry(state: StateStore): Record<string, RegistryEntry> {
   return value && typeof value === "object" ? (value as Record<string, RegistryEntry>) : {};
 }
 
+function isA2AApiUnavailable(error: unknown): boolean {
+  return (
+    (typeof error === "object" &&
+      error !== null &&
+      "statusCode" in error &&
+      error.statusCode === 404) ||
+    /\bHTTP 404\b/.test(String(error))
+  );
+}
+
 function persist(
   state: StateStore,
   key: string,
@@ -206,24 +216,31 @@ export function createA2AHandler(deps: {
           });
         }
       }
-      for await (const task of id.iterA2ATasks({ state: "submitted" })) {
-        const message = task.messages.at(-1);
-        const data: A2AEventData = {
-          task_id: String(task.id),
-          context_id: String(task.contextId),
-          state: String(task.state),
-          caller: {
-            identity_id: String(task.caller.identityId),
-            organization_id: task.caller.organizationId,
-            handle: task.caller.handle,
-          },
-          message_id: message?.messageId ?? `task:${task.id}`,
-          parts: message?.parts ?? [],
-        };
-        const key = `${data.task_id}:${data.message_id}`;
-        if (registry(deps.state)[key]) continue;
-        persist(deps.state, key, data, "queued");
-        start(key, data);
+      try {
+        for await (const task of id.iterA2ATasks({ state: "submitted" })) {
+          const message = task.messages.at(-1);
+          const data: A2AEventData = {
+            task_id: String(task.id),
+            context_id: String(task.contextId),
+            state: String(task.state),
+            caller: {
+              identity_id: String(task.caller.identityId),
+              organization_id: task.caller.organizationId,
+              handle: task.caller.handle,
+            },
+            message_id: message?.messageId ?? `task:${task.id}`,
+            parts: message?.parts ?? [],
+          };
+          const key = `${data.task_id}:${data.message_id}`;
+          if (registry(deps.state)[key]) continue;
+          persist(deps.state, key, data, "queued");
+          start(key, data);
+        }
+      } catch (error) {
+        if (!isA2AApiUnavailable(error)) throw error;
+        deps.logger.warn("a2a.api_unavailable", {
+          error: String(error),
+        });
       }
     },
   };
