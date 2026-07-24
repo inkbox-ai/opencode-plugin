@@ -52,8 +52,9 @@ function sameEventTypes(a: string[], b: string[]): boolean {
 function isUnsupportedA2AEventTypes(err: unknown): boolean {
   const message = inkboxErrorMessage(err);
   return (
-    message.includes("Validation error (422)") &&
-    A2A_EVENT_TYPES.some((eventType) => message.includes(eventType))
+    A2A_EVENT_TYPES.some((eventType) => message.includes(eventType)) &&
+    (message.includes("Validation error (422)") ||
+      message.includes("does not belong to any known channel"))
   );
 }
 

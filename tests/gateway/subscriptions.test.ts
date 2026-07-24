@@ -259,7 +259,7 @@ describe("reconcileSubscriptions", () => {
     const subs = makeSubscriptions();
     subs.create.mockImplementation(async (options: { url: string; eventTypes: string[] }) => {
       if (options.eventTypes.some((eventType) => A2A_EVENT_TYPES.includes(eventType))) {
-        throw new InkboxAPIError(422, { detail: "a2a.task.created is not a valid event type" });
+        throw new Error("event_type 'a2a.task.created' does not belong to any known channel");
       }
       return {
         id: "sub-created",
