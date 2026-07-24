@@ -25,8 +25,6 @@ export const A2A_EVENT_TYPES = [
   "a2a.task.canceled",
   "a2a.sent_task.updated",
 ];
-export const IDENTITY_EVENT_TYPES = [...IMESSAGE_EVENT_TYPES, ...A2A_EVENT_TYPES];
-
 export interface ReconcileResult {
   created: number;
   updated: number;
@@ -47,6 +45,20 @@ function sameEventTypes(a: string[], b: string[]): boolean {
   const setA = new Set(a);
   const setB = new Set(b);
   return setA.size === setB.size && [...setA].every((e) => setB.has(e));
+}
+
+function eventFamilies(eventTypes: string[]): Set<string> {
+  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+}
+
+function sameWebhookPath(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return leftUrl.origin === rightUrl.origin && leftUrl.pathname === rightUrl.pathname;
+  } catch {
+    return false;
+  }
 }
 
 function isUnsupportedA2AEventTypes(err: unknown): boolean {
@@ -93,14 +105,22 @@ export async function reconcileSubscriptions(
     kind: string,
     owner: SubscriptionOwner,
     eventTypes: string[],
+    subscriptionUrl = webhookUrl,
   ): Promise<void> {
     try {
       const existing = await client.webhooks.subscriptions.list(owner);
-      const ours = existing.find((sub) => sub.url === webhookUrl);
+      const ours = existing.find((sub) => sub.url === subscriptionUrl);
+      const desiredFamilies = eventFamilies(eventTypes);
+      const staleOurs = existing.filter(
+        (sub) =>
+          sub.url !== subscriptionUrl &&
+          sameWebhookPath(sub.url, subscriptionUrl) &&
+          [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
+      );
       if (!ours) {
         const created = await client.webhooks.subscriptions.create({
           ...owner,
-          url: webhookUrl,
+          url: subscriptionUrl,
           eventTypes,
         });
         result.created += 1;
@@ -123,24 +143,22 @@ export async function reconcileSubscriptions(
           subscriptionId: ours.id,
         });
       }
+      for (const stale of staleOurs) {
+        await client.webhooks.subscriptions.delete(stale.id);
+        deps.logger.info("removed stale webhook subscription", {
+          kind,
+          subscriptionId: stale.id,
+        });
+      }
     } catch (err) {
-      if (kind === "identity" && isUnsupportedA2AEventTypes(err)) {
-        const fallbackEventTypes = eventTypes.filter(
-          (eventType) => !A2A_EVENT_TYPES.includes(eventType),
-        );
+      if (kind === "a2a" && isUnsupportedA2AEventTypes(err)) {
         deps.logger.warn(
-          "Inkbox API does not support A2A webhook events yet; " +
-            (fallbackEventTypes.length
-              ? "reconciling the identity subscription without A2A events"
-              : "skipping the A2A-only identity subscription"),
+          "Inkbox API does not support A2A webhook events yet; " + "skipping the A2A subscription",
         );
-        if (fallbackEventTypes.length) {
-          await reconcileOwner(kind, owner, fallbackEventTypes);
-        }
         return;
       }
       throw new Error(
-        `Failed to reconcile ${kind} webhook subscription for ${webhookUrl}: ` +
+        `Failed to reconcile ${kind} webhook subscription for ${subscriptionUrl}: ` +
           inkboxErrorMessage(err),
       );
     }
@@ -153,10 +171,14 @@ export async function reconcileSubscriptions(
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
   await reconcileOwner(
-    "identity",
+    "a2a",
     { agentIdentityId: identity.id },
-    identity.imessageEnabled ? IDENTITY_EVENT_TYPES : A2A_EVENT_TYPES,
+    A2A_EVENT_TYPES,
+    `${webhookUrl}?channel=a2a`,
   );
+  if (identity.imessageEnabled) {
+    await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
+  }
 
   if (deps.config.gateway.voice.enabled) {
     await wireIncomingCalls(deps, identity, base, webhookUrl);

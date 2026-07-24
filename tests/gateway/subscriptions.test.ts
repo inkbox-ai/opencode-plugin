@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import {
   A2A_EVENT_TYPES,
-  IDENTITY_EVENT_TYPES,
   IMESSAGE_EVENT_TYPES,
   MAILBOX_EVENT_TYPES,
   PHONE_EVENT_TYPES,
@@ -136,8 +135,8 @@ describe("reconcileSubscriptions", () => {
     const subs = makeSubscriptions();
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(subs.create).toHaveBeenCalledTimes(4);
     expect(subs.create).toHaveBeenCalledWith({
       mailboxId: "mb-1",
       url: WEBHOOK_URL,
@@ -150,8 +149,13 @@ describe("reconcileSubscriptions", () => {
     });
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
+      url: `${WEBHOOK_URL}?channel=a2a`,
+      eventTypes: A2A_EVENT_TYPES,
+    });
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
-      eventTypes: IDENTITY_EVENT_TYPES,
+      eventTypes: IMESSAGE_EVENT_TYPES,
     });
     expect(subs.update).not.toHaveBeenCalled();
   });
@@ -161,7 +165,7 @@ describe("reconcileSubscriptions", () => {
     await reconcileSubscriptions(makeDeps(makeIdentity(), subs), `${PUBLIC_URL}/`);
 
     for (const [options] of subs.create.mock.calls) {
-      expect(options.url).toBe(WEBHOOK_URL);
+      expect([WEBHOOK_URL, `${WEBHOOK_URL}?channel=a2a`]).toContain(options.url);
     }
   });
 
@@ -170,15 +174,21 @@ describe("reconcileSubscriptions", () => {
       { id: "sub-mb", mailboxId: "mb-1", url: WEBHOOK_URL, eventTypes: ["message.received"] },
       { id: "sub-pn", phoneNumberId: "pn-1", url: WEBHOOK_URL, eventTypes: PHONE_EVENT_TYPES },
       {
+        id: "sub-a2a",
+        agentIdentityId: "ident-1",
+        url: `${WEBHOOK_URL}?channel=a2a`,
+        eventTypes: A2A_EVENT_TYPES,
+      },
+      {
         id: "sub-im",
         agentIdentityId: "ident-1",
         url: WEBHOOK_URL,
-        eventTypes: IDENTITY_EVENT_TYPES,
+        eventTypes: IMESSAGE_EVENT_TYPES,
       },
     ]);
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 0, updated: 1, unchanged: 2 });
+    expect(result).toEqual({ created: 0, updated: 1, unchanged: 3 });
     expect(subs.update).toHaveBeenCalledTimes(1);
     expect(subs.update).toHaveBeenCalledWith("sub-mb", { eventTypes: MAILBOX_EVENT_TYPES });
     expect(subs.create).not.toHaveBeenCalled();
@@ -199,7 +209,7 @@ describe("reconcileSubscriptions", () => {
     expect(result).toEqual({ created: 1, updated: 0, unchanged: 1 });
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
+      url: `${WEBHOOK_URL}?channel=a2a`,
       eventTypes: A2A_EVENT_TYPES,
     });
     expect(subs.update).not.toHaveBeenCalled();
@@ -223,7 +233,7 @@ describe("reconcileSubscriptions", () => {
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
     // Foreign subscriptions are ignored entirely; ours are created alongside.
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
     expect(subs.update).not.toHaveBeenCalled();
     expect(subs.delete).not.toHaveBeenCalled();
   });
@@ -233,7 +243,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ phoneNumber: null });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 2, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners.some((o: Record<string, unknown>) => "phoneNumberId" in o)).toBe(false);
     expect(subs.list).not.toHaveBeenCalledWith(
@@ -250,7 +260,7 @@ describe("reconcileSubscriptions", () => {
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners).toContainEqual({
       agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
+      url: `${WEBHOOK_URL}?channel=a2a`,
       eventTypes: A2A_EVENT_TYPES,
     });
   });
@@ -302,7 +312,7 @@ describe("reconcileSubscriptions", () => {
 
     expect(result).toEqual({ created: 2, updated: 0, unchanged: 0 });
     expect(deps.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("skipping the A2A-only identity subscription"),
+      expect.stringContaining("skipping the A2A subscription"),
     );
   });
 
