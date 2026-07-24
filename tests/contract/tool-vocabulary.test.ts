@@ -35,6 +35,8 @@ const DEFAULT_ENABLED = [
   "inkbox_a2a_call",
   "inkbox_a2a_check",
   "inkbox_a2a_reply",
+  "inkbox_list_a2a_tasks",
+  "inkbox_list_a2a_messages",
   "inkbox_a2a_complete",
   "inkbox_a2a_ask_caller",
   "inkbox_a2a_fail",
@@ -115,10 +117,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 54 tools", () => {
+  it("ships exactly the expected 56 tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(54);
+    expect(names).toHaveLength(56);
   });
 
   it("has no duplicate tool names", () => {

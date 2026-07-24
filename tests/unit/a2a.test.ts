@@ -25,6 +25,14 @@ function makeDeps() {
   const identity = {
     id: "identity-1",
     a2aClient: vi.fn(async () => a2a),
+    a2aTasks: vi.fn(async (options: unknown) => ({
+      items: [{ id: "task-1", options }],
+      nextCursor: "task-next",
+    })),
+    a2aMessages: vi.fn(async (options: unknown) => ({
+      items: [{ id: "message-1", options }],
+      nextCursor: "message-next",
+    })),
     a2aReply: vi.fn(async (taskId: string, options: unknown) => ({
       id: taskId,
       ...(options as object),
@@ -125,6 +133,66 @@ describe("a2aTools", () => {
       { rpcUrl: "https://target.example/card/rpc" },
       expect.objectContaining({ taskId: "task-1", text: "More context." }),
     );
+  });
+
+  it("lists filtered task and message history with cursors", async () => {
+    const { deps, identity } = makeDeps();
+    const ctx = makeCtx();
+    const tasks = await getTool("inkbox_list_a2a_tasks", deps).definition.execute(
+      {
+        direction: "both",
+        requesterHandle: "requester",
+        workerHandle: "worker",
+        state: "completed",
+        contextId: "context-1",
+        query: "summary",
+        since: "2026-07-01T00:00:00Z",
+        cursor: "task-cursor",
+        limit: 3,
+      },
+      ctx,
+    );
+    const messages = await getTool("inkbox_list_a2a_messages", deps).definition.execute(
+      {
+        direction: "outbound",
+        requesterHandle: "requester",
+        workerHandle: "worker",
+        taskId: "task-1",
+        contextId: "context-1",
+        role: "agent",
+        query: "done",
+        since: "2026-07-01T00:00:00Z",
+        cursor: "message-cursor",
+        limit: 4,
+      },
+      ctx,
+    );
+
+    expect(tasks).toContain("task-next");
+    expect(messages).toContain("message-next");
+    expect(identity.a2aTasks).toHaveBeenCalledWith({
+      direction: "both",
+      requesterHandle: "requester",
+      workerHandle: "worker",
+      state: "completed",
+      contextId: "context-1",
+      q: "summary",
+      since: "2026-07-01T00:00:00Z",
+      cursor: "task-cursor",
+      limit: 3,
+    });
+    expect(identity.a2aMessages).toHaveBeenCalledWith({
+      direction: "outbound",
+      requesterHandle: "requester",
+      workerHandle: "worker",
+      taskId: "task-1",
+      contextId: "context-1",
+      role: "agent",
+      q: "done",
+      since: "2026-07-01T00:00:00Z",
+      cursor: "message-cursor",
+      limit: 4,
+    });
   });
 
   it("gates inbound intents to the active A2A session", async () => {

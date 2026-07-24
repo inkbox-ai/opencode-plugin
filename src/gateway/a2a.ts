@@ -186,7 +186,7 @@ export function createA2AHandler(deps: {
         typeof id.a2aReply !== "function"
       ) {
         deps.logger.warn("a2a.sdk_upgrade_required", {
-          requiredVersion: "0.5.5",
+          requiredVersion: "0.5.6",
         });
         return;
       }

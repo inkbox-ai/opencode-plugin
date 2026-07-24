@@ -6,16 +6,17 @@
   context-scoped sessions, restart catch-up, task-addressed cancellation, and
   explicit complete/ask/fail intents. Outbound calls and replies use the
   existing approval and recipient-allowlist controls.
-- A2A features require `@inkbox/sdk` 0.5.5 or newer. The plugin keeps its
-  existing base dependency range for installations that do not use A2A.
+- Adds paginated task and message history with direction, participant,
+  lifecycle, context, role, keyword, and timestamp filters.
+- The plugin requires `@inkbox/sdk` 0.5.6 or newer.
 
 ## 0.1.0 (unreleased)
 
 Initial release.
 
-- Requires `@inkbox/sdk` 0.5.1 or newer.
-- 48 `inkbox_*` tools across email, SMS/MMS, iMessage, calls, contacts, notes,
-  contact rules, note access grants, encrypted vault, and diagnostics. 27 are
+- Requires `@inkbox/sdk` 0.5.6 or newer.
+- 56 `inkbox_*` tools across A2A, email, SMS/MMS, iMessage, calls, contacts,
+  notes, contact rules, note access grants, encrypted vault, and diagnostics. 35 are
   enabled by default; the rest are opt-in via the `tools.enable` plugin option
   (`inkbox_doctor` reports what is off and how to enable it).
 - Outbound sends and calls gate through opencode's native permission prompts,
