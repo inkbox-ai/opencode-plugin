@@ -10,6 +10,7 @@
 #   INKBOX_BASE_URL         Inkbox API origin (default https://inkbox.ai)
 #   OPENAI_API_KEY          required when MODE=real
 #   LIVE_WORKDIR            where to stage (default: mktemp)
+#   INKBOX_SDK_PATH         optional local SDK source installed with the plugin
 #   INKBOX_WEBHOOK_SECRET_GITHUB  optional; enables external-event turns
 #
 # Out (appended to $GITHUB_ENV when present, else printed):
@@ -46,7 +47,11 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 git init -q . 2>/dev/null || true
 npm init -y >/dev/null 2>&1 || true
-npm install --silent "$TARBALL"
+if [ -n "${INKBOX_SDK_PATH:-}" ]; then
+  npm install --silent --package-lock=false "$INKBOX_SDK_PATH" "$TARBALL"
+else
+  npm install --silent "$TARBALL"
+fi
 mkdir -p .opencode/plugins .opencode/agent
 cp "$ROOT/agents/inkbox-channel.md" .opencode/agent/
 

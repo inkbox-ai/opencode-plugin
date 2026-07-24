@@ -80,6 +80,7 @@ jobs:
       - name: Boot the AUT gateway (${{ matrix.mode }})
         env:
           MODE: ${{ matrix.mode }}
+          INKBOX_SDK_PATH: ${{ github.workspace }}/.ci/inkbox/sdk/typescript
           AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
