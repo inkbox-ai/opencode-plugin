@@ -49,6 +49,14 @@ function sameEventTypes(a: string[], b: string[]): boolean {
   return setA.size === setB.size && [...setA].every((e) => setB.has(e));
 }
 
+function isUnsupportedA2AEventTypes(err: unknown): boolean {
+  const message = inkboxErrorMessage(err);
+  return (
+    message.includes("Validation error (422)") &&
+    A2A_EVENT_TYPES.some((eventType) => message.includes(eventType))
+  );
+}
+
 function normalizePublicUrl(publicUrl: string): string {
   const base = publicUrl.trim().replace(/\/+$/, "");
   if (!/^https?:\/\//.test(base)) {
@@ -115,6 +123,21 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (kind === "identity" && isUnsupportedA2AEventTypes(err)) {
+        const fallbackEventTypes = eventTypes.filter(
+          (eventType) => !A2A_EVENT_TYPES.includes(eventType),
+        );
+        deps.logger.warn(
+          "Inkbox API does not support A2A webhook events yet; " +
+            (fallbackEventTypes.length
+              ? "reconciling the identity subscription without A2A events"
+              : "skipping the A2A-only identity subscription"),
+        );
+        if (fallbackEventTypes.length) {
+          await reconcileOwner(kind, owner, fallbackEventTypes);
+        }
+        return;
+      }
       throw new Error(
         `Failed to reconcile ${kind} webhook subscription for ${webhookUrl}: ` +
           inkboxErrorMessage(err),

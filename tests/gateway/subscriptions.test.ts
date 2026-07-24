@@ -1,8 +1,10 @@
+import { InkboxAPIError } from "@inkbox/sdk";
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import {
   A2A_EVENT_TYPES,
   IDENTITY_EVENT_TYPES,
+  IMESSAGE_EVENT_TYPES,
   MAILBOX_EVENT_TYPES,
   PHONE_EVENT_TYPES,
   reconcileSubscriptions,
@@ -251,6 +253,57 @@ describe("reconcileSubscriptions", () => {
       url: WEBHOOK_URL,
       eventTypes: A2A_EVENT_TYPES,
     });
+  });
+
+  it("falls back to legacy identity events when the API rejects A2A event types", async () => {
+    const subs = makeSubscriptions();
+    subs.create.mockImplementation(async (options: { url: string; eventTypes: string[] }) => {
+      if (options.eventTypes.some((eventType) => A2A_EVENT_TYPES.includes(eventType))) {
+        throw new InkboxAPIError(422, { detail: "a2a.task.created is not a valid event type" });
+      }
+      return {
+        id: "sub-created",
+        url: options.url,
+        eventTypes: options.eventTypes,
+        signingKey: null,
+      };
+    });
+    const deps = makeDeps(makeIdentity(), subs);
+
+    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
+
+    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
+    expect(subs.create).toHaveBeenLastCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("does not support A2A webhook events yet"),
+    );
+  });
+
+  it("continues without an identity subscription when only A2A events are unsupported", async () => {
+    const subs = makeSubscriptions();
+    subs.create.mockImplementation(async (options: { url: string; eventTypes: string[] }) => {
+      if (options.eventTypes.some((eventType) => A2A_EVENT_TYPES.includes(eventType))) {
+        throw new InkboxAPIError(422, { detail: "a2a.task.created is not a valid event type" });
+      }
+      return {
+        id: "sub-created",
+        url: options.url,
+        eventTypes: options.eventTypes,
+        signingKey: null,
+      };
+    });
+    const deps = makeDeps(makeIdentity({ imessageEnabled: false }), subs);
+
+    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
+
+    expect(result).toEqual({ created: 2, updated: 0, unchanged: 0 });
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("skipping the A2A-only identity subscription"),
+    );
   });
 
   it("does not touch the incoming-call action when voice is disabled", async () => {
