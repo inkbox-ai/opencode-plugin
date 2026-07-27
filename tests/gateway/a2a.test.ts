@@ -76,6 +76,35 @@ describe("createA2AHandler", () => {
     expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
   });
 
+  it("does not overwrite an input-required outcome with default completion", async () => {
+    const a2aReply = vi.fn();
+    const identity = {
+      id: "identity-1",
+      a2aTask: vi.fn(async () => ({ id: "task-1", state: "input_required" })),
+      a2aReply,
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn(async () => "Which region?"),
+      } as any,
+      state: createStateStore(
+        `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+      ),
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await vi.waitFor(() => {
+      expect(identity.a2aTask).toHaveBeenCalledWith("task-1");
+    });
+
+    expect(a2aReply).not.toHaveBeenCalled();
+  });
+
   it("cancels only the addressed task on its context session", async () => {
     const abortA2A = vi.fn(async () => true);
     const handler = createA2AHandler({

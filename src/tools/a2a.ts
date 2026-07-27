@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { activeA2ATurn } from "../a2a-context.js";
+import { activeA2ATurn, commitActiveA2ATurn } from "../a2a-context.js";
 import { findDelegationByTask, promoteAfterSend, recordBeforeSend } from "../a2a-delegations.js";
 import { runTool } from "../errors.js";
 import { formatJson } from "../format.js";
@@ -321,13 +321,16 @@ async function inboundIntent(
     if (!context) {
       throw new Error("This tool is only available during an inbound A2A task");
     }
+    if (context.replyIntentCommitted) {
+      throw new Error("This inbound A2A task already has an outcome");
+    }
     const identity = await deps.runtime.getIdentity();
     const reply = (identity as any).a2aReply;
     if (typeof reply !== "function") {
       throw new Error("This A2A tool requires @inkbox/sdk with identity.a2aReply() support.");
     }
     const result = await reply.call(identity, context.taskId, { intent, text });
-    context.replyIntentCommitted = true;
+    commitActiveA2ATurn(sessionID, context);
     return formatJson(result);
   });
 }

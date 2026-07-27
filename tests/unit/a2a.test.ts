@@ -1,5 +1,7 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearActiveA2ATurn, setActiveA2ATurn } from "../../src/a2a-context.js";
+import { a2aTurnContextPath, clearActiveA2ATurn, setActiveA2ATurn } from "../../src/a2a-context.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { a2aTools } from "../../src/tools/a2a.js";
 
@@ -222,5 +224,36 @@ describe("a2aTools", () => {
       text: "Which region?",
     });
     expect(context.replyIntentCommitted).toBe(true);
+  });
+
+  it("shares inbound turn authorization with the separate host process", async () => {
+    const { deps, identity } = makeDeps();
+    const ctx = makeCtx();
+    const context = {
+      taskId: "task-cross-process",
+      messageId: "message-cross-process",
+      contextId: "context-cross-process",
+      replyIntentCommitted: false,
+    };
+    const target = a2aTurnContextPath(ctx.sessionID);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify(context)}\n`, { mode: 0o600 });
+
+    const result = await getTool("inkbox_a2a_ask_caller", deps).definition.execute(
+      { text: "Which region?" },
+      ctx,
+    );
+
+    expect(result).toContain("ask_caller");
+    expect(identity.a2aReply).toHaveBeenCalledWith("task-cross-process", {
+      intent: "ask_caller",
+      text: "Which region?",
+    });
+    expect(JSON.parse(fs.readFileSync(target, "utf8")).replyIntentCommitted).toBe(true);
+    expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+
+    clearActiveA2ATurn(ctx.sessionID, context);
+    expect(context.replyIntentCommitted).toBe(true);
+    expect(fs.existsSync(target)).toBe(false);
   });
 });

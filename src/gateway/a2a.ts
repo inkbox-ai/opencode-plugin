@@ -4,7 +4,14 @@ import type { InkboxRuntime } from "../client.js";
 import type { StateStore } from "./state.js";
 import type { GatewayLogger, SessionManager, VerifiedEvent } from "./types.js";
 
-const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
+const TURN_STOPPED = new Set([
+  "input_required",
+  "auth_required",
+  "completed",
+  "failed",
+  "canceled",
+  "rejected",
+]);
 const INBOUND_TASK_DIRECTIVE =
   "You are handling an inbound A2A task. Resolve it with inkbox_a2a_complete, " +
   "inkbox_a2a_ask_caller, or inkbox_a2a_fail. When caller input is needed, use " +
@@ -124,7 +131,7 @@ export function createA2AHandler(deps: {
         reply.trim().toUpperCase() !== "[SILENT]"
       ) {
         const task = await id.a2aTask(taskId);
-        if (!TERMINAL.has(String(task.state))) {
+        if (!TURN_STOPPED.has(String(task.state))) {
           await id.a2aReply(taskId, { intent: "complete", text: reply });
         }
       }
@@ -212,7 +219,7 @@ export function createA2AHandler(deps: {
         if (entry.state === "finalized") continue;
         try {
           const task = await id.a2aTask(entry.taskId);
-          if (TERMINAL.has(String(task.state))) {
+          if (TURN_STOPPED.has(String(task.state))) {
             persist(deps.state, key, entry.data, "finalized");
           } else {
             start(key, entry.data);
