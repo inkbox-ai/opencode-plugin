@@ -128,10 +128,7 @@ function buildContactWritePayload(args: ContactWriteArgs): Record<string, unknow
   return payload;
 }
 
-// Contacts are an org-level address book filtered server-side by per-identity
-// access grants. With an agent-scoped key, list/lookup/get already return only
-// the contacts this identity has access to — we don't filter client-side.
-// Grant management lives in the opt-in "access" tool group.
+// Contacts are shared across every identity in the organization.
 export function contactTools(deps: ToolDeps): RegisteredTool[] {
   const { runtime } = deps;
   return [
@@ -141,7 +138,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       defaultEnabled: true,
       definition: {
         description:
-          "Reverse-lookup contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains. Returns contacts this identity has access to.",
+          "Reverse-lookup organization contacts by email or phone. Exactly one filter must be provided — email, phone, emailDomain, emailContains, or phoneContains.",
         args: lookupContactArgs,
         async execute(args: LookupContactArgs, _ctx) {
           return runTool(async () => {
@@ -174,8 +171,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       group: "contacts",
       defaultEnabled: true,
       definition: {
-        description:
-          "List contacts this identity has access to. Optional free-text search via `q`; results scoped by per-identity grants.",
+        description: "List organization-wide contacts. Optional free-text search via `q`.",
         args: listContactsArgs,
         async execute(args: ListContactsArgs, _ctx) {
           return runTool(async () => {
@@ -197,7 +193,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       defaultEnabled: true,
       definition: {
         description:
-          "Create an Inkbox address-book contact. Use when the user asks to save a person/contact in Inkbox. Include phone/email when known; notes can hold free-form context.",
+          "Create an organization-wide Inkbox address-book contact. Use when the user asks to save a person/contact in Inkbox. Include phone/email when known; notes can hold free-form context.",
         args: createContactArgs,
         async execute(args: CreateContactArgs, _ctx) {
           return runTool(async () => {
@@ -217,7 +213,7 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       defaultEnabled: true,
       definition: {
         description:
-          "Update an Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
+          "Update an organization-wide Inkbox address-book contact by UUID. Use after lookup/get when the user asks to add or correct contact details.",
         args: updateContactArgs,
         async execute(args: UpdateContactArgs, _ctx) {
           return runTool(async () => {
@@ -237,7 +233,8 @@ export function contactTools(deps: ToolDeps): RegisteredTool[] {
       group: "contacts",
       defaultEnabled: true,
       definition: {
-        description: "Delete an Inkbox address-book contact by UUID. Irreversible.",
+        description:
+          "Delete an organization-wide Inkbox address-book contact by UUID. Irreversible.",
         args: deleteContactArgs,
         async execute(args: DeleteContactArgs, _ctx) {
           return runTool(async () => {

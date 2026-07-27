@@ -88,9 +88,8 @@ export function describeContacts(contacts: Contact[], max = 5): string {
   return lines.join("\n");
 }
 
-// Resolves inbound sender addresses to Inkbox contacts and derives the
-// per-human session key. With an agent-scoped key, lookup results are
-// already access-filtered server-side.
+// Resolves inbound sender addresses to organization contacts and derives the
+// per-human session key.
 export function createContactResolver(
   deps: { inkbox: InkboxRuntime; logger: GatewayLogger },
   opts: { cacheTtlMs?: number } = {},

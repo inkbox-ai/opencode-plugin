@@ -1,11 +1,11 @@
 ---
 name: inkbox-contact-lookup
-description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any request that needs contact context. The agent can read and write Inkbox contacts visible to the configured identity; contact access grants, contact rules, and vCard flows are separate surfaces.
+description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any request that needs contact context. Contacts are shared across the Inkbox organization; contact rules and vCard flows are separate surfaces.
 ---
 
 # Inkbox contact lookup
 
-Inkbox contacts are an address-book scoped to the configured identity. When the user asks about a person, wants to save or edit a contact, or needs an address or number resolved, use the contact tools below.
+Inkbox contacts are an organization-wide address book. When the user asks about a person, wants to save or edit a contact, or needs an address or number resolved, use the contact tools below.
 
 ## Required tools
 
@@ -18,14 +18,14 @@ All six are enabled by default:
 - `inkbox_update_contact` — change an existing contact after you know its UUID
 - `inkbox_delete_contact` — delete a contact only after the target is explicit and confirmed
 
-There is no vCard export/import tool. Contact access tools, contact rule tools, and `inkbox_place_call` are opt-in — the user must enable them in your .opencode/plugins/inkbox.ts wrapper and restart opencode:
+There is no vCard export/import tool. Contact rule tools, note access tools, and `inkbox_place_call` are opt-in — the user must enable them in your .opencode/plugins/inkbox.ts wrapper and restart opencode:
 
 ```ts
 // in your .opencode/plugins/inkbox.ts wrapper:
 InkboxPlugin(input, { "tools": { "enable": ["inkbox_place_call", "access", "contact-rules"] } })
 ```
 
-Use access and rule tools only when the user explicitly asks to manage sharing or allow/block rules. `inkbox_doctor` reports which tools are enabled or disabled.
+Use note access and contact rule tools only when the user explicitly asks to manage note sharing or allow/block rules. `inkbox_doctor` reports which tools are enabled or disabled.
 
 ## Workflow
 
@@ -38,9 +38,9 @@ Use access and rule tools only when the user explicitly asks to manage sharing o
 
 ## Access semantics
 
-- Contact tools operate only on contacts visible/writable to the configured identity.
+- Every identity in the organization can read contacts. Creating, updating, or deleting a contact affects the shared address book.
 - Contacts created through `inkbox_create_contact` are Inkbox address-book records, not local notes or session memory.
-- Sharing contacts across Inkbox identities is grant management — that requires the opt-in access tools, and only when the user explicitly asks for it.
+- Contacts do not have per-identity access grants. The opt-in access tools manage notes only.
 
 ## What this skill does NOT cover
 
