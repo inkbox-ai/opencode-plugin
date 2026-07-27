@@ -1,0 +1,99 @@
+name: Live — Agent2Agent
+
+# Four real protocol legs cover both roles and conversation lengths:
+# inbound/outbound × single-turn/multi-turn. The plugin and remote identities
+# are preconfigured to allow one another in both directions.
+on:
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for each A2A transition"
+        required: false
+        type: string
+        default: "300"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for each A2A transition"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  a2a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        scenario:
+          - inbound-single
+          - inbound-multi
+          - outbound-single
+          - outbound-multi
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install protocol driver
+        run: pip install 'inkbox==0.5.6'
+
+      - name: Install plugin and host
+        run: |
+          npm ci
+          npm install --no-save --package-lock=false \
+            @inkbox/sdk@0.5.6 \
+            @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
+          npm install -g opencode-ai@latest
+
+      - name: Boot the AUT gateway
+        env:
+          MODE: real
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: bash scripts/live-aut.sh
+
+      - name: Run ${{ matrix.scenario }}
+        env:
+          A2A_SCENARIO: ${{ matrix.scenario }}
+          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '300' }}
+          AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
+        run: python3 tests/live/a2a_driver.py
+
+      - name: Dump gateway logs on failure
+        if: failure()
+        run: |
+          tail -n 300 "$AUT_GATEWAY_LOG" 2>/dev/null || true
+          tail -n 100 "$AUT_SERVE_LOG" 2>/dev/null || true
+
+      - name: Stop gateway
+        if: always()
+        run: |
+          kill "$AUT_GATEWAY_PID" 2>/dev/null || true
+          kill "$AUT_SERVE_PID" 2>/dev/null || true
