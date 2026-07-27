@@ -1,9 +1,33 @@
+import { createRequire } from "node:module";
 import type { AgentIdentity } from "@inkbox/sdk";
 import {
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_CLAIMED,
   AUTH_SUBTYPE_API_KEY_AGENT_SCOPED_UNCLAIMED,
   Inkbox,
 } from "@inkbox/sdk";
+
+const USER_AGENT_NAME = "inkbox-opencode";
+
+// Read at runtime rather than hardcoded so the token can't drift from the
+// package version. `tsc` emits to dist/, so ../package.json resolves from
+// both the build output and the source tree.
+function pluginVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("../package.json") as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+let cachedUserAgent: string | undefined;
+
+/** Identifies this plugin ahead of the SDK's own `User-Agent` token. */
+export function pluginUserAgent(): string {
+  cachedUserAgent ??= `${USER_AGENT_NAME}/${pluginVersion()}`;
+  return cachedUserAgent;
+}
 
 export interface InkboxCredentials {
   apiKey?: string;
@@ -62,6 +86,7 @@ export function createInkboxRuntime(source: ConfigSource, logger?: PluginLogger)
     if (!resolved || resolved.key !== key) {
       const inkbox = new Inkbox({
         apiKey: cfg.apiKey,
+        userAgentPrefix: pluginUserAgent(),
         ...(cfg.baseUrl?.trim() ? { baseUrl: cfg.baseUrl.trim() } : {}),
       });
       const identityHandle = cfg.identity;
