@@ -73,7 +73,7 @@ jobs:
           MODE: real
           AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
-          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: bash scripts/live-aut.sh
 
@@ -83,7 +83,7 @@ jobs:
           A2A_TIMEOUT_S: ${{ inputs.timeout_s || '300' }}
           AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
-          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
+          INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
         run: python3 tests/live/a2a_driver.py
 
       - name: Dump gateway logs on failure
