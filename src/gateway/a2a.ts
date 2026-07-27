@@ -5,6 +5,10 @@ import type { StateStore } from "./state.js";
 import type { GatewayLogger, SessionManager, VerifiedEvent } from "./types.js";
 
 const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
+const INBOUND_TASK_DIRECTIVE =
+  "You are handling an inbound A2A task. Resolve it with inkbox_a2a_complete, " +
+  "inkbox_a2a_ask_caller, or inkbox_a2a_fail. When caller input is needed, use " +
+  "inkbox_a2a_ask_caller and wait for the caller instead of completing the task.";
 
 interface A2AEventData {
   task_id: string;
@@ -109,7 +113,11 @@ export function createA2AHandler(deps: {
       `caller_org=${caller.organization_id ?? "unknown"}]`;
     persist(deps.state, key, data, "running");
     try {
-      const reply = await deps.sessions.runA2A(chatKey, `${marker}\n${body}`.trim(), context);
+      const reply = await deps.sessions.runA2A(
+        chatKey,
+        `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
+        context,
+      );
       if (
         !context.replyIntentCommitted &&
         reply?.trim() &&

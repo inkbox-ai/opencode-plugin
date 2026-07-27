@@ -66,6 +66,13 @@ describe("createA2AHandler", () => {
       });
     });
     expect(sessions.runA2A).toHaveBeenCalledTimes(1);
+    expect(sessions.runA2A).toHaveBeenCalledWith(
+      "a2a:identity-1:context-1",
+      expect.stringContaining(
+        "When caller input is needed, use inkbox_a2a_ask_caller and wait for the caller",
+      ),
+      expect.objectContaining({ taskId: "task-1", contextId: "context-1" }),
+    );
     expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
   });
 
