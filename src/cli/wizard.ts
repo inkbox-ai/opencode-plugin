@@ -213,10 +213,16 @@ async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {
   const projectDir = await configureProjectDir(c);
   save(c, "INKBOX_GATEWAY_AGENT", c.env.INKBOX_GATEWAY_AGENT || "inkbox-channel");
 
-  await configureAutostart(c, projectDir);
+  // A live gateway means setup finished the job, so close on that rather than
+  // a to-do list. Only when nothing is listening is there a step left.
+  if (await configureAutostart(c, projectDir)) {
+    printReadyBanner(c, fullIdentity.agentHandle);
+    return 0;
+  }
 
   io.print("");
   io.print("Setup complete.");
+  io.print("  Start it with:          inkbox-opencode start");
   io.print("  Check it anytime with:  inkbox-opencode doctor");
   return 0;
 }
@@ -606,7 +612,9 @@ async function configureProjectDir(c: Ctx): Promise<string> {
   return chosen;
 }
 
-async function configureAutostart(c: Ctx, projectDir: string): Promise<void> {
+// Returns true when a gateway is running by the time this resolves, so the
+// caller can close on a status banner instead of a to-do list.
+async function configureAutostart(c: Ctx, projectDir: string): Promise<boolean> {
   const { io } = c;
   io.print("");
   io.print("  --- Keep the gateway running ---");
@@ -614,28 +622,46 @@ async function configureAutostart(c: Ctx, projectDir: string): Promise<void> {
 
   // `startDaemon` refuses to act on a live PID, so a rerun would leave the
   // gateway on the .env this wizard just replaced. Restart it instead.
-  const bringUp = async (): Promise<void> => {
+  const bringUp = async (): Promise<boolean> => {
     const pid = c.runningDaemonPidFn();
     if (pid !== undefined) {
       io.print(`  A background gateway is already running (pid ${pid}) on the old config.`);
       io.print("  Restarting it so it picks up the new settings.");
-      await c.restartDaemonFn();
-      return;
+      return (await c.restartDaemonFn()) === 0;
     }
-    await c.startDaemonFn();
+    return (await c.startDaemonFn()) === 0;
   };
 
   if (await io.confirm("  Start it now and automatically on every boot?", true)) {
-    if (await c.installAutostartFn({ projectDirectory: projectDir, env: c.env })) return;
+    if (await c.installAutostartFn({ projectDirectory: projectDir, env: c.env })) return true;
     io.print("  Couldn't set up boot autostart — starting in the background for now.");
-    await bringUp();
-    return;
+    return bringUp();
   }
   if (await io.confirm("  Start it in the background now (until you reboot)?", true)) {
-    await bringUp();
-    return;
+    return bringUp();
   }
   io.print("  Start it yourself anytime with:  inkbox-opencode start");
+  return false;
+}
+
+// Closing banner for a setup that ended with a live gateway: names the identity
+// the agent now runs as, and the one command worth knowing.
+function printReadyBanner(c: Ctx, handle: string): void {
+  const rows: Array<[string, string]> = [
+    ["Inkbox identity", handle],
+    ["Check its health", "inkbox-opencode doctor"],
+  ];
+  const labelWidth = Math.max(...rows.map(([label]) => label.length)) + 1; // +1 for the colon
+  const body = [
+    "Your OpenCode agent is set up and running on Inkbox.",
+    "",
+    ...rows.map(([label, value]) => `  ${`${label}:`.padEnd(labelWidth)}  ${value}`),
+  ];
+  const width = Math.max(...body.map((line) => line.length)) + 4;
+  c.io.print("");
+  c.io.print(`╭${"─".repeat(width - 2)}╮`);
+  for (const line of body) c.io.print(`│ ${line.padEnd(width - 4)} │`);
+  c.io.print(`╰${"─".repeat(width - 2)}╯`);
 }
 
 function printSummary(c: Ctx, identity: any, imessageOn: boolean): void {

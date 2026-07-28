@@ -140,6 +140,19 @@ function savedEnv(file: string): Record<string, string> {
   return out;
 }
 
+// Reaches the autostart step over the shortest path: existing key, no channels,
+// mint a signing key, default project dir.
+const toAutostart = (...autostartAnswers: (string | boolean)[]) => [
+  true, // already have a key? yes
+  "ApiKey_agent",
+  false, // iMessage no
+  false, // dedicated number no
+  false, // have signing key? no
+  true, // mint one
+  "", // project dir → default
+  ...autostartAnswers,
+];
+
 describe("sanitizePasted", () => {
   it("strips bracketed-paste markers around pasted values", () => {
     expect(sanitizePasted("\u001b[200~123456\u001b[201~")).toBe("123456");
@@ -422,19 +435,6 @@ describe("runWizard", () => {
   });
   // --- keeping the gateway running -------------------------------------
 
-  // Reaches the autostart step over the shortest path: existing key, no
-  // channels, mint a signing key, default project dir.
-  const toAutostart = (...autostartAnswers: (string | boolean)[]) => [
-    true, // already have a key? yes
-    "ApiKey_agent",
-    false, // iMessage no
-    false, // dedicated number no
-    false, // have signing key? no
-    true, // mint one
-    "", // project dir → default
-    ...autostartAnswers,
-  ];
-
   it("restarts a live gateway rather than no-opping on the background start", async () => {
     const world = fakeWorld();
     const { io, lines } = scriptedIO(toAutostart(false, true)); // no boot autostart, yes background
@@ -484,5 +484,55 @@ describe("runWizard", () => {
     expect(d.startDaemonFn).not.toHaveBeenCalled();
     expect(d.restartDaemonFn).not.toHaveBeenCalled();
     expect(lines.join("\n")).toContain("inkbox-opencode start");
+  });
+});
+
+describe("closing banner", () => {
+  it("names the identity and the health command when the gateway is live", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("Your OpenCode agent is set up and running on Inkbox.");
+    expect(output).toContain("test-agent");
+    expect(output).toContain("inkbox-opencode doctor");
+    expect(output).not.toContain("Start it with:");
+  });
+
+  it("keeps the box square", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+    await runWizard(makeConfig(), d);
+
+    const box = lines.filter((l) => l.startsWith("╭") || l.startsWith("│") || l.startsWith("╰"));
+    expect(box.length).toBeGreaterThan(0);
+    expect(new Set(box.map((l) => l.length)).size).toBe(1);
+  });
+
+  it("falls back to the to-do list when nothing is listening", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, false));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("Setup complete.");
+    expect(output).toContain("inkbox-opencode start");
+    expect(output).not.toContain("is set up and running on Inkbox");
+  });
+
+  it("does not claim success when the daemon refuses to start", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io, { startDaemonFn: vi.fn(async () => 1) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(lines.join("\n")).not.toContain("is set up and running on Inkbox");
   });
 });
