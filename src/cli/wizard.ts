@@ -11,6 +11,11 @@ import { saveEnvVar } from "./env-file.js";
 // opt-in wait, Realtime validation, the signing key, project dir, autostart.
 
 const DEFAULT_BASE_URL = "https://inkbox.ai";
+// startDaemon reports success the moment it has spawned, so a gateway that
+// dies on a bad bind still leaves a pid and a success line behind. Re-check
+// across a short window before telling the operator it is up.
+const START_CONFIRM_TIMEOUT_MS = 5_000;
+const START_CONFIRM_POLL_MS = 500;
 
 export interface WizardIO {
   print(line?: string): void;
@@ -46,6 +51,7 @@ export interface WizardDeps {
   startDaemonFn?: typeof startDaemon;
   restartDaemonFn?: typeof restartDaemon;
   runningDaemonPidFn?: typeof runningDaemonPid;
+  confirmTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   cwd?: string;
 }
@@ -63,6 +69,7 @@ interface Ctx {
   startDaemonFn: typeof startDaemon;
   restartDaemonFn: typeof restartDaemon;
   runningDaemonPidFn: typeof runningDaemonPid;
+  confirmTimeoutMs: number;
   sleep: (ms: number) => Promise<void>;
   cwd: string;
 }
@@ -120,6 +127,7 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
     startDaemonFn: deps.startDaemonFn ?? startDaemon,
     restartDaemonFn: deps.restartDaemonFn ?? restartDaemon,
     runningDaemonPidFn: deps.runningDaemonPidFn ?? runningDaemonPid,
+    confirmTimeoutMs: deps.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS,
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     cwd: deps.cwd ?? process.cwd(),
   };
@@ -614,6 +622,22 @@ async function configureProjectDir(c: Ctx): Promise<string> {
 
 // Returns true when a gateway is running by the time this resolves, so the
 // caller can close on a status banner instead of a to-do list.
+// Poll for liveness after a start or restart. A gateway that fails to bind is
+// gone within a second or two, well after startDaemon has already returned 0.
+async function confirmDaemonRunning(c: Ctx): Promise<boolean> {
+  const deadline = Date.now() + c.confirmTimeoutMs;
+  for (;;) {
+    if (c.runningDaemonPidFn() === undefined) {
+      c.io.print("  The gateway exited right after starting.");
+      c.io.print("  Check the log:  ~/.inkbox-opencode/gateway.log");
+      c.io.print("  Then rerun:     inkbox-opencode start");
+      return false;
+    }
+    if (Date.now() >= deadline) return true;
+    await c.sleep(START_CONFIRM_POLL_MS);
+  }
+}
+
 async function configureAutostart(c: Ctx, projectDir: string): Promise<boolean> {
   const { io } = c;
   io.print("");
@@ -624,12 +648,16 @@ async function configureAutostart(c: Ctx, projectDir: string): Promise<boolean> 
   // gateway on the .env this wizard just replaced. Restart it instead.
   const bringUp = async (): Promise<boolean> => {
     const pid = c.runningDaemonPidFn();
+    let code: number;
     if (pid !== undefined) {
       io.print(`  A background gateway is already running (pid ${pid}) on the old config.`);
       io.print("  Restarting it so it picks up the new settings.");
-      return (await c.restartDaemonFn()) === 0;
+      code = await c.restartDaemonFn();
+    } else {
+      code = await c.startDaemonFn();
     }
-    return (await c.startDaemonFn()) === 0;
+    if (code !== 0) return false;
+    return confirmDaemonRunning(c);
   };
 
   if (await io.confirm("  Start it now and automatically on every boot?", true)) {

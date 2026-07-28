@@ -124,7 +124,12 @@ function deps(
     installAutostartFn: vi.fn(async () => true),
     startDaemonFn: vi.fn(async () => 0),
     restartDaemonFn: vi.fn(async () => 0),
-    runningDaemonPidFn: vi.fn(() => undefined),
+    // Nothing running when the step begins; a live pid once it has started.
+    runningDaemonPidFn: (() => {
+      let calls = 0;
+      return vi.fn(() => (calls++ === 0 ? undefined : 4242));
+    })(),
+    confirmTimeoutMs: 0,
     sleep: async () => {},
     cwd: tmp,
     ...over,
@@ -534,5 +539,39 @@ describe("closing banner", () => {
     expect(await runWizard(makeConfig(), d)).toBe(0);
 
     expect(lines.join("\n")).not.toContain("is set up and running on Inkbox");
+  });
+});
+
+describe("start confirmation", () => {
+  it("does not print the banner when the gateway dies right after starting", async () => {
+    // startDaemon returns 0 as soon as it has spawned, so a gateway that fails
+    // to bind still reports success — the banner must not follow it.
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io, { runningDaemonPidFn: vi.fn(() => undefined) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("exited right after starting");
+    expect(output).toContain("gateway.log");
+    expect(output).not.toContain("is set up and running on Inkbox");
+  });
+
+  it("keeps polling until the deadline before declaring it up", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    let calls = 0;
+    const d = deps(world, io, {
+      // undefined for the pre-start check, then alive for every confirm poll.
+      runningDaemonPidFn: vi.fn(() => (calls++ === 0 ? undefined : 4242)),
+      confirmTimeoutMs: 1_000,
+      sleep: async () => {},
+    });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(lines.join("\n")).toContain("is set up and running on Inkbox");
+    expect(calls).toBeGreaterThan(2); // polled, did not probe once
   });
 });
