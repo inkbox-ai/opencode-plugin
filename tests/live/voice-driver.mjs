@@ -22,10 +22,15 @@ const STATE_FILE = process.env.VOICE_DRIVER_STATE || "/tmp/voice_driver_state.js
 const LINE =
   process.env.VOICE_DRIVER_LINE ||
   "Hi, this is a quick test call. Please reply out loud with one short sentence, then say goodbye.";
+// Answering-machine detection scores whoever answers: a greeting longer than the
+// carrier's `greeting_duration_millis` (3.5s) reads as a voicemail announcement
+// and the call is hung up before the agent ever speaks. Answer the way a person
+// does — one word, then silence — and hold the prompt until that window closes.
+const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
 // Speak shortly after the pipeline is ready so the agent's greeting lands first,
 // then give the agent a turn and hang up (a dropped WS does NOT end the call — an
 // explicit stop is required or the leg lingers to the server max-duration cap).
-const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "3") * 1000;
+const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
 
 if (!API_KEY) {
@@ -51,14 +56,18 @@ async function callWsHandler(ws) {
   });
   console.log("call WS accepted");
   let spoke = false;
-  const speak = async (text) => {
-    if (spoke) return;
-    spoke = true;
+  const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
     console.log("spoke:", text);
   };
+  const speak = async (text) => {
+    if (spoke) return;
+    spoke = true;
+    await say(text);
+  };
   const runTurn = async () => {
+    await say(GREETING);
     await sleep(SPEAK_AFTER_MS);
     await speak(LINE);
     await sleep(LISTEN_MS);
