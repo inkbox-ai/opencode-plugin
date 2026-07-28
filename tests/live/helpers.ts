@@ -145,6 +145,13 @@ export async function waitTwoWayCall(
   timeoutMs = TIMEOUT_MS,
 ): Promise<string> {
   const terminalFailureStatuses = new Set(["canceled", "failed"]);
+  // A call can end normally and still never carry a conversation — detection
+  // hanging up on the driver ends it `completed`, hangupReason=voicemail.
+  // Transcript rows can still land during teardown, so allow a short grace
+  // period rather than polling a finished call for the full timeout.
+  const endedStatuses = new Set(["completed"]);
+  const endedGraceMs = Number(process.env.LIVE_VOICE_ENDED_GRACE_S || "15") * 1000;
+  let endedAt: number | undefined;
   return pollUntil(
     "two-way call transcript",
     async () => {
@@ -156,15 +163,21 @@ export async function waitTwoWayCall(
 
       const call = await driver.calls.get(callId).catch(() => undefined);
       const status = (call?.status ?? "").toLowerCase();
+      const detail = () =>
+        JSON.stringify({
+          status: call?.status,
+          hangupReason: call?.hangupReason,
+          startedAt: call?.startedAt,
+          endedAt: call?.endedAt,
+        });
       if (terminalFailureStatuses.has(status)) {
-        throw new Error(
-          `two-way call ended before both parties spoke: ${JSON.stringify({
-            status: call?.status,
-            hangupReason: call?.hangupReason,
-            startedAt: call?.startedAt,
-            endedAt: call?.endedAt,
-          })}`,
-        );
+        throw new Error(`two-way call ended before both parties spoke: ${detail()}`);
+      }
+      if (endedStatuses.has(status)) {
+        if (endedAt === undefined) endedAt = Date.now();
+        else if (Date.now() - endedAt > endedGraceMs) {
+          throw new Error(`two-way call ended without both parties speaking: ${detail()}`);
+        }
       }
       return undefined;
     },
