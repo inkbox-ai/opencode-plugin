@@ -2,6 +2,17 @@
 
 ## 0.1.1 (unreleased)
 
+- Setup now restarts a background gateway that is already running instead of
+  reporting success and leaving it on the previous `.env`. The boot-autostart
+  path already forced a service restart for this reason; the background path
+  now matches it.
+- Setup closes on a status banner naming the Inkbox identity and the health
+  command when a gateway ends up live, instead of a sign-off that reads the
+  same whether or not anything is running.
+- Setup confirms the gateway is actually up before saying so. `startDaemon`
+  returns as soon as it has spawned, so a gateway that failed to bind still
+  reported success; the wizard now polls for liveness and points at the log
+  instead of printing the banner over a process that is gone.
 - Adds identity-bound A2A 1.0 client tools plus durable inbound task serving:
   context-scoped sessions, restart catch-up, task-addressed cancellation, and
   explicit complete/ask/fail intents. Outbound calls and replies use the

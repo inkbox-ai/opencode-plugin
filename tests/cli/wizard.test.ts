@@ -123,6 +123,13 @@ function deps(
     fetchFn: vi.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch,
     installAutostartFn: vi.fn(async () => true),
     startDaemonFn: vi.fn(async () => 0),
+    restartDaemonFn: vi.fn(async () => 0),
+    // Nothing running when the step begins; a live pid once it has started.
+    runningDaemonPidFn: (() => {
+      let calls = 0;
+      return vi.fn(() => (calls++ === 0 ? undefined : 4242));
+    })(),
+    confirmTimeoutMs: 0,
     sleep: async () => {},
     cwd: tmp,
     ...over,
@@ -137,6 +144,19 @@ function savedEnv(file: string): Record<string, string> {
   }
   return out;
 }
+
+// Reaches the autostart step over the shortest path: existing key, no channels,
+// mint a signing key, default project dir.
+const toAutostart = (...autostartAnswers: (string | boolean)[]) => [
+  true, // already have a key? yes
+  "ApiKey_agent",
+  false, // iMessage no
+  false, // dedicated number no
+  false, // have signing key? no
+  true, // mint one
+  "", // project dir → default
+  ...autostartAnswers,
+];
 
 describe("sanitizePasted", () => {
   it("strips bracketed-paste markers around pasted values", () => {
@@ -417,5 +437,141 @@ describe("runWizard", () => {
     const d = deps(world, io);
     expect(await runWizard(makeConfig(), d)).toBe(0);
     expect(lines.join("\n")).toContain("paid tiers");
+  });
+  // --- keeping the gateway running -------------------------------------
+
+  it("restarts a live gateway rather than no-opping on the background start", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true)); // no boot autostart, yes background
+    const d = deps(world, io, { runningDaemonPidFn: vi.fn(() => 4242) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    // A live gateway is still on the old .env — starting it again would refuse.
+    expect(d.restartDaemonFn).toHaveBeenCalled();
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("pid 4242");
+  });
+
+  it("starts the gateway in the background when nothing is running", async () => {
+    const world = fakeWorld();
+    const { io } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.startDaemonFn).toHaveBeenCalled();
+    expect(d.restartDaemonFn).not.toHaveBeenCalled();
+  });
+
+  it("restarts a live gateway when boot autostart could not be installed", async () => {
+    const world = fakeWorld();
+    const { io } = scriptedIO(toAutostart(true)); // boot autostart, which fails below
+    const d = deps(world, io, {
+      installAutostartFn: vi.fn(async () => false),
+      runningDaemonPidFn: vi.fn(() => 99),
+    });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.installAutostartFn).toHaveBeenCalled();
+    expect(d.restartDaemonFn).toHaveBeenCalled();
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+  });
+
+  it("starts nothing when both offers are declined", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, false));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+    expect(d.restartDaemonFn).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("inkbox-opencode start");
+  });
+});
+
+describe("closing banner", () => {
+  it("names the identity and the health command when the gateway is live", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("Your OpenCode agent is set up and running on Inkbox.");
+    expect(output).toContain("test-agent");
+    expect(output).toContain("inkbox-opencode doctor");
+    expect(output).not.toContain("Start it with:");
+  });
+
+  it("keeps the box square", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+    await runWizard(makeConfig(), d);
+
+    const box = lines.filter((l) => l.startsWith("╭") || l.startsWith("│") || l.startsWith("╰"));
+    expect(box.length).toBeGreaterThan(0);
+    expect(new Set(box.map((l) => l.length)).size).toBe(1);
+  });
+
+  it("falls back to the to-do list when nothing is listening", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, false));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("Setup complete.");
+    expect(output).toContain("inkbox-opencode start");
+    expect(output).not.toContain("is set up and running on Inkbox");
+  });
+
+  it("does not claim success when the daemon refuses to start", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io, { startDaemonFn: vi.fn(async () => 1) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(lines.join("\n")).not.toContain("is set up and running on Inkbox");
+  });
+});
+
+describe("start confirmation", () => {
+  it("does not print the banner when the gateway dies right after starting", async () => {
+    // startDaemon returns 0 as soon as it has spawned, so a gateway that fails
+    // to bind still reports success — the banner must not follow it.
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io, { runningDaemonPidFn: vi.fn(() => undefined) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    const output = lines.join("\n");
+    expect(output).toContain("exited right after starting");
+    expect(output).toContain("gateway.log");
+    expect(output).not.toContain("is set up and running on Inkbox");
+  });
+
+  it("keeps polling until the deadline before declaring it up", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true));
+    let calls = 0;
+    const d = deps(world, io, {
+      // undefined for the pre-start check, then alive for every confirm poll.
+      runningDaemonPidFn: vi.fn(() => (calls++ === 0 ? undefined : 4242)),
+      confirmTimeoutMs: 1_000,
+      sleep: async () => {},
+    });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(lines.join("\n")).toContain("is set up and running on Inkbox");
+    expect(calls).toBeGreaterThan(2); // polled, did not probe once
   });
 });
