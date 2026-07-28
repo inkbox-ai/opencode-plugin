@@ -10,6 +10,7 @@ import {
   readPidFile,
   removeLauncherSymlinks,
   restartDaemon,
+  runningDaemonPid,
   runUninstall,
   startDaemon,
   stopDaemon,
@@ -170,6 +171,27 @@ describe("daemonStatus", () => {
     fs.writeFileSync(pidFile, "999999\n");
     const { send } = fakeProcess(false);
     expect(await daemonStatus({ home, send })).toBe(3);
+  });
+});
+
+describe("runningDaemonPid", () => {
+  it("returns undefined when there is no pid file", () => {
+    expect(runningDaemonPid({ home })).toBeUndefined();
+  });
+
+  it("returns the pid of a live gateway", () => {
+    const { pidFile } = daemonPaths(home);
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(pidFile, `${process.pid}\n`);
+    expect(runningDaemonPid({ home })).toBe(process.pid);
+  });
+
+  it("returns undefined for a stale pid", () => {
+    const { pidFile } = daemonPaths(home);
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(pidFile, "999999\n");
+    const { send } = fakeProcess(false);
+    expect(runningDaemonPid({ home, send })).toBeUndefined();
   });
 });
 

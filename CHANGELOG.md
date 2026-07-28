@@ -2,6 +2,10 @@
 
 ## 0.1.1 (unreleased)
 
+- Setup now restarts a background gateway that is already running instead of
+  reporting success and leaving it on the previous `.env`. The boot-autostart
+  path already forced a service restart for this reason; the background path
+  now matches it.
 - Adds identity-bound A2A 1.0 client tools plus durable inbound task serving:
   context-scoped sessions, restart catch-up, task-addressed cancellation, and
   explicit complete/ask/fail intents. Outbound calls and replies use the

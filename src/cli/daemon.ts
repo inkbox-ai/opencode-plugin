@@ -191,6 +191,16 @@ export async function daemonStatus(opts: DaemonOptions = {}): Promise<number> {
   return 3;
 }
 
+// PID of a live background gateway, or undefined when none is running. Lets
+// callers outside this module ask "is one already up?" without reassembling
+// the paths-plus-liveness probe themselves.
+export function runningDaemonPid(opts: DaemonOptions = {}): number | undefined {
+  const { pidFile } = daemonPaths(opts.home);
+  const pid = readPidFile(pidFile);
+  if (pid === undefined) return undefined;
+  return pidAlive(pid, opts.send ?? defaultSend) ? pid : undefined;
+}
+
 export async function restartDaemon(opts: DaemonOptions = {}): Promise<number> {
   const stopped = await stopDaemon(opts);
   if (stopped !== 0) return stopped;

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { DEFAULT_REALTIME_MODEL, type ResolvedConfig } from "../config.js";
 import { gatewayHome } from "../gateway/state.js";
 import { installAutostart } from "./autostart.js";
-import { startDaemon } from "./daemon.js";
+import { restartDaemon, runningDaemonPid, startDaemon } from "./daemon.js";
 import { saveEnvVar } from "./env-file.js";
 
 // Interactive setup wizard, ported from the claude-code/codex bridges:
@@ -44,6 +44,8 @@ export interface WizardDeps {
   fetchFn?: typeof fetch;
   installAutostartFn?: typeof installAutostart;
   startDaemonFn?: typeof startDaemon;
+  restartDaemonFn?: typeof restartDaemon;
+  runningDaemonPidFn?: typeof runningDaemonPid;
   sleep?: (ms: number) => Promise<void>;
   cwd?: string;
 }
@@ -59,6 +61,8 @@ interface Ctx {
   fetchFn: typeof fetch;
   installAutostartFn: typeof installAutostart;
   startDaemonFn: typeof startDaemon;
+  restartDaemonFn: typeof restartDaemon;
+  runningDaemonPidFn: typeof runningDaemonPid;
   sleep: (ms: number) => Promise<void>;
   cwd: string;
 }
@@ -114,6 +118,8 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
     fetchFn: deps.fetchFn ?? fetch,
     installAutostartFn: deps.installAutostartFn ?? installAutostart,
     startDaemonFn: deps.startDaemonFn ?? startDaemon,
+    restartDaemonFn: deps.restartDaemonFn ?? restartDaemon,
+    runningDaemonPidFn: deps.runningDaemonPidFn ?? runningDaemonPid,
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     cwd: deps.cwd ?? process.cwd(),
   };
@@ -606,14 +612,27 @@ async function configureAutostart(c: Ctx, projectDir: string): Promise<void> {
   io.print("  --- Keep the gateway running ---");
   io.print("  The gateway has to stay running to receive your messages and reply.");
 
+  // `startDaemon` refuses to act on a live PID, so a rerun would leave the
+  // gateway on the .env this wizard just replaced. Restart it instead.
+  const bringUp = async (): Promise<void> => {
+    const pid = c.runningDaemonPidFn();
+    if (pid !== undefined) {
+      io.print(`  A background gateway is already running (pid ${pid}) on the old config.`);
+      io.print("  Restarting it so it picks up the new settings.");
+      await c.restartDaemonFn();
+      return;
+    }
+    await c.startDaemonFn();
+  };
+
   if (await io.confirm("  Start it now and automatically on every boot?", true)) {
     if (await c.installAutostartFn({ projectDirectory: projectDir, env: c.env })) return;
     io.print("  Couldn't set up boot autostart — starting in the background for now.");
-    await c.startDaemonFn();
+    await bringUp();
     return;
   }
   if (await io.confirm("  Start it in the background now (until you reboot)?", true)) {
-    await c.startDaemonFn();
+    await bringUp();
     return;
   }
   io.print("  Start it yourself anytime with:  inkbox-opencode start");

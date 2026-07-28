@@ -123,6 +123,8 @@ function deps(
     fetchFn: vi.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch,
     installAutostartFn: vi.fn(async () => true),
     startDaemonFn: vi.fn(async () => 0),
+    restartDaemonFn: vi.fn(async () => 0),
+    runningDaemonPidFn: vi.fn(() => undefined),
     sleep: async () => {},
     cwd: tmp,
     ...over,
@@ -417,5 +419,70 @@ describe("runWizard", () => {
     const d = deps(world, io);
     expect(await runWizard(makeConfig(), d)).toBe(0);
     expect(lines.join("\n")).toContain("paid tiers");
+  });
+  // --- keeping the gateway running -------------------------------------
+
+  // Reaches the autostart step over the shortest path: existing key, no
+  // channels, mint a signing key, default project dir.
+  const toAutostart = (...autostartAnswers: (string | boolean)[]) => [
+    true, // already have a key? yes
+    "ApiKey_agent",
+    false, // iMessage no
+    false, // dedicated number no
+    false, // have signing key? no
+    true, // mint one
+    "", // project dir → default
+    ...autostartAnswers,
+  ];
+
+  it("restarts a live gateway rather than no-opping on the background start", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, true)); // no boot autostart, yes background
+    const d = deps(world, io, { runningDaemonPidFn: vi.fn(() => 4242) });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    // A live gateway is still on the old .env — starting it again would refuse.
+    expect(d.restartDaemonFn).toHaveBeenCalled();
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("pid 4242");
+  });
+
+  it("starts the gateway in the background when nothing is running", async () => {
+    const world = fakeWorld();
+    const { io } = scriptedIO(toAutostart(false, true));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.startDaemonFn).toHaveBeenCalled();
+    expect(d.restartDaemonFn).not.toHaveBeenCalled();
+  });
+
+  it("restarts a live gateway when boot autostart could not be installed", async () => {
+    const world = fakeWorld();
+    const { io } = scriptedIO(toAutostart(true)); // boot autostart, which fails below
+    const d = deps(world, io, {
+      installAutostartFn: vi.fn(async () => false),
+      runningDaemonPidFn: vi.fn(() => 99),
+    });
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.installAutostartFn).toHaveBeenCalled();
+    expect(d.restartDaemonFn).toHaveBeenCalled();
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+  });
+
+  it("starts nothing when both offers are declined", async () => {
+    const world = fakeWorld();
+    const { io, lines } = scriptedIO(toAutostart(false, false));
+    const d = deps(world, io);
+
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+
+    expect(d.startDaemonFn).not.toHaveBeenCalled();
+    expect(d.restartDaemonFn).not.toHaveBeenCalled();
+    expect(lines.join("\n")).toContain("inkbox-opencode start");
   });
 });
