@@ -21,17 +21,42 @@ const SEND_STYLES = [
   "slam",
 ] as const;
 
+const MAX_GROUP_RECIPIENTS = 8;
+
+// `to` accepts one recipient or a list; normalize both to a trimmed array.
+function normalizeRecipients(value: unknown): string[] {
+  if (typeof value === "string") {
+    const entry = value.trim();
+    return entry ? [entry] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter(Boolean);
+  }
+  return [];
+}
+
+// Only a dedicated outbound line may open a conversation; everything else is
+// recipient-first, so a group send would fail at the API without this check.
+function identityCanStartImessageConversations(identity: any): boolean {
+  const number = identity?.imessageNumber ?? identity?.imessage_number;
+  if (!number) return false;
+  const canStart = number.canStartConversations ?? number.can_start_conversations;
+  if (typeof canStart === "boolean") return canStart;
+  const numberType = number.type?.value ?? number.type;
+  return String(numberType ?? "").trim().toLowerCase() === "dedicated_outbound";
+}
+
 const sendIMessageArgs = {
   to: z
-    .string()
+    .union([z.string(), z.array(z.string()).min(1).max(MAX_GROUP_RECIPIENTS)])
     .describe(
-      "Recipient phone number in E.164 format. Only works after that person has messaged this agent. Mutually exclusive with `conversationId`.",
+      "One E.164 recipient, or 1-8 distinct recipients. Two or more starts a group and requires a dedicated outbound iMessage line. Mutually exclusive with `conversationId`.",
     )
     .optional(),
   conversationId: z
     .string()
     .describe(
-      "Existing Inkbox iMessage conversation UUID. Preferred for replies. Mutually exclusive with `to`.",
+      "Existing Inkbox iMessage conversation UUID. Preferred for 1:1 and group replies. Mutually exclusive with `to`.",
     )
     .optional(),
   text: z
@@ -77,9 +102,15 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
             assertIMessageTextWithinLimit(text);
             const conversationId =
               typeof args.conversationId === "string" ? args.conversationId.trim() : "";
-            const to = typeof args.to === "string" ? args.to.trim() : "";
-            if (Boolean(conversationId) === Boolean(to)) {
+            const toList = normalizeRecipients(args.to);
+            if (Boolean(conversationId) === Boolean(toList.length)) {
               throw new Error("Specify exactly one of `to` or `conversationId`.");
+            }
+            if (args.to !== undefined && toList.length === 0) {
+              throw new Error("`to` must include at least one recipient.");
+            }
+            if (new Set(toList).size !== toList.length) {
+              throw new Error("iMessage recipients must be distinct.");
             }
             // A conversation send resolves the recipient server-side, so a
             // local allowlist cannot vet it — refuse rather than silently bypass.
@@ -91,11 +122,11 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
             const detail = text ? `${text.length} chars` : "media attachment";
             await approveOutbound(ctx, config, {
               tool: "inkbox_send_imessage",
-              recipients: conversationId ? [] : [to],
+              recipients: conversationId ? [] : toList,
               ...(conversationId ? { patterns: [`conversation:${conversationId}`] } : {}),
               summary: conversationId
                 ? `Send iMessage to conversation ${conversationId} (${detail})`
-                : `Send iMessage to ${to} (${detail})`,
+                : `Send iMessage to ${toList.join(", ")} (${detail})`,
               metadata: {
                 textChars: text.length,
                 mediaCount: (mediaUrls?.length ?? 0) + (mediaPaths?.length ?? 0),
@@ -103,20 +134,32 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
             });
 
             const identity = await runtime.getIdentity();
+            if (toList.length > 1 && !identityCanStartImessageConversations(identity)) {
+              throw new Error(
+                "Starting an iMessage group requires a dedicated outbound iMessage line. Reply to an existing group with `conversationId`.",
+              );
+            }
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = mediaPaths?.length ? await uploadLocalMedia(identity, mediaPaths) : [];
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
+            // Array `to` is implemented in the SDK but not in the published
+            // types yet (0.5.7 declares `to?: string`), so the group form has to
+            // be cast until a release carries it. Raise the floor and drop this.
             const msg = await identity.sendIMessage({
-              ...(conversationId ? { conversationId } : { to }),
+              ...(conversationId
+                ? { conversationId }
+                : { to: (toList.length === 1 ? toList[0] : toList) as unknown as string }),
               ...(text ? { text } : {}),
               ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
               ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
             });
-            const target = conversationId ? `conversation=${conversationId}` : `to=${to}`;
+            const target = conversationId
+              ? `conversation=${conversationId}`
+              : `to=${toList.join(",")}`;
             return {
               title: conversationId
                 ? `iMessage sent to conversation ${conversationId}`
-                : `iMessage sent to ${to}`,
+                : `iMessage sent to ${toList.join(", ")}`,
               output: `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
             };
           });

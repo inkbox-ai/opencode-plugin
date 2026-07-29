@@ -211,8 +211,11 @@ async function handleInbound(
     return true;
   }
 
+  const participants = countParticipants(event.body);
   const chatKey = deps.contacts.chatKeyFor({
-    contactId,
+    // A group is one shared context for everyone in it, so the conversation -
+    // not the sender's contact - keys the chat. 1:1 keeps its per-contact chat.
+    contactId: participants > 1 ? undefined : contactId,
     channel,
     threadId: info.threadId,
     conversationId: info.conversationId,
@@ -224,8 +227,6 @@ async function handleInbound(
     mediaUrls.length > 0
       ? await downloadMedia(mediaUrls, { dir: mediaDir(deps.config), logger: deps.logger })
       : [];
-
-  const participants = countParticipants(event.body);
 
   // A sender with no contact match may still be a recognized peer agent —
   // label the turn with the resolved identity instead of unknown_in_inkbox.
@@ -281,7 +282,12 @@ function countParticipants(body: Record<string, unknown>): number {
   const data = record(body.data);
   const contacts = Array.isArray(data?.contacts) ? data?.contacts.length : 0;
   const identities = Array.isArray(data?.agent_identities) ? data?.agent_identities.length : 0;
-  return Math.max(contacts, identities);
+  // Phone-channel events can name their participants inline, and a conversation
+  // flagged as a group is one even when only the sender resolved.
+  const resource = record(data?.message) ?? record(data?.text_message);
+  const inline = Array.isArray(resource?.participants) ? resource.participants.length : 0;
+  const flagged = Boolean(resource?.is_group ?? resource?.isGroup);
+  return Math.max(contacts, identities, inline, flagged ? 2 : 0);
 }
 
 // Names of the resolved remote parties on the event, for the group frame tag.
