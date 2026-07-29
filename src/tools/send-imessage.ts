@@ -142,13 +142,10 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = mediaPaths?.length ? await uploadLocalMedia(identity, mediaPaths) : [];
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
-            // Array `to` is implemented in the SDK but not in the published
-            // types yet (0.5.7 declares `to?: string`), so the group form has to
-            // be cast until a release carries it. Raise the floor and drop this.
             const msg = await identity.sendIMessage({
               ...(conversationId
                 ? { conversationId }
-                : { to: (toList.length === 1 ? toList[0] : toList) as unknown as string }),
+                : { to: toList.length === 1 ? toList[0] : toList }),
               ...(text ? { text } : {}),
               ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
               ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
