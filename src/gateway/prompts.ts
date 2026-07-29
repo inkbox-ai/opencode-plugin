@@ -183,6 +183,10 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   if (msg.group?.participants?.length) {
     fields.push(`participants=${JSON.stringify(msg.group.participants.join(", "))}`);
   }
+  // Phone-channel groups are replied to by conversation, never by recipient.
+  if (msg.group && msg.channel !== "email") {
+    fields.push("reply_mode=conversation_id");
+  }
   // The contact card carries the addresses the agent may reach this person
   // at, so cross-channel follow-ups never have to guess. A contactless
   // sender resolved to a peer agent identity is named by that identity.
