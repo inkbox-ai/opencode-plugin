@@ -102,6 +102,42 @@ describe("dispatchEvent inbound", () => {
     );
   });
 
+  it("takes memories from only the matched email sender contact", async () => {
+    const deps = makeDeps();
+    await dispatchEvent(
+      deps,
+      event("message.received", {
+        message: { id: "m-1", from_address: "sender@example.com", body: "hello" },
+        contacts: [
+          { id: "other", bucket: "to", address: "me@example.com", memories: ["wrong"] },
+          {
+            id: "c1",
+            bucket: "from",
+            address: "SENDER@example.com",
+            memories: ["first", "", "first", "second"],
+          },
+        ],
+      }),
+    );
+    expect(deps.sessions.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ contactMemories: ["first", "second"] }),
+    );
+  });
+
+  it("suppresses payload memories when contact memory context is disabled", async () => {
+    const deps = makeDeps({
+      config: makeConfig({ allowAllUsers: true, contactMemories: false }),
+    });
+    await dispatchEvent(
+      deps,
+      event("text.received", {
+        text_message: { remote_phone_number: "+15551112222", text: "hello" },
+        contacts: [{ id: "c1", memories: ["hidden"] }],
+      }),
+    );
+    expect(vi.mocked(deps.sessions.handleInbound).mock.calls[0][0].contactMemories).toBeUndefined();
+  });
+
   it("drops a bare SMS carrier control word without waking the agent", async () => {
     const deps = makeDeps();
     const ok = await dispatchEvent(
@@ -194,6 +230,7 @@ describe("dispatchEvent reactions", () => {
           reaction: "loved",
           target_message_id: "im-1",
         },
+        contacts: [{ id: "c1", memories: ["Uses short replies."] }],
       }),
     );
 
@@ -205,6 +242,7 @@ describe("dispatchEvent reactions", () => {
         text: expect.stringMatching(
           /^\[reaction: loved target_message_id=im-1\]\n.*tapback.*reply with exactly \[SILENT\]\.$/s,
         ),
+        contactMemories: ["Uses short replies."],
       }),
     );
   });

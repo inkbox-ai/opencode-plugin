@@ -221,6 +221,22 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("gateway contact memories", () => {
+    it("defaults on and follows option-over-environment precedence", () => {
+      expect(resolveConfig({}, FULL_ENV).gateway.contactMemories).toBe(true);
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_CONTACT_MEMORIES_ENABLED: "false" }).gateway
+          .contactMemories,
+      ).toBe(false);
+      expect(
+        resolveConfig(
+          { gateway: { contactMemories: true } },
+          { ...FULL_ENV, INKBOX_CONTACT_MEMORIES_ENABLED: "false" },
+        ).gateway.contactMemories,
+      ).toBe(true);
+    });
+  });
+
   describe("gateway managed serve", () => {
     it("defaults to the opencode binary on port 4097", () => {
       const cfg = resolveConfig({}, FULL_ENV);

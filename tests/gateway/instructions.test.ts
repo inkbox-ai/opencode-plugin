@@ -42,6 +42,7 @@ describe("buildVoiceInstructions", () => {
           contactPhones: ["+15550001111"],
           contactCompany: "Analytical Engines",
           contactNotes: "Prefers morning calls.",
+          contactMemories: ["Asked about a renewal."],
         },
       }),
     );
@@ -49,7 +50,19 @@ describe("buildVoiceInstructions", () => {
     expect(out).toContain("Ada Lovelace");
     expect(out).toContain("ada@example.com");
     expect(out).toContain("Analytical Engines");
-    expect(out).toContain("Prefers morning calls.");
+    expect(out).toContain("Notes about them: Prefers morning calls.");
+    expect(out).toContain('"Asked about a renewal."');
+    expect(out).toContain("[inkbox:contact_memories]");
+  });
+
+  it("keeps notes when no webhook memories are available", () => {
+    const out = buildVoiceInstructions(
+      meta({
+        contact: { contactId: "c-1", contactName: "Ada", contactNotes: "Prefers email." },
+      }),
+    );
+    expect(out).toContain("Notes about them: Prefers email.");
+    expect(out).not.toContain("[inkbox:contact_memories]");
   });
 
   it("tells the model it does not know an unresolved caller", () => {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { contactMemoriesBlock } from "../contact-memories.js";
 
 // Follow-up work the model queues during a call, run as one turn after the
 // call ends. Kept in memory per call; nothing persists past hangup.
@@ -44,12 +45,16 @@ export function postCallPrompt(
   actions: PostCallAction[],
   transcript: string,
   caller?: string,
+  memories: readonly string[] = [],
 ): string {
-  const lines = [
+  const lines: string[] = [];
+  if (caller) lines.push(`[inkbox:voice ${caller}]`);
+  const memoryBlock = contactMemoriesBlock(memories);
+  if (memoryBlock) lines.push(memoryBlock);
+  lines.push(
     "The call just ended. Carry out the follow-up actions you committed to during it, using your tools.",
     "Reconcile against the transcript first — skip anything already done, and don't duplicate messages already sent.",
-  ];
-  if (caller) lines.push(`The call was with: [inkbox:voice ${caller}]`);
+  );
   lines.push("", "Queued actions:", ...actions.map((a, i) => `${i + 1}. ${a.description}`));
   if (transcript.trim()) lines.push("", "Recent call transcript:", transcript);
   return lines.join("\n");
@@ -57,12 +62,19 @@ export function postCallPrompt(
 
 // A reflection prompt when no explicit actions were queued but the call may
 // still imply follow-up.
-export function callEndedPrompt(transcript: string, caller?: string): string {
-  const lines = [
+export function callEndedPrompt(
+  transcript: string,
+  caller?: string,
+  memories: readonly string[] = [],
+): string {
+  const lines: string[] = [];
+  if (caller) lines.push(`[inkbox:voice ${caller}]`);
+  const memoryBlock = contactMemoriesBlock(memories);
+  if (memoryBlock) lines.push(memoryBlock);
+  lines.push(
     "A call you were on just ended. If it implies follow-up work, do it now with your tools.",
     "Reconcile against the transcript first: only act on what was actually promised and not already done.",
-  ];
-  if (caller) lines.push(`The call was with: [inkbox:voice ${caller}]`);
+  );
   if (transcript.trim()) lines.push("", "Recent call transcript:", transcript);
   return lines.join("\n");
 }

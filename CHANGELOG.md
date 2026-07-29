@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.7 (unreleased)
+
+- Adds safely framed matched-contact memories to inbound email, SMS, iMessage,
+  reaction, and voice context. Disable them with `gateway.contactMemories` or
+  `INKBOX_CONTACT_MEMORIES_ENABLED=false`.
+
 ## 0.1.1 (unreleased)
 
 - Setup now restarts a background gateway that is already running instead of

@@ -1,3 +1,4 @@
+import { contactMemoriesBlock } from "../contact-memories.js";
 import type { ResolvedContact } from "../contacts.js";
 import {
   CONSULT_TOOL,
@@ -84,6 +85,9 @@ export function buildVoiceInstructions(meta: CallMeta): string {
         `Greet them neutrally; you may look them up by number with ${CONTACT_LOOKUP_TOOL} if needed.`,
     );
   }
+
+  const memories = contactMemoriesBlock(c.contactMemories ?? []);
+  if (memories) lines.push(memories);
 
   if (meta.direction === "outbound") {
     if (meta.purpose) {

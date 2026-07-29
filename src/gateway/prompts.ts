@@ -1,3 +1,4 @@
+import { contactMemoriesBlock } from "./contact-memories.js";
 import { contactCard } from "./contacts.js";
 import type { InboundMessage } from "./types.js";
 
@@ -188,6 +189,8 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   fields.push("|", contactCard(msg, msg.senderAgent));
 
   const lines = [`[${fields.join(" ")}]`];
+  const memories = contactMemoriesBlock(msg.contactMemories ?? []);
+  if (memories) lines.push(memories);
   if (directive) lines.push(`Operator directive for this channel: ${directive}`);
   if (msg.group) lines.push(groupReminder(msg.group.participantCount));
   lines.push(msg.text);

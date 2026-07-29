@@ -4,6 +4,7 @@ import { verifyWebhook } from "@inkbox/sdk";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { InkboxRuntime } from "../../client.js";
 import type { ResolvedConfig } from "../../config.js";
+import { contactMemoriesBlock, matchedContactMemories } from "../contact-memories.js";
 import {
   type ContactResolver,
   contactCard,
@@ -150,6 +151,15 @@ export function createCallBridge(deps: CallBridgeDeps) {
     let contact: ResolvedContact = {};
     if (ctx.from) {
       contact = await deps.contacts.resolve(ctx.from);
+      if (deps.config.gateway.contactMemories) {
+        const contactMemories = matchedContactMemories(ctx.payload, {
+          channel: "voice",
+          from: ctx.from,
+          contactId: contact.contactId,
+          allowSoleContactFallback: true,
+        });
+        if (contactMemories.length) contact = { ...contact, contactMemories };
+      }
       ctx.card = contactCard(contact);
       ctx.chatKey = deps.contacts.chatKeyFor({
         contactId: contact.contactId,
@@ -214,7 +224,10 @@ export function createCallBridge(deps: CallBridgeDeps) {
         },
         onConsult: async (query) => {
           ctx.transcript.push(`caller: ${query}`);
-          const answer = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${query}`);
+          const answer = await deps.sessions.runText(
+            ctx.chatKey,
+            voiceFrame(ctx, query, meta.contact),
+          );
           if (answer) ctx.transcript.push(`agent: ${answer}`);
           return answer ?? "Done.";
         },
@@ -323,7 +336,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
         const t0 = deps.now();
         let reply: string | undefined;
         try {
-          reply = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${text}`);
+          reply = await deps.sessions.runText(ctx.chatKey, voiceFrame(ctx, text, meta.contact));
         } catch (err) {
           deps.logger.error("call.turn_failed", { chatKey: ctx.chatKey, error: String(err) });
         }
@@ -423,16 +436,26 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const caller = `from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}`;
     if (actions.length > 0) {
       await deps.sessions
-        .runText(ctx.chatKey, postCallPrompt(actions, convo, caller))
+        .runText(ctx.chatKey, postCallPrompt(actions, convo, caller, meta.contact.contactMemories))
         .catch(() => {});
     } else if (ctx.transcript.length > 0) {
-      await deps.sessions.runText(ctx.chatKey, callEndedPrompt(convo, caller)).catch(() => {});
+      await deps.sessions
+        .runText(ctx.chatKey, callEndedPrompt(convo, caller, meta.contact.contactMemories))
+        .catch(() => {});
     }
   }
 
   // Per-turn routing tag for voice frames sent through the text agent.
   function voiceTag(ctx: CallCtx): string {
     return `[inkbox:voice from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}]`;
+  }
+
+  function voiceFrame(ctx: CallCtx, text: string, contact: ResolvedContact): string {
+    const lines = [voiceTag(ctx)];
+    const memories = contactMemoriesBlock(contact.contactMemories ?? []);
+    if (memories) lines.push(memories);
+    lines.push(text);
+    return lines.join("\n");
   }
 
   interface CallCtx {
@@ -447,6 +470,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
     // and post-call prompts.
     card: string;
     transcript: string[];
+    payload: Record<string, unknown>;
     registry?: ReturnType<typeof createPostCallRegistry>;
   }
 
@@ -478,6 +502,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
       chatKey: from,
       card: contactCard({}),
       transcript: [],
+      payload: signed,
     };
   }
 

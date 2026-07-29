@@ -56,6 +56,16 @@ describe("frameInbound", () => {
     );
   });
 
+  it("places one memory block after the routing marker and before message content", () => {
+    const framed = frameInbound(
+      makeMsg({ contactId: "c-1", contactMemories: ["Met at a conference."], text: "hello" }),
+    );
+    expect(framed).toMatch(
+      /^\[inkbox:sms[^\n]+\]\n\[inkbox:contact_memories\]\n[\s\S]+\n"Met at a conference\."\n\[\/inkbox:contact_memories\]\nhello$/,
+    );
+    expect(framed.match(/\[inkbox:contact_memories\]/g)).toHaveLength(1);
+  });
+
   it("marks an unresolved sender as unknown in the tag", () => {
     const framed = frameInbound(
       makeMsg({ channel: "email", from: "ada@example.com", text: "hello" }),

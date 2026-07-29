@@ -87,4 +87,12 @@ describe("mergeBurst", () => {
     expect(merged.mediaPaths).toEqual(["/a.png", "/b.png"]);
     expect(merged.burst).toBe(2);
   });
+
+  it("combines and deduplicates memories into one merged-message context", () => {
+    const merged = mergeBurst([
+      msg({ contactMemories: ["one", "shared"] }),
+      msg({ contactMemories: ["shared", "two"] }),
+    ]);
+    expect(merged.contactMemories).toEqual(["one", "shared", "two"]);
+  });
 });
