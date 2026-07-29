@@ -58,6 +58,7 @@ export interface InboundMessage {
   contactEmails?: string[];
   contactPhones?: string[];
   contactNotes?: string;
+  contactMemories?: string[];
   // The sender's resolved peer agent identity; set only when no contact
   // matched and the identity is unambiguous.
   senderAgent?: SenderAgentIdentity;

@@ -304,6 +304,9 @@ inbound events. What it does:
   one ongoing conversation across channels); replies go back on the channel the
   message came in on, threaded for email. Delivery failures wake the agent to
   retry or switch channels.
+- **Contact memories** from verified inbound events are included as optional
+  background context by default. Set `gateway.contactMemories: false` or
+  `INKBOX_CONTACT_MEMORIES_ENABLED=false` to omit them from every channel.
 - **Permission prompts** raised inside a gateway session are relayed to the
   contact on their channel ("reply 1 to allow once, 2 to always allow, 3 to
   decline") and time out to a decline.

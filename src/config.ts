@@ -76,6 +76,8 @@ export interface GatewayOptions {
   // Batch rapid-fire SMS/iMessage fragments arriving within this quiet
   // window (ms) into one merged turn. 0 (default) disables batching.
   textBatchWindowMs?: number;
+  // Include matched-contact memories supplied by verified inbound events.
+  contactMemories?: boolean;
   // Extra per-turn directive text, keyed by contact id or channel name
   // (contact id wins). Injected under the frame tag on matching turns.
   channelPrompts?: Record<string, string>;
@@ -121,6 +123,7 @@ export interface ResolvedGatewayConfig {
   agent?: string;
   model?: string;
   textBatchWindowMs: number;
+  contactMemories: boolean;
   channelPrompts: Record<string, string>;
   channelAgents: Record<string, string>;
   serve: {
@@ -361,6 +364,7 @@ function resolveGatewayConfig(
     model: nonEmptyString(opts.model) ?? nonEmptyString(env.INKBOX_GATEWAY_MODEL),
     textBatchWindowMs:
       numeric(opts.textBatchWindowMs) ?? numeric(env.INKBOX_TEXT_BATCH_WINDOW_MS) ?? 0,
+    contactMemories: opts.contactMemories ?? boolEnv(env.INKBOX_CONTACT_MEMORIES_ENABLED) ?? true,
     channelPrompts: stringRecord(opts.channelPrompts),
     channelAgents: stringRecord(opts.channelAgents),
     serve: {

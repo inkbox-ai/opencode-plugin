@@ -1,6 +1,7 @@
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import type { BurstBuffer } from "./burst.js";
+import { matchedContactMemories } from "./contact-memories.js";
 import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
@@ -228,6 +229,15 @@ async function handleInbound(
       ? await downloadMedia(mediaUrls, { dir: mediaDir(deps.config), logger: deps.logger })
       : [];
 
+  const contactMemories = deps.config.gateway.contactMemories
+    ? matchedContactMemories(event.body, {
+        channel,
+        from,
+        contactId,
+        allowSoleContactFallback: channel !== "email" && participants <= 1,
+      })
+    : [];
+
   // A sender with no contact match may still be a recognized peer agent —
   // label the turn with the resolved identity instead of unknown_in_inkbox.
   // Skipped for phone-channel groups, where a lone identity may belong to a
@@ -247,6 +257,7 @@ async function handleInbound(
     messageId: info.messageId,
     rfcMessageId: info.rfcMessageId,
     ...resolved,
+    ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
     text: info.text,
     mediaPaths,
@@ -356,6 +367,15 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   // Reactions carry reply-restraint guidance: a tapback is a lightweight
   // signal, and most warrant no visible reply at all.
   const who = resolved.contactName ?? senderAgent?.displayName ?? senderAgent?.handle ?? from;
+  const participants = countParticipants(event.body);
+  const contactMemories = deps.config.gateway.contactMemories
+    ? matchedContactMemories(event.body, {
+        channel: "imessage",
+        from,
+        contactId: resolved.contactId,
+        allowSoleContactFallback: participants <= 1,
+      })
+    : [];
   const text = [
     `[reaction: ${reaction}${targetMessageId ? ` target_message_id=${targetMessageId}` : ""}]`,
     `${who} reacted with a '${reaction}' tapback to your message.`,
@@ -370,6 +390,7 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       from,
       conversationId,
       ...resolved,
+      ...(contactMemories.length ? { contactMemories } : {}),
       ...(senderAgent ? { senderAgent } : {}),
       text,
       mediaPaths: [],

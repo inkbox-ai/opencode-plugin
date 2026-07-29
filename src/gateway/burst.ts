@@ -1,3 +1,4 @@
+import { normalizeContactMemories } from "./contact-memories.js";
 import type { InboundMessage } from "./types.js";
 
 // Humans text in fragments and corrections. Batching fragments that arrive
@@ -71,6 +72,7 @@ export function mergeBurst(msgs: InboundMessage[]): InboundMessage {
   const last = msgs[msgs.length - 1];
   return {
     ...last,
+    contactMemories: normalizeContactMemories(msgs.flatMap((msg) => msg.contactMemories ?? [])),
     text: msgs
       .map((m) => m.text)
       .filter((t) => t.trim() !== "")

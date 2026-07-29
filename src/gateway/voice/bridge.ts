@@ -5,6 +5,11 @@ import { type WebSocket, WebSocketServer } from "ws";
 import type { InkboxRuntime } from "../../client.js";
 import type { ResolvedConfig } from "../../config.js";
 import {
+  contactMemoriesBlock,
+  escapeContactMemoriesTokens,
+  matchedContactMemories,
+} from "../contact-memories.js";
+import {
   type ContactResolver,
   contactCard,
   describeContacts,
@@ -47,7 +52,10 @@ const ENDED_CALL_STATUSES = new Set(["completed", "failed", "canceled"]);
 // identity is read from that signed context — never from untrusted query
 // params. Each call runs in OpenAI Realtime raw-media mode when configured and
 // reachable, otherwise Inkbox speech-to-text / text-to-speech.
-export function createCallBridge(deps: CallBridgeDeps) {
+export function createCallBridge(
+  deps: CallBridgeDeps,
+  openRealtime: typeof openRealtimeBridge = openRealtimeBridge,
+) {
   const wss = new WebSocketServer({ noServer: true });
   const extraHeaders = new WeakMap<IncomingMessage, string[]>();
   wss.on("headers", (headers, req) => {
@@ -150,6 +158,15 @@ export function createCallBridge(deps: CallBridgeDeps) {
     let contact: ResolvedContact = {};
     if (ctx.from) {
       contact = await deps.contacts.resolve(ctx.from);
+      if (deps.config.gateway.contactMemories) {
+        const contactMemories = matchedContactMemories(ctx.payload, {
+          channel: "voice",
+          from: ctx.from,
+          contactId: contact.contactId,
+          allowSoleContactFallback: true,
+        });
+        if (contactMemories.length) contact = { ...contact, contactMemories };
+      }
       ctx.card = contactCard(contact);
       ctx.chatKey = deps.contacts.chatKeyFor({
         contactId: contact.contactId,
@@ -197,7 +214,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
   ): RealtimeBridge & { attach(ws: WebSocket): void } {
     let callWs: WebSocket | undefined;
     const registry = createPostCallRegistry();
-    const bridge = openRealtimeBridge(
+    const bridge = openRealtime(
       {
         apiKey,
         model: deps.config.gateway.voice.realtime.model,
@@ -214,7 +231,10 @@ export function createCallBridge(deps: CallBridgeDeps) {
         },
         onConsult: async (query) => {
           ctx.transcript.push(`caller: ${query}`);
-          const answer = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${query}`);
+          const answer = await deps.sessions.runText(
+            ctx.chatKey,
+            voiceFrame(ctx, query, meta.contact),
+          );
           if (answer) ctx.transcript.push(`agent: ${answer}`);
           return answer ?? "Done.";
         },
@@ -323,7 +343,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
         const t0 = deps.now();
         let reply: string | undefined;
         try {
-          reply = await deps.sessions.runText(ctx.chatKey, `${voiceTag(ctx)}\n${text}`);
+          reply = await deps.sessions.runText(ctx.chatKey, voiceFrame(ctx, text, meta.contact));
         } catch (err) {
           deps.logger.error("call.turn_failed", { chatKey: ctx.chatKey, error: String(err) });
         }
@@ -423,16 +443,26 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const caller = `from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}`;
     if (actions.length > 0) {
       await deps.sessions
-        .runText(ctx.chatKey, postCallPrompt(actions, convo, caller))
+        .runText(ctx.chatKey, postCallPrompt(actions, convo, caller, meta.contact.contactMemories))
         .catch(() => {});
     } else if (ctx.transcript.length > 0) {
-      await deps.sessions.runText(ctx.chatKey, callEndedPrompt(convo, caller)).catch(() => {});
+      await deps.sessions
+        .runText(ctx.chatKey, callEndedPrompt(convo, caller, meta.contact.contactMemories))
+        .catch(() => {});
     }
   }
 
   // Per-turn routing tag for voice frames sent through the text agent.
   function voiceTag(ctx: CallCtx): string {
     return `[inkbox:voice from=${ctx.from} call_id=${ctx.callId ?? "unknown"} | ${ctx.card}]`;
+  }
+
+  function voiceFrame(ctx: CallCtx, text: string, contact: ResolvedContact): string {
+    const lines = [voiceTag(ctx)];
+    const memories = contactMemoriesBlock(contact.contactMemories ?? []);
+    if (memories) lines.push(memories);
+    lines.push(escapeContactMemoriesTokens(text));
+    return lines.join("\n");
   }
 
   interface CallCtx {
@@ -447,13 +477,12 @@ export function createCallBridge(deps: CallBridgeDeps) {
     // and post-call prompts.
     card: string;
     transcript: string[];
+    payload: Record<string, unknown>;
     registry?: ReturnType<typeof createPostCallRegistry>;
   }
 
-  // Build the call context from the SIGNED X-Call-Context body — it carries
-  // call_id (+ the local line), not the counterparty; runCall resolves that
-  // from the call record. Outbound-call hints (purpose/opening/context) ride
-  // the URL we set when placing the call.
+  // Build the call context from the signed header. Older contexts may omit
+  // the counterparty, in which case resolveCallParties fetches the call.
   function callContext(signedRaw: string, req: IncomingMessage): CallCtx {
     let signed: Record<string, unknown> = {};
     try {
@@ -466,18 +495,25 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const from = strOf(signed.remote_phone_number) ?? strOf(signed.from) ?? q("from") ?? "";
     const purpose = q("purpose");
     const openingMessage = q("opening_message");
+    const signedDirection = strOf(signed.direction);
     return {
       from,
       callId: strOf(signed.call_id) ?? strOf(signed.id) ?? q("call_id"),
       // Purpose/opening ride only on outbound call URLs; the call record's
       // direction (fetched later) is authoritative and overrides this.
-      direction: purpose || openingMessage ? "outbound" : "inbound",
+      direction:
+        signedDirection === "inbound" || signedDirection === "outbound"
+          ? signedDirection
+          : purpose || openingMessage
+            ? "outbound"
+            : "inbound",
       purpose,
       openingMessage,
       context: q("context"),
       chatKey: from,
       card: contactCard({}),
       transcript: [],
+      payload: signed,
     };
   }
 

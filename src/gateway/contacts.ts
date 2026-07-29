@@ -13,6 +13,7 @@ export interface ResolvedContact {
   // Free-form notes from the contact record. Injected into voice-call
   // instructions only — never into per-message frame tags (can be long).
   contactNotes?: string;
+  contactMemories?: string[];
 }
 
 // One-line contact card for [inkbox:...] frame tags: the addresses the agent
