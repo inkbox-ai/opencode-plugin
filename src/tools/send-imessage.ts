@@ -43,7 +43,11 @@ function identityCanStartImessageConversations(identity: any): boolean {
   const canStart = number.canStartConversations ?? number.can_start_conversations;
   if (typeof canStart === "boolean") return canStart;
   const numberType = number.type?.value ?? number.type;
-  return String(numberType ?? "").trim().toLowerCase() === "dedicated_outbound";
+  return (
+    String(numberType ?? "")
+      .trim()
+      .toLowerCase() === "dedicated_outbound"
+  );
 }
 
 const sendIMessageArgs = {
