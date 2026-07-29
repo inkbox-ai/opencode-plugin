@@ -1,4 +1,4 @@
-import { contactMemoriesBlock } from "./contact-memories.js";
+import { contactMemoriesBlock, escapeContactMemoriesTokens } from "./contact-memories.js";
 import { contactCard } from "./contacts.js";
 import type { InboundMessage } from "./types.js";
 
@@ -188,13 +188,15 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   // sender resolved to a peer agent identity is named by that identity.
   fields.push("|", contactCard(msg, msg.senderAgent));
 
-  const lines = [`[${fields.join(" ")}]`];
+  const lines = [escapeContactMemoriesTokens(`[${fields.join(" ")}]`)];
   const memories = contactMemoriesBlock(msg.contactMemories ?? []);
   if (memories) lines.push(memories);
   if (directive) lines.push(`Operator directive for this channel: ${directive}`);
   if (msg.group) lines.push(groupReminder(msg.group.participantCount));
-  lines.push(msg.text);
-  if (msg.mediaPaths.length > 0) lines.push(`[attached files: ${msg.mediaPaths.join(", ")}]`);
+  lines.push(escapeContactMemoriesTokens(msg.text));
+  if (msg.mediaPaths.length > 0) {
+    lines.push(escapeContactMemoriesTokens(`[attached files: ${msg.mediaPaths.join(", ")}]`));
+  }
   return lines.join("\n");
 }
 

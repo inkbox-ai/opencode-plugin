@@ -14,6 +14,15 @@ type PayloadContact = {
   memories?: unknown;
 };
 
+const CONTACT_MEMORIES_OPEN = "[inkbox:contact_memories]";
+const CONTACT_MEMORIES_CLOSE = "[/inkbox:contact_memories]";
+
+export function escapeContactMemoriesTokens(text: string): string {
+  return text
+    .replaceAll(CONTACT_MEMORIES_OPEN, "\\u005binkbox:contact_memories\\u005d")
+    .replaceAll(CONTACT_MEMORIES_CLOSE, "\\u005b/inkbox:contact_memories\\u005d");
+}
+
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
@@ -84,11 +93,11 @@ export function contactMemoriesBlock(memories: readonly string[]): string | unde
   const normalized = normalizeContactMemories(memories);
   if (normalized.length === 0) return undefined;
   return [
-    "[inkbox:contact_memories]",
+    CONTACT_MEMORIES_OPEN,
     CONTACT_MEMORIES_GUIDANCE,
     ...normalized.map((memory) =>
       JSON.stringify(memory).replaceAll("[", "\\u005b").replaceAll("]", "\\u005d"),
     ),
-    "[/inkbox:contact_memories]",
+    CONTACT_MEMORIES_CLOSE,
   ].join("\n");
 }

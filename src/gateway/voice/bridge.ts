@@ -4,7 +4,11 @@ import { verifyWebhook } from "@inkbox/sdk";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { InkboxRuntime } from "../../client.js";
 import type { ResolvedConfig } from "../../config.js";
-import { contactMemoriesBlock, matchedContactMemories } from "../contact-memories.js";
+import {
+  contactMemoriesBlock,
+  escapeContactMemoriesTokens,
+  matchedContactMemories,
+} from "../contact-memories.js";
 import {
   type ContactResolver,
   contactCard,
@@ -48,7 +52,10 @@ const ENDED_CALL_STATUSES = new Set(["completed", "failed", "canceled"]);
 // identity is read from that signed context — never from untrusted query
 // params. Each call runs in OpenAI Realtime raw-media mode when configured and
 // reachable, otherwise Inkbox speech-to-text / text-to-speech.
-export function createCallBridge(deps: CallBridgeDeps) {
+export function createCallBridge(
+  deps: CallBridgeDeps,
+  openRealtime: typeof openRealtimeBridge = openRealtimeBridge,
+) {
   const wss = new WebSocketServer({ noServer: true });
   const extraHeaders = new WeakMap<IncomingMessage, string[]>();
   wss.on("headers", (headers, req) => {
@@ -207,7 +214,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
   ): RealtimeBridge & { attach(ws: WebSocket): void } {
     let callWs: WebSocket | undefined;
     const registry = createPostCallRegistry();
-    const bridge = openRealtimeBridge(
+    const bridge = openRealtime(
       {
         apiKey,
         model: deps.config.gateway.voice.realtime.model,
@@ -454,7 +461,7 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const lines = [voiceTag(ctx)];
     const memories = contactMemoriesBlock(contact.contactMemories ?? []);
     if (memories) lines.push(memories);
-    lines.push(text);
+    lines.push(escapeContactMemoriesTokens(text));
     return lines.join("\n");
   }
 
@@ -474,10 +481,8 @@ export function createCallBridge(deps: CallBridgeDeps) {
     registry?: ReturnType<typeof createPostCallRegistry>;
   }
 
-  // Build the call context from the SIGNED X-Call-Context body — it carries
-  // call_id (+ the local line), not the counterparty; runCall resolves that
-  // from the call record. Outbound-call hints (purpose/opening/context) ride
-  // the URL we set when placing the call.
+  // Build the call context from the signed header. Older contexts may omit
+  // the counterparty, in which case resolveCallParties fetches the call.
   function callContext(signedRaw: string, req: IncomingMessage): CallCtx {
     let signed: Record<string, unknown> = {};
     try {
@@ -490,12 +495,18 @@ export function createCallBridge(deps: CallBridgeDeps) {
     const from = strOf(signed.remote_phone_number) ?? strOf(signed.from) ?? q("from") ?? "";
     const purpose = q("purpose");
     const openingMessage = q("opening_message");
+    const signedDirection = strOf(signed.direction);
     return {
       from,
       callId: strOf(signed.call_id) ?? strOf(signed.id) ?? q("call_id"),
       // Purpose/opening ride only on outbound call URLs; the call record's
       // direction (fetched later) is authoritative and overrides this.
-      direction: purpose || openingMessage ? "outbound" : "inbound",
+      direction:
+        signedDirection === "inbound" || signedDirection === "outbound"
+          ? signedDirection
+          : purpose || openingMessage
+            ? "outbound"
+            : "inbound",
       purpose,
       openingMessage,
       context: q("context"),

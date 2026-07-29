@@ -1,4 +1,4 @@
-import { contactMemoriesBlock } from "../contact-memories.js";
+import { contactMemoriesBlock, escapeContactMemoriesTokens } from "../contact-memories.js";
 import type { ResolvedContact } from "../contacts.js";
 import {
   CONSULT_TOOL,
@@ -43,6 +43,7 @@ const AGENT_CAPABILITIES = [
 // Compose the system prompt for a live voice call. Identity, caller context,
 // tool choreography, and privacy rules — mirrored across call modes.
 export function buildVoiceInstructions(meta: CallMeta): string {
+  const sanitize = escapeContactMemoriesTokens;
   const lines: string[] = [
     "You are an assistant speaking on a live phone call.",
     "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
@@ -72,13 +73,13 @@ export function buildVoiceInstructions(meta: CallMeta): string {
   if (c.contactId && c.contactName) {
     lines.push(
       "You already know who this is — do NOT look them up or ask for details you already have below.",
-      `Their name: ${c.contactName}.`,
+      `Their name: ${sanitize(c.contactName)}.`,
     );
     if (c.contactEmails?.length) lines.push(`Their email(s): ${c.contactEmails.join(", ")}.`);
     if (c.contactPhones?.length)
       lines.push(`Their phone number(s) on file: ${c.contactPhones.join(", ")}.`);
-    if (c.contactCompany) lines.push(`Their company: ${c.contactCompany}.`);
-    if (c.contactNotes) lines.push(`Notes about them: ${c.contactNotes}`);
+    if (c.contactCompany) lines.push(`Their company: ${sanitize(c.contactCompany)}.`);
+    if (c.contactNotes) lines.push(`Notes about them: ${sanitize(c.contactNotes)}`);
   } else {
     lines.push(
       "No matching contact record is loaded — you do NOT know who this is. " +
@@ -91,11 +92,11 @@ export function buildVoiceInstructions(meta: CallMeta): string {
 
   if (meta.direction === "outbound") {
     if (meta.purpose) {
-      lines.push(`This is an outbound call you placed. Purpose: ${meta.purpose}`);
+      lines.push(`This is an outbound call you placed. Purpose: ${sanitize(meta.purpose)}`);
     }
     if (meta.openingMessage) {
       lines.push(
-        `Preferred opening message (say this naturally as your first turn): ${meta.openingMessage}`,
+        `Preferred opening message (say this naturally as your first turn): ${sanitize(meta.openingMessage)}`,
       );
     }
     lines.push(
@@ -103,7 +104,7 @@ export function buildVoiceInstructions(meta: CallMeta): string {
         "Start by explaining why you are calling, then ask the next specific question.",
     );
   }
-  if (meta.context) lines.push(`Background for this call: ${meta.context}`);
+  if (meta.context) lines.push(`Background for this call: ${sanitize(meta.context)}`);
 
   lines.push(
     "The text-based agent available through consult_agent is opencode running the Inkbox plugin in this workspace.",
@@ -143,15 +144,15 @@ export function buildVoiceInstructions(meta: CallMeta): string {
 export function buildVoiceGreeting(meta: CallMeta): string {
   if (meta.direction === "outbound") {
     if (meta.openingMessage) {
-      return `Open the call now. Say this naturally as your first turn: ${meta.openingMessage}`;
+      return `Open the call now. Say this naturally as your first turn: ${escapeContactMemoriesTokens(meta.openingMessage)}`;
     }
     if (meta.purpose) {
-      return `Open the call now by explaining why you are calling: ${meta.purpose}`;
+      return `Open the call now by explaining why you are calling: ${escapeContactMemoriesTokens(meta.purpose)}`;
     }
     return "Open the call now: identify yourself briefly and explain why you are calling.";
   }
   const name = meta.contact.contactName;
   return name
-    ? `Greet the caller now, briefly and warmly, by name (${name}), and ask how you can help.`
+    ? `Greet the caller now, briefly and warmly, by name (${escapeContactMemoriesTokens(name)}), and ask how you can help.`
     : "Greet the caller now, briefly and neutrally, and ask how you can help.";
 }
