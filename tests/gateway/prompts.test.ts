@@ -115,7 +115,7 @@ describe("frameInbound", () => {
       makeMsg({ conversationId: "conv-9", group: { participantCount: 4 }, text: "lunch?" }),
     );
     expect(framed).toBe(
-      `[inkbox:sms from=+15550001111 conversation_id=conv-9 ${UNKNOWN}]\n${GROUP_REMINDER}\nlunch?`,
+      `[inkbox:sms from=+15550001111 conversation_id=conv-9 reply_mode=conversation_id ${UNKNOWN}]\n${GROUP_REMINDER}\nlunch?`,
     );
   });
 
@@ -166,7 +166,7 @@ describe("frameInbound", () => {
       }),
     );
     expect(framed).toBe(
-      `[inkbox:sms from=+15550001111 conversation_id=conv-9 ${UNKNOWN}]\n${GROUP_REMINDER}\n` +
+      `[inkbox:sms from=+15550001111 conversation_id=conv-9 reply_mode=conversation_id ${UNKNOWN}]\n${GROUP_REMINDER}\n` +
         "see photo\n[attached files: /media/a.png]",
     );
   });
@@ -319,5 +319,31 @@ describe("agents/inkbox-channel.md", () => {
     const body = (parsed?.[2] ?? "").trim();
     expect(body).toBe(CHANNEL_PROMPT_BODY.trim());
     expect(body).not.toContain("{");
+  });
+});
+
+describe("group iMessage parity", () => {
+  it("tags an iMessage group with participants, reply mode, and the silent policy", () => {
+    const framed = frameInbound(
+      makeMsg({
+        channel: "imessage",
+        conversationId: "imconv-777",
+        group: { participantCount: 2, participants: ["Ada", "Grace"] },
+        text: "Dinner moved to 7.",
+      }),
+    );
+    expect(framed).toContain("[inkbox:imessage");
+    expect(framed).toContain("conversation_id=imconv-777");
+    expect(framed).toContain('participants="Ada, Grace"');
+    expect(framed).toContain("reply_mode=conversation_id");
+    expect(framed).toContain(SILENT);
+  });
+
+  it("leaves a 1:1 iMessage without group framing", () => {
+    const framed = frameInbound(
+      makeMsg({ channel: "imessage", conversationId: "imconv-778", text: "hey" }),
+    );
+    expect(framed).not.toContain("reply_mode=conversation_id");
+    expect(framed).not.toContain("Group conversation");
   });
 });

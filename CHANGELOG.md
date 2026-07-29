@@ -2,6 +2,12 @@
 
 ## 0.1.1 (unreleased)
 
+- iMessage groups now match the rest of the plugin fleet: a group is one shared
+  context, so the conversation keys the chat rather than the sender and every
+  participant lands in the same session. The frame carries the participant list
+  and `reply_mode=conversation_id` alongside the existing reply-only-when-
+  addressed policy. `to` accepts 1-8 recipients; opening a group requires a
+  dedicated outbound iMessage line.
 - Setup now restarts a background gateway that is already running instead of
   reporting success and leaving it on the previous `.env`. The boot-autostart
   path already forced a service restart for this reason; the background path
