@@ -109,8 +109,12 @@ export async function reconcileSubscriptions(
   ): Promise<void> {
     try {
       const existing = await client.webhooks.subscriptions.list(owner);
-      const ours = existing.find((sub) => sub.url === subscriptionUrl);
       const desiredFamilies = eventFamilies(eventTypes);
+      const belongsToDesiredChannel = (sub: { eventTypes: string[] }) =>
+        [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family));
+      const ours = existing.find(
+        (sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub),
+      );
       const staleOurs = existing.filter(
         (sub) =>
           sub.url !== subscriptionUrl &&
@@ -170,12 +174,7 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber) {
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
-  await reconcileOwner(
-    "a2a",
-    { agentIdentityId: identity.id },
-    A2A_EVENT_TYPES,
-    `${webhookUrl}?channel=a2a`,
-  );
+  await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
   if (identity.imessageEnabled) {
     await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
   }

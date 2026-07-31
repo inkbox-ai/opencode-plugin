@@ -84,6 +84,23 @@ describe("placeCallTools", () => {
     expect(outputOf(result)).not.toContain("callsRemaining");
   });
 
+  it("forwards disabled voicemail detection when requested", async () => {
+    const identity = makeIdentity();
+    const [tool] = placeCallTools(makeDeps(identity));
+
+    await tool.definition.execute(
+      {
+        toNumber: "+14155550123",
+        voicemailDetection: "disabled",
+      },
+      makeCtx(),
+    );
+
+    expect(identity.placeCall).toHaveBeenCalledWith(
+      expect.objectContaining({ voicemailDetection: "disabled" }),
+    );
+  });
+
   it("honors an explicit shared_imessage_number origination", async () => {
     const identity = makeIdentity({ imessageEnabled: true });
     const [tool] = placeCallTools(makeDeps(identity));

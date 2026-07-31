@@ -31,7 +31,7 @@
   existing approval and recipient-allowlist controls.
 - Adds paginated task and message history with direction, participant,
   lifecycle, context, role, keyword, and timestamp filters.
-- The plugin requires `@inkbox/sdk` 0.5.6 or newer.
+- The plugin requires `@inkbox/sdk` 0.5.8 or newer.
 
 ## 0.1.0 (unreleased)
 

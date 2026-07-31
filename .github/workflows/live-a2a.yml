@@ -58,13 +58,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install protocol driver
-        run: pip install 'inkbox==0.5.6'
+        run: pip install 'inkbox==0.5.8'
 
       - name: Install plugin and host
         run: |
           npm ci
           npm install --no-save --package-lock=false \
-            @inkbox/sdk@0.5.6 \
+            @inkbox/sdk@0.5.8 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
           npm install -g opencode-ai@latest
 

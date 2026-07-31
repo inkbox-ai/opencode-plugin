@@ -8,7 +8,7 @@
 //   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
 //   outbound_realtime — driver texts "call me"; agent calls back on Realtime.
 import { readFileSync } from "node:fs";
-import { PhoneRuleAction, PhoneRuleMatchType } from "@inkbox/sdk";
+import { PhoneRuleAction, PhoneRuleMatchType, VoicemailDetection } from "@inkbox/sdk";
 import { describe, expect, it } from "vitest";
 import {
   AUT_KEY,
@@ -130,6 +130,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         toNumber: autPhone.number,
         fromNumber: st.number,
         clientWebsocketUrl: st.ws_url,
+        voicemailDetection: VoicemailDetection.DISABLED,
       });
       console.info(`inbound call placed: ${JSON.stringify(callSummary(call))}`);
       try {
@@ -194,7 +195,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       );
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
-        text: "Please call me right now by phone — give me a ring.",
+        text: "Please call me right now by phone and set voicemailDetection to disabled.",
       });
 
       let call: Awaited<ReturnType<typeof inboundFromAut>>[number] | undefined;
