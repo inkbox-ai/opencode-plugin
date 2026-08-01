@@ -40,6 +40,7 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
@@ -72,7 +73,8 @@ jobs:
           nohup node tests/live/mock-openai.mjs 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/mock.pid"
           for i in $(seq 1 10); do
-            curl -sf http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
+            curl -sf --connect-timeout 1 --max-time 3 \
+              http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
             sleep 1
           done
           echo "::error::mock model did not start"; cat "$RUNNER_TEMP/mock.log"; exit 1
@@ -102,7 +104,7 @@ jobs:
       # Failure-only: these logs carry live phone/email content and this
       # repo's Action logs are public.
       - name: Dump logs (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== gateway.log ==="; cat "$AUT_GATEWAY_LOG" || true
           echo "=== serve.log ===";   tail -n 100 "$AUT_SERVE_LOG" || true
@@ -116,7 +118,7 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
       - name: Upload artifacts (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: live-logs-${{ matrix.mode }}

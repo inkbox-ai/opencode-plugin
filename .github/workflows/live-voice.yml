@@ -48,6 +48,7 @@ concurrency:
 jobs:
   voice:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT + driver identities → one at a time
@@ -124,7 +125,7 @@ jobs:
 
       # Failure-only: these logs carry live call content and this repo is public.
       - name: Dump logs (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== gateway.log ==="; cat "$AUT_GATEWAY_LOG" || true
           echo "=== serve.log ===";   tail -n 100 "$AUT_SERVE_LOG" || true
@@ -139,7 +140,7 @@ jobs:
           sleep 3   # let the driver revert its number on exit
 
       - name: Upload artifacts (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: voice-logs-${{ matrix.scenario }}

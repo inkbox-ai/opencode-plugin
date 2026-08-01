@@ -116,10 +116,12 @@ echo "==> starting opencode serve on :$SERVE_PORT"
   nohup opencode serve --port "$SERVE_PORT" > "$SERVE_LOG" 2>&1 &
  echo $! > "$WORKDIR/serve.pid")
 for _ in $(seq 1 30); do
-  curl -sf "http://127.0.0.1:$SERVE_PORT/config" >/dev/null 2>&1 && break
+  curl -sf --connect-timeout 1 --max-time 3 \
+    "http://127.0.0.1:$SERVE_PORT/config" >/dev/null 2>&1 && break
   sleep 2
 done
-curl -sf "http://127.0.0.1:$SERVE_PORT/config" >/dev/null || {
+curl -sf --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$SERVE_PORT/config" >/dev/null || {
   echo "::error::opencode serve did not come up"; cat "$SERVE_LOG"; exit 1; }
 
 echo "==> starting the gateway sidecar ($MODE model: $GATEWAY_MODEL)"
