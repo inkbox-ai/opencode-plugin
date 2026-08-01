@@ -429,15 +429,14 @@ describe("reconcileSubscriptions", () => {
     expect(JSON.stringify(identity.setIncomingCallAction.mock.calls)).not.toContain("secret");
   });
 
-  it.each([
-    "https:/example.com",
-    "ftp://example.com",
-    "https://",
-  ])("rejects a malformed or non-HTTP public URL: %s", async (publicUrl) => {
-    await expect(
-      reconcileSubscriptions(makeDeps(makeIdentity(), makeSubscriptions()), publicUrl),
-    ).rejects.toThrow("Gateway public URL must be an http(s) URL");
-  });
+  it.each(["https:/example.com", "ftp://example.com", "https://"])(
+    "rejects a malformed or non-HTTP public URL: %s",
+    async (publicUrl) => {
+      await expect(
+        reconcileSubscriptions(makeDeps(makeIdentity(), makeSubscriptions()), publicUrl),
+      ).rejects.toThrow("Gateway public URL must be an http(s) URL");
+    },
+  );
 
   it("does not disclose credentials from an invalid configured public URL", async () => {
     const secret = "do-not-log-this-token";

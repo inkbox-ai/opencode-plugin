@@ -526,45 +526,48 @@ describe("hosted call completion", () => {
       "completed",
       "success",
     ],
-  ] as const)("recovers safely after restart at the %s transition", async (_label, snapshot, expectedPhase, expectedState, expectedOutcome) => {
-    const smsAttempts: HostedSmsAttempt[] | undefined =
-      "smsAttempts" in snapshot
-        ? snapshot.smsAttempts.map((attempt) => ({ ...attempt }))
-        : undefined;
-    saveHostedCall({
-      identityId: "ident-1",
-      callId: "call-1",
-      eventId: "evt-1",
-      retryable: false,
-      event: event(),
-      ...snapshot,
-      smsAttempts,
-    });
-    const d = deps(
-      expectedPhase
-        ? [
-            {
-              phase: expectedPhase,
-              id: "attempt-after-restart",
-              target: "+14155550123",
-              targetMatches: true,
-              state: "success",
-            },
-          ]
-        : [],
-    );
-    await createHostedCallCompletion(d).catchUp();
-    await waitForState(expectedState);
-    expect(getHostedCall("ident-1", "call-1")).toMatchObject({
-      state: expectedState,
-      outcome: expectedOutcome,
-      retryable: false,
-    });
-    if (expectedPhase) {
-      expect(d.runHostedCapture).toHaveBeenCalledOnce();
-      expect(d.runHostedCapture.mock.calls[0][2].phase).toBe(expectedPhase);
-    } else {
-      expect(d.runHostedCapture).not.toHaveBeenCalled();
-    }
-  });
+  ] as const)(
+    "recovers safely after restart at the %s transition",
+    async (_label, snapshot, expectedPhase, expectedState, expectedOutcome) => {
+      const smsAttempts: HostedSmsAttempt[] | undefined =
+        "smsAttempts" in snapshot
+          ? snapshot.smsAttempts.map((attempt) => ({ ...attempt }))
+          : undefined;
+      saveHostedCall({
+        identityId: "ident-1",
+        callId: "call-1",
+        eventId: "evt-1",
+        retryable: false,
+        event: event(),
+        ...snapshot,
+        smsAttempts,
+      });
+      const d = deps(
+        expectedPhase
+          ? [
+              {
+                phase: expectedPhase,
+                id: "attempt-after-restart",
+                target: "+14155550123",
+                targetMatches: true,
+                state: "success",
+              },
+            ]
+          : [],
+      );
+      await createHostedCallCompletion(d).catchUp();
+      await waitForState(expectedState);
+      expect(getHostedCall("ident-1", "call-1")).toMatchObject({
+        state: expectedState,
+        outcome: expectedOutcome,
+        retryable: false,
+      });
+      if (expectedPhase) {
+        expect(d.runHostedCapture).toHaveBeenCalledOnce();
+        expect(d.runHostedCapture.mock.calls[0][2].phase).toBe(expectedPhase);
+      } else {
+        expect(d.runHostedCapture).not.toHaveBeenCalled();
+      }
+    },
+  );
 });
