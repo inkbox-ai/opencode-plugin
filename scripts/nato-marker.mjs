@@ -33,7 +33,7 @@ export function natoMarker(runId, runAttempt) {
   let value = BigInt(runId) * 10n + BigInt(runAttempt);
   const used = new Set();
   const marker = [];
-  for (let count = 0; count < 6; count += 1) {
+  for (let count = 0; count < 5; count += 1) {
     let index = Number(value % BigInt(RADIO_WORDS.length));
     value /= BigInt(RADIO_WORDS.length);
     while (used.has(index)) index = (index + 1) % RADIO_WORDS.length;

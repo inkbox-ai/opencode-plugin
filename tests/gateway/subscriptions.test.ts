@@ -413,4 +413,39 @@ describe("reconcileSubscriptions", () => {
       reconcileSubscriptions(makeDeps(makeIdentity(), makeSubscriptions()), "scout.example.com"),
     ).rejects.toThrow(/http\(s\)/);
   });
+
+  it("canonicalizes the URL, preserves its path, and drops credentials/query/fragment", async () => {
+    const identity = makeIdentity();
+    const deps = makeDeps(identity, makeSubscriptions(), { voiceEnabled: true });
+    await reconcileSubscriptions(
+      deps,
+      "HTTPS://user:secret@EXAMPLE.COM/some/path/?key=secret#fragment",
+    );
+    expect(identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://example.com/some/path/phone/media/ws",
+      incomingCallWebhookUrl: "https://example.com/some/path/webhook",
+    });
+    expect(JSON.stringify(identity.setIncomingCallAction.mock.calls)).not.toContain("secret");
+  });
+
+  it.each([
+    "https:/example.com",
+    "ftp://example.com",
+    "https://",
+  ])("rejects a malformed or non-HTTP public URL: %s", async (publicUrl) => {
+    await expect(
+      reconcileSubscriptions(makeDeps(makeIdentity(), makeSubscriptions()), publicUrl),
+    ).rejects.toThrow("Gateway public URL must be an http(s) URL");
+  });
+
+  it("does not disclose credentials from an invalid configured public URL", async () => {
+    const secret = "do-not-log-this-token";
+    await expect(
+      reconcileSubscriptions(
+        makeDeps(makeIdentity(), makeSubscriptions()),
+        `ftp://user:${secret}@example.com/path?key=${secret}`,
+      ),
+    ).rejects.not.toThrow(secret);
+  });
 });

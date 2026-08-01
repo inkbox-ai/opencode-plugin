@@ -237,6 +237,23 @@ describe("hosted SMS durable guard", () => {
     );
   });
 
+  it.each([
+    ["request timeout", "Inkbox API error (408): request timed out"],
+    ["rate limit", "Inkbox API error (429): carrier rate limit"],
+    ["upstream outage", "Inkbox API error (503): carrier unavailable"],
+    ["unknown duplicate commit", "duplicate request with unknown commit status"],
+  ])("classifies a commit-ambiguous %s as terminal settlement", (_label, message) => {
+    expect(classifyHostedSmsError(message)).toBe("ambiguous_provider_failure");
+  });
+
+  it.each([
+    ["missing consent", "Recipient is not opted in for SMS"],
+    ["revoked consent", "Recipient opted out of SMS"],
+    ["invalid carrier destination", "Carrier says invalid phone number"],
+  ])("classifies %s as a terminal recipient failure", (_label, message) => {
+    expect(classifyHostedSmsError(message)).toBe("recipient_terminal");
+  });
+
   it("allows a hosted callback only to the authoritative current caller", () => {
     expect(assertHostedCallTarget("session-1", "+14155550123")).toBe(true);
     expect(() => assertHostedCallTarget("session-1", "+15550009999")).toThrow("non-authoritative");

@@ -21,10 +21,10 @@ describe("hosted voice NATO marker", () => {
     ["1", "1"],
     ["676", "2"],
     ["999999999999", "9"],
-  ])("produces six distinct speech-safe words for run %s attempt %s", (runId, attempt) => {
+  ])("produces five distinct speech-safe words for run %s attempt %s", (runId, attempt) => {
     const words = marker(runId, attempt);
-    expect(words).toHaveLength(6);
-    expect(new Set(words).size).toBe(6);
+    expect(words).toHaveLength(5);
+    expect(new Set(words).size).toBe(5);
     expect(words.every((word) => NATO.has(word))).toBe(true);
   });
 });

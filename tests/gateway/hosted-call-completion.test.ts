@@ -440,4 +440,131 @@ describe("hosted call completion", () => {
     });
     expect(d.runHostedCapture).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["queued before initial dispatch", { state: "queued" }, "initial", "completed", "success"],
+    [
+      "retryable initial preparation failure",
+      { state: "failed", outcome: "initial_pre_dispatch_retries_exhausted", retryable: true },
+      "initial",
+      "completed",
+      "success",
+    ],
+    [
+      "correctable initial provider result",
+      {
+        state: "running",
+        smsAttempts: [
+          {
+            phase: "initial",
+            id: "attempt-1",
+            target: "+14155550123",
+            targetMatches: true,
+            state: "failed",
+            errorKind: "content_rejected",
+          },
+        ],
+      },
+      "correction",
+      "completed",
+      "success",
+    ],
+    [
+      "retryable correction preparation failure",
+      { state: "failed", outcome: "correction_pre_dispatch_retries_exhausted", retryable: true },
+      "correction",
+      "completed",
+      "success",
+    ],
+    [
+      "initial dispatch ambiguous boundary",
+      { state: "running", outcome: "initial_dispatch_started" },
+      undefined,
+      "failed",
+      "durable_sms_attempt_is_ambiguous",
+    ],
+    [
+      "correction dispatch ambiguous boundary",
+      { state: "running", outcome: "correction_started" },
+      undefined,
+      "failed",
+      "durable_sms_attempt_is_ambiguous",
+    ],
+    [
+      "pending provider attempt",
+      {
+        state: "running",
+        smsAttempts: [
+          {
+            phase: "initial",
+            id: "attempt-1",
+            target: "+14155550123",
+            targetMatches: true,
+            state: "pending",
+          },
+        ],
+      },
+      undefined,
+      "failed",
+      "durable_sms_attempt_is_ambiguous",
+    ],
+    [
+      "successful provider result",
+      {
+        state: "running",
+        smsAttempts: [
+          {
+            phase: "initial",
+            id: "attempt-1",
+            target: "+14155550123",
+            targetMatches: true,
+            state: "success",
+          },
+        ],
+      },
+      undefined,
+      "completed",
+      "success",
+    ],
+  ] as const)("recovers safely after restart at the %s transition", async (_label, snapshot, expectedPhase, expectedState, expectedOutcome) => {
+    const smsAttempts: HostedSmsAttempt[] | undefined =
+      "smsAttempts" in snapshot
+        ? snapshot.smsAttempts.map((attempt) => ({ ...attempt }))
+        : undefined;
+    saveHostedCall({
+      identityId: "ident-1",
+      callId: "call-1",
+      eventId: "evt-1",
+      retryable: false,
+      event: event(),
+      ...snapshot,
+      smsAttempts,
+    });
+    const d = deps(
+      expectedPhase
+        ? [
+            {
+              phase: expectedPhase,
+              id: "attempt-after-restart",
+              target: "+14155550123",
+              targetMatches: true,
+              state: "success",
+            },
+          ]
+        : [],
+    );
+    await createHostedCallCompletion(d).catchUp();
+    await waitForState(expectedState);
+    expect(getHostedCall("ident-1", "call-1")).toMatchObject({
+      state: expectedState,
+      outcome: expectedOutcome,
+      retryable: false,
+    });
+    if (expectedPhase) {
+      expect(d.runHostedCapture).toHaveBeenCalledOnce();
+      expect(d.runHostedCapture.mock.calls[0][2].phase).toBe(expectedPhase);
+    } else {
+      expect(d.runHostedCapture).not.toHaveBeenCalled();
+    }
+  });
 });

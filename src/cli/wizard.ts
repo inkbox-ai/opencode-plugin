@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { DEFAULT_REALTIME_MODEL, type ResolvedConfig } from "../config.js";
 import { gatewayHome } from "../gateway/state.js";
-import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
+import { CALL_MEDIA_WS_PATH, normalizePublicUrl, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import type { PhoneVoiceStack } from "../voice-stack.js";
 import { installAutostart } from "./autostart.js";
 import { restartDaemon, runningDaemonPid, startDaemon } from "./daemon.js";
@@ -646,9 +646,37 @@ async function configureVoiceAi(
   return { configured: true, authorityIdentity: adminIdentity };
 }
 
-function configuredGatewayPublicUrl(config: ResolvedConfig): string | undefined {
-  const configuredPublicUrl = config.gateway.publicUrl?.trim().replace(/\/+$/, "");
-  return configuredPublicUrl || undefined;
+function setupGatewayPublicUrl(c: Ctx, config: ResolvedConfig, identity: any): string | undefined {
+  const configured = config.gateway.publicUrl?.trim();
+  if (configured) {
+    try {
+      return normalizePublicUrl(configured);
+    } catch {
+      c.io.print(
+        "  The configured gateway.publicUrl is invalid; enter an HTTP(S) public URL and rerun setup.",
+      );
+      return undefined;
+    }
+  }
+
+  const tunnelPublicHost = identity?.tunnel?.publicHost;
+  if (typeof tunnelPublicHost !== "string" || !tunnelPublicHost.trim()) {
+    c.io.print(
+      "  Inkbox did not return a server-issued tunnel public host; provision the identity tunnel and rerun setup.",
+    );
+    return undefined;
+  }
+  try {
+    const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(tunnelPublicHost.trim())
+      ? tunnelPublicHost.trim()
+      : `https://${tunnelPublicHost.trim()}`;
+    return normalizePublicUrl(candidate);
+  } catch {
+    c.io.print(
+      "  Inkbox returned an invalid tunnel public host; repair the identity tunnel and rerun setup.",
+    );
+    return undefined;
+  }
 }
 
 function localCallWebsocketUrl(publicUrl: string): string {
@@ -660,13 +688,8 @@ async function configureLocalIncomingCalls(
   config: ResolvedConfig,
   identity: any,
 ): Promise<boolean> {
-  const publicUrl = configuredGatewayPublicUrl(config);
-  if (!publicUrl) {
-    c.io.print(
-      "  Incoming-call routing will be configured when the gateway starts and its public URL is known.",
-    );
-    return true;
-  }
+  const publicUrl = setupGatewayPublicUrl(c, config, identity);
+  if (!publicUrl) return false;
   if (typeof identity.setIncomingCallAction !== "function") {
     c.io.print("  The installed Inkbox SDK cannot configure incoming calls.");
     return false;

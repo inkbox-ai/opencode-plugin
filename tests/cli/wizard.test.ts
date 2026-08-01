@@ -80,12 +80,15 @@ interface FakeWorld {
   resend: ReturnType<typeof vi.fn>;
 }
 
-function fakeWorld(over: { phone?: unknown; imessageEnabled?: boolean } = {}): FakeWorld {
+function fakeWorld(
+  over: { phone?: unknown; imessageEnabled?: boolean; tunnel?: unknown } = {},
+): FakeWorld {
   const identity: FakeWorld["identity"] = {
     agentHandle: "test-agent",
     emailAddress: "test-agent@inkboxmail.com",
     phoneNumber: over.phone ?? null,
     imessageEnabled: over.imessageEnabled ?? false,
+    tunnel: "tunnel" in over ? over.tunnel : { publicHost: "test-agent.inkboxwire.com" },
     id: "id-1",
     update: vi.fn(async () => ({})),
     provisionPhoneNumber: vi.fn(async () => ({
@@ -431,7 +434,7 @@ describe("runWizard", () => {
     expect(choiceDefaults[0]).toBe(0);
   });
 
-  it("does not claim a saved stack can override a fixed plugin option", async () => {
+  it("routes a fixed local stack immediately through the server-issued tunnel", async () => {
     const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
     const { io, lines } = scriptedIO([
       true, // reconfigure
@@ -462,14 +465,117 @@ describe("runWizard", () => {
       "plugin option phoneVoiceStack=inkbox_tts_stt overrides saved environment selections",
     );
     expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBe("inkbox_tts_stt");
+    expect(world.identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://test-agent.inkboxwire.com/phone/media/ws",
+      incomingCallWebhookUrl: "https://test-agent.inkboxwire.com/webhook",
+    });
+  });
+
+  it("routes OpenAI Realtime immediately through the server-issued tunnel", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    const { io } = scriptedIO([
+      true,
+      "ApiKey_agent",
+      false,
+      1, // OpenAI Realtime
+      false,
+      true,
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io, { env: { OPENAI_API_KEY: "sk-test" } });
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    expect(world.identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://test-agent.inkboxwire.com/phone/media/ws",
+      incomingCallWebhookUrl: "https://test-agent.inkboxwire.com/webhook",
+    });
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBe("openai_realtime");
+  });
+
+  it("prefers the configured gateway public URL over the server-issued tunnel", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    const { io } = scriptedIO([
+      true,
+      "ApiKey_agent",
+      false,
+      2, // Inkbox TTS/STT
+      false,
+      true,
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io);
+    expect(
+      await runWizard(
+        makeConfig({
+          gateway: {
+            ...defaultGatewayConfig(),
+            publicUrl: "https://configured.example/some/path/",
+          },
+        }),
+        d,
+      ),
+    ).toBe(0);
+    expect(world.identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://configured.example/some/path/phone/media/ws",
+      incomingCallWebhookUrl: "https://configured.example/some/path/webhook",
+    });
+  });
+
+  it("fails closed without saving a local stack when no tunnel public host is available", async () => {
+    const world = fakeWorld({
+      phone: { id: "pn-1", number: "+15550001111", type: "local" },
+      tunnel: null,
+    });
+    const { io, lines } = scriptedIO([true, "ApiKey_agent", false, 2, 2, 2, 2, 2]);
+    const d = deps(world, io);
+    expect(await runWizard(makeConfig(), d)).toBe(1);
     expect(world.identity.setIncomingCallAction).not.toHaveBeenCalled();
-    expect(lines.join("\n")).toContain(
-      "routing will be configured when the gateway starts and its public URL is known",
-    );
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBeUndefined();
+    expect(lines.join("\n")).toContain("did not return a server-issued tunnel public host");
+    expect(lines.join("\n")).toContain("could not be configured after 5 attempts");
+  });
+
+  it("fails closed without saving a local stack when the tunnel public host is malformed", async () => {
+    const world = fakeWorld({
+      phone: { id: "pn-1", number: "+15550001111", type: "local" },
+      tunnel: { publicHost: "ftp://test-agent.inkboxwire.com" },
+    });
+    const { io, lines } = scriptedIO([true, "ApiKey_agent", false, 2, 2, 2, 2, 2]);
+    const d = deps(world, io);
+    expect(await runWizard(makeConfig(), d)).toBe(1);
+    expect(world.identity.setIncomingCallAction).not.toHaveBeenCalled();
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBeUndefined();
+    expect(lines.join("\n")).toContain("returned an invalid tunnel public host");
+  });
+
+  it("rejects a malformed configured public URL without falling back to the tunnel", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    const { io, lines } = scriptedIO([true, "ApiKey_agent", false, 2, 2, 2, 2, 2]);
+    const d = deps(world, io);
+    expect(
+      await runWizard(
+        makeConfig({
+          gateway: { ...defaultGatewayConfig(), publicUrl: "configured.example" },
+        }),
+        d,
+      ),
+    ).toBe(1);
+    expect(world.identity.setIncomingCallAction).not.toHaveBeenCalled();
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBeUndefined();
+    expect(lines.join("\n")).toContain("configured gateway.publicUrl is invalid");
   });
 
   it("keeps an agent key on the saved contact-scoped default without asking for admin", async () => {
-    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    const world = fakeWorld({
+      phone: { id: "pn-1", number: "+15550001111", type: "local" },
+      tunnel: null,
+    });
     const { io, questions } = scriptedIO([
       true,
       "ApiKey_agent",
@@ -636,7 +742,11 @@ describe("runWizard", () => {
       INKBOX_VOICE_STACK: "inkbox_tts_stt",
     });
     expect(savedEnv(d.envFilePath).INKBOX_REALTIME_API_KEY).toBeUndefined();
-    expect(world.identity.setIncomingCallAction).not.toHaveBeenCalled();
+    expect(world.identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://test-agent.inkboxwire.com/phone/media/ws",
+      incomingCallWebhookUrl: "https://test-agent.inkboxwire.com/webhook",
+    });
     expect(lines.join("\n")).not.toContain("sk-bad");
   });
 

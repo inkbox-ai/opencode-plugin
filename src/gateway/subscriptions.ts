@@ -71,15 +71,26 @@ function isUnsupportedA2AEventTypes(err: unknown): boolean {
   );
 }
 
-function normalizePublicUrl(publicUrl: string): string {
+function invalidPublicUrlError(): Error {
+  return new Error(
+    "Gateway public URL must be an http(s) URL. " +
+      "Check gateway.publicUrl (or INKBOX_PUBLIC_URL) or let the tunnel provide one.",
+  );
+}
+
+export function normalizePublicUrl(publicUrl: string): string {
   const base = publicUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(base)) {
-    throw new Error(
-      `Gateway public URL must be an http(s) URL, got '${publicUrl}'. ` +
-        "Check gateway.publicUrl (or INKBOX_PUBLIC_URL) or let the tunnel provide one.",
-    );
+  let parsed: URL;
+  try {
+    if (!/^https?:\/\//i.test(base)) throw new Error("missing HTTP(S) scheme");
+    parsed = new URL(base);
+  } catch {
+    throw invalidPublicUrlError();
   }
-  return base;
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+    throw invalidPublicUrlError();
+  }
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
 }
 
 /**
