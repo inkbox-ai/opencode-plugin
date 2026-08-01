@@ -91,6 +91,23 @@ describe("hosted send SMS boundary", () => {
     expect(getHostedCall("ident-1", "call-1")?.smsAttempts[0].state).toBe("success");
   });
 
+  it("does not rewrite a provider-accepted SMS as failed when success journaling fails", async () => {
+    const [tool] = sendSmsTools(makeDeps());
+    sendText.mockImplementationOnce(async () => {
+      fs.writeFileSync(path.join(dir, "hosted-call-completions.json"), "{broken", { mode: 0o600 });
+      return { id: "sms-accepted", deliveryStatus: "queued" };
+    });
+    await expect(
+      tool.definition.execute({ to: "+14155550123", text: "bravo maple" }, {
+        sessionID: "session-1",
+        messageID: "message-1",
+        ask: vi.fn(),
+        abort: new AbortController().signal,
+      } as any),
+    ).rejects.toThrow(/provider accepted.*do not retry/);
+    expect(sendText).toHaveBeenCalledOnce();
+  });
+
   it("canonicalizes a formatting-only target variant to the authoritative E.164 number", async () => {
     const [tool] = sendSmsTools(makeDeps());
     await tool.definition.execute({ to: "+1 (415) 555-0123", text: "bravo maple" }, {

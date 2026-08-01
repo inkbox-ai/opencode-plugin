@@ -20,12 +20,17 @@ describe("live call ownership pairing", () => {
   });
 
   it("rejects duplicate driver or AUT legs with identifying diagnostics", () => {
-    expect(() =>
+    let diagnostic = "";
+    try {
       requireExactCallPair([call("driver-1"), call("driver-2")], [call("aut")], {
         scenarioStartedAt: started,
         maxCreationSkewMs: 5_000,
-      }),
-    ).toThrow(/driver-1.*driver-2.*aut/);
+      });
+    } catch (error) {
+      diagnostic = String(error);
+    }
+    expect(diagnostic).toMatch(/driver-1.*driver-2.*aut/);
+    expect(diagnostic).not.toContain("14155550123");
     expect(() =>
       requireExactCallPair([call("driver")], [call("aut-1"), call("aut-2")], {
         scenarioStartedAt: started,

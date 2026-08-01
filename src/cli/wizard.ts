@@ -75,6 +75,7 @@ interface Ctx {
   confirmTimeoutMs: number;
   sleep: (ms: number) => Promise<void>;
   cwd: string;
+  rejectedRealtimeKeys: Set<string>;
 }
 
 function defaultSdk(baseUrl: string | undefined): WizardSdk {
@@ -133,6 +134,7 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
     confirmTimeoutMs: deps.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS,
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     cwd: deps.cwd ?? process.cwd(),
+    rejectedRealtimeKeys: new Set(),
   };
   try {
     return await wizard(c, config);
@@ -561,14 +563,14 @@ async function configureVoiceAi(
   c: Ctx,
   identity: any,
   authorityIdentity?: any,
-): Promise<{ authorityIdentity?: any } | undefined> {
+): Promise<{ configured: boolean; authorityIdentity?: any }> {
   if (
     typeof identity.getHostedAgentConfig !== "function" ||
     typeof identity.getIncomingCallAction !== "function" ||
     typeof identity.setIncomingCallAction !== "function"
   ) {
     c.io.print("  Inkbox Voice AI setup requires @inkbox/sdk 0.5.9.");
-    return undefined;
+    return { configured: false, authorityIdentity };
   }
   let hosted: any;
   let incoming: any;
@@ -579,7 +581,7 @@ async function configureVoiceAi(
     ]);
   } catch (err) {
     c.io.print(`  Could not read the current Voice AI configuration: ${errText(err)}`);
-    return undefined;
+    return { configured: false, authorityIdentity };
   }
   const previous: VoiceAiAuthorityMode =
     hosted?.authorityMode === "yolo" ? "yolo" : "contact_scoped";
@@ -595,7 +597,7 @@ async function configureVoiceAi(
   let adminIdentity = authorityIdentity;
   if (selected !== previous && !adminIdentity) {
     adminIdentity = await adminIdentityForAuthority(c, identity.agentHandle);
-    if (!adminIdentity) return undefined;
+    if (!adminIdentity) return { configured: false, authorityIdentity };
   }
   let authorityChanged = false;
   let routingAttempted = false;
@@ -634,14 +636,14 @@ async function configureVoiceAi(
     if (rollbackErrors.length) {
       c.io.print(`  warning: remote rollback was incomplete (${rollbackErrors.join("; ")}).`);
     }
-    return undefined;
+    return { configured: false, authorityIdentity: adminIdentity };
   }
   save(c, "INKBOX_VOICE_STACK", "inkbox_voice_ai");
   save(c, "INKBOX_VOICE_AI_AUTHORITY_MODE", selected);
   save(c, "INKBOX_REALTIME_ENABLED", "false");
   c.io.print("  Inkbox Voice AI is configured for phone calls.");
   c.io.print("  OpenCode will be notified when each call ends.");
-  return { authorityIdentity: adminIdentity };
+  return { configured: true, authorityIdentity: adminIdentity };
 }
 
 function configuredGatewayPublicUrl(config: ResolvedConfig): string | undefined {
@@ -684,7 +686,8 @@ async function configureLocalIncomingCalls(
 
 async function configureRealtime(c: Ctx): Promise<string | undefined> {
   const { io } = c;
-  const detected = c.env.INKBOX_REALTIME_API_KEY || c.env.OPENAI_API_KEY || "";
+  const candidate = c.env.INKBOX_REALTIME_API_KEY || c.env.OPENAI_API_KEY || "";
+  const detected = c.rejectedRealtimeKeys.has(candidate) ? "" : candidate;
   if (detected) io.print("  Found an OpenAI API key in your environment.");
   const apiKey =
     detected ||
@@ -699,6 +702,7 @@ async function configureRealtime(c: Ctx): Promise<string | undefined> {
     const result = await c.realtimeValidatorFn(apiKey, DEFAULT_REALTIME_MODEL);
     if (!result.ok) throw new Error(result.detail);
   } catch (err) {
+    c.rejectedRealtimeKeys.add(apiKey);
     io.print(`  error: OpenAI validation failed (${errText(err).replaceAll(apiKey, "***")}).`);
     io.print("  Choose a phone call voice stack again.");
     return undefined;
@@ -712,6 +716,7 @@ async function configurePhoneVoiceStack(
   identity: any,
   authorityIdentity?: any,
 ): Promise<boolean> {
+  let reusableAuthorityIdentity = authorityIdentity;
   const configured = c.env.INKBOX_VOICE_STACK ?? config.phoneVoiceStack;
   let defaultIndex =
     configured === "inkbox_voice_ai" ? 0 : configured === "openai_realtime" ? 1 : 2;
@@ -744,7 +749,9 @@ async function configurePhoneVoiceStack(
       continue;
     }
     if (selected === 0) {
-      if (await configureVoiceAi(c, identity, authorityIdentity)) return true;
+      const result = await configureVoiceAi(c, identity, reusableAuthorityIdentity);
+      reusableAuthorityIdentity = result.authorityIdentity;
+      if (result.configured) return true;
       continue;
     }
     if (selected === 1) {

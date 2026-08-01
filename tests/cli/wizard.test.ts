@@ -640,6 +640,84 @@ describe("runWizard", () => {
     expect(lines.join("\n")).not.toContain("sk-bad");
   });
 
+  it("lets the user replace a detected Realtime key after the handshake rejects it", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    const { io } = scriptedIO([
+      true,
+      "ApiKey_agent",
+      false,
+      1,
+      1,
+      "sk-good",
+      false,
+      true,
+      "",
+      false,
+      false,
+    ]);
+    const validator = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, detail: "invalid_api_key" })
+      .mockResolvedValueOnce({ ok: true, detail: "session updated" });
+    const d = deps(world, io, {
+      env: { OPENAI_API_KEY: "sk-stale" },
+      realtimeValidatorFn: validator,
+    });
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    expect(validator).toHaveBeenNthCalledWith(1, "sk-stale", "gpt-realtime-2");
+    expect(validator).toHaveBeenNthCalledWith(2, "sk-good", "gpt-realtime-2");
+    expect(savedEnv(d.envFilePath)).toMatchObject({
+      INKBOX_VOICE_STACK: "openai_realtime",
+      INKBOX_REALTIME_API_KEY: "sk-good",
+      INKBOX_REALTIME_ENABLED: "true",
+    });
+  });
+
+  it("reuses a newly validated admin identity after a failed Voice AI routing attempt", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    (world.client.whoami as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "api_key.agent_scoped.claimed",
+        organizationId: "org-1",
+      })
+      .mockResolvedValueOnce({
+        authType: "api_key",
+        authSubtype: "api_key.admin_scoped",
+        organizationId: "org-1",
+      });
+    (world.identity.setIncomingCallAction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("routing failed"),
+    );
+    const { io, questions } = scriptedIO([
+      true,
+      "ApiKey_agent",
+      false,
+      0,
+      1,
+      "ApiKey_admin",
+      0,
+      1,
+      false,
+      true,
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io);
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    expect(
+      questions.filter(
+        (question) =>
+          question === "  Paste an admin-scoped Inkbox API key for this authority change",
+      ),
+    ).toHaveLength(1);
+    expect(savedEnv(d.envFilePath)).toMatchObject({
+      INKBOX_VOICE_STACK: "inkbox_voice_ai",
+      INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo",
+    });
+  });
+
   it("warns when a differing shell export will shadow the saved key", async () => {
     const world = fakeWorld();
     const { io, lines } = scriptedIO([

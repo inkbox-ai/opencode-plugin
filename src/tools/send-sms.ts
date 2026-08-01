@@ -88,6 +88,7 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
         async execute(args: SendSmsArgs, ctx) {
           return runTool(async () => {
             let hostedGuard: HostedSmsGuard | undefined;
+            let providerAccepted = false;
             try {
               const conversationId =
                 typeof args.conversationId === "string" ? args.conversationId.trim() : "";
@@ -164,6 +165,7 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
                   : { to: recipients.length === 1 ? recipients[0] : recipients }),
               };
               const msg = await identity.sendText(payload);
+              providerAccepted = true;
               if (hostedGuard) settleHostedSmsAttempt(hostedGuard, "success");
               const target = formatTargetSummary(msg, args);
               const status = msg.deliveryStatus ?? "unknown";
@@ -174,8 +176,13 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
                 output: `Sent text id=${msg.id} ${target} status=${status} (${args.text.length} chars)`,
               };
             } catch (error) {
-              if (hostedGuard) {
+              if (hostedGuard && !providerAccepted) {
                 settleHostedSmsAttempt(hostedGuard, "failed", classifyHostedSmsError(error));
+              }
+              if (hostedGuard && providerAccepted) {
+                throw new Error(
+                  `SMS provider accepted the message, but durable hosted-call settlement failed; do not retry this send. ${error instanceof Error ? error.message : String(error)}`,
+                );
               }
               throw error;
             }
