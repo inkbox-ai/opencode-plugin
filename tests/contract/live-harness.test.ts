@@ -56,6 +56,12 @@ describe("live harness readiness bounds", () => {
     expect(voiceJob).toMatch(/^ {4}timeout-minutes: 15$/m);
   });
 
+  it("requires the hosted caller to persist and read back the exact SMS body", () => {
+    expect(liveVoice).toContain(
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create the post-call action now with this exact SMS body: $HOSTED_MARKER. Read those five words back to me after the action is saved. Do not send it during the call."',
+    );
+  });
+
   it("preserves diagnostics when the voice job is cancelled by its timeout", () => {
     expect(liveVoice.match(/if: failure\(\) \|\| cancelled\(\)/g)).toHaveLength(2);
   });
