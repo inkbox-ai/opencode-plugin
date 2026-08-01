@@ -25,6 +25,7 @@ export const A2A_EVENT_TYPES = [
   "a2a.task.canceled",
   "a2a.sent_task.updated",
 ];
+export const CALL_EVENT_TYPES = ["call.ended"];
 export interface ReconcileResult {
   created: number;
   updated: number;
@@ -179,6 +180,10 @@ export async function reconcileSubscriptions(
     await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
   }
 
+  if (identity.phoneNumber || identity.imessageEnabled) {
+    await reconcileOwner("calls", { agentIdentityId: identity.id }, CALL_EVENT_TYPES);
+  }
+
   if (deps.config.gateway.voice.enabled) {
     await wireIncomingCalls(deps, identity, base, webhookUrl);
   }
@@ -201,17 +206,28 @@ async function wireIncomingCalls(
     );
     return;
   }
-  // https -> wss (http -> ws in local dev); Inkbox dials this URL with call audio.
+  const hosted = deps.config.phoneVoiceStack === "inkbox_voice_ai";
+  // https -> wss (http -> ws in local dev); local stacks receive call audio here.
   const wsUrl = `${base.replace(/^http/, "ws")}${CALL_MEDIA_WS_PATH}`;
   try {
     // Identity-scoped config covers the dedicated number and any shared
     // iMessage line in one row. auto_accept opens the audio WS directly.
-    await identity.setIncomingCallAction({
-      incomingCallAction: IncomingCallAction.AUTO_ACCEPT,
-      clientWebsocketUrl: wsUrl,
-      incomingCallWebhookUrl: webhookUrl,
-    });
-    deps.logger.info("incoming-call action set to auto-accept", { clientWebsocketUrl: wsUrl });
+    const action = hosted
+      ? ({
+          incomingCallAction: IncomingCallAction.HOSTED_AGENT,
+          clientWebsocketUrl: null,
+          incomingCallWebhookUrl: null,
+        } as unknown as Parameters<AgentIdentity["setIncomingCallAction"]>[0])
+      : {
+          incomingCallAction: IncomingCallAction.AUTO_ACCEPT,
+          clientWebsocketUrl: wsUrl,
+          incomingCallWebhookUrl: webhookUrl,
+        };
+    await identity.setIncomingCallAction(action);
+    deps.logger.info(
+      hosted ? "incoming calls use Inkbox Voice AI" : "incoming-call action set to auto-accept",
+      hosted ? undefined : { clientWebsocketUrl: wsUrl },
+    );
   } catch (err) {
     throw new Error(`Failed to set the incoming-call action: ${inkboxErrorMessage(err)}`);
   }

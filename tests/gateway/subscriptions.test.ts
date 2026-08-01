@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import {
   A2A_EVENT_TYPES,
+  CALL_EVENT_TYPES,
   IMESSAGE_EVENT_TYPES,
   MAILBOX_EVENT_TYPES,
   PHONE_EVENT_TYPES,
@@ -73,10 +74,14 @@ function makeIdentity(overrides: Record<string, unknown> = {}) {
 function makeDeps(
   identity: Record<string, unknown>,
   subscriptions: ReturnType<typeof makeSubscriptions>,
-  options: { voiceEnabled?: boolean } = {},
+  options: {
+    voiceEnabled?: boolean;
+    phoneVoiceStack?: "inkbox_voice_ai" | "openai_realtime" | "inkbox_tts_stt";
+  } = {},
 ): GatewayDeps & { logger: { [K in keyof GatewayLogger]: ReturnType<typeof vi.fn> } } {
   const client = { webhooks: { subscriptions } };
   const config = {
+    phoneVoiceStack: options.phoneVoiceStack ?? "inkbox_tts_stt",
     vaultKeyEnvVar: "INKBOX_VAULT_KEY",
     tools: { enable: [], disable: [] },
     outbound: { allowedRecipients: [], approval: "auto", askTimeoutMs: 0 },
@@ -135,8 +140,8 @@ describe("reconcileSubscriptions", () => {
     const subs = makeSubscriptions();
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenCalledTimes(4);
+    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
+    expect(subs.create).toHaveBeenCalledTimes(5);
     expect(subs.create).toHaveBeenCalledWith({
       mailboxId: "mb-1",
       url: WEBHOOK_URL,
@@ -156,6 +161,11 @@ describe("reconcileSubscriptions", () => {
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
       eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: CALL_EVENT_TYPES,
     });
     expect(subs.update).not.toHaveBeenCalled();
   });
@@ -188,10 +198,15 @@ describe("reconcileSubscriptions", () => {
     ]);
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 0, updated: 1, unchanged: 3 });
+    expect(result).toEqual({ created: 1, updated: 1, unchanged: 3 });
     expect(subs.update).toHaveBeenCalledTimes(1);
     expect(subs.update).toHaveBeenCalledWith("sub-mb", { eventTypes: MAILBOX_EVENT_TYPES });
-    expect(subs.create).not.toHaveBeenCalled();
+    expect(subs.create).toHaveBeenCalledOnce();
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: CALL_EVENT_TYPES,
+    });
   });
 
   it("leaves a subscription unchanged when event types match in a different order", async () => {
@@ -233,7 +248,7 @@ describe("reconcileSubscriptions", () => {
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
     // Foreign subscriptions are ignored entirely; ours are created alongside.
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
     expect(subs.update).not.toHaveBeenCalled();
     expect(subs.delete).not.toHaveBeenCalled();
   });
@@ -243,7 +258,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ phoneNumber: null });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners.some((o: Record<string, unknown>) => "phoneNumberId" in o)).toBe(false);
     expect(subs.list).not.toHaveBeenCalledWith(
@@ -256,7 +271,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners).toContainEqual({
       agentIdentityId: "ident-1",
@@ -282,11 +297,16 @@ describe("reconcileSubscriptions", () => {
 
     const result = await reconcileSubscriptions(deps, PUBLIC_URL);
 
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenLastCalledWith({
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
       eventTypes: IMESSAGE_EVENT_TYPES,
+    });
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: CALL_EVENT_TYPES,
     });
     expect(deps.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("does not support A2A webhook events yet"),
@@ -310,7 +330,7 @@ describe("reconcileSubscriptions", () => {
 
     const result = await reconcileSubscriptions(deps, PUBLIC_URL);
 
-    expect(result).toEqual({ created: 2, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
     expect(deps.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("skipping the A2A subscription"),
     );
@@ -338,6 +358,23 @@ describe("reconcileSubscriptions", () => {
       incomingCallAction: "auto_accept",
       clientWebsocketUrl: MEDIA_WS_URL,
       incomingCallWebhookUrl: WEBHOOK_URL,
+    });
+  });
+
+  it("points incoming calls at Voice AI and clears stale local callback URLs", async () => {
+    const identity = makeIdentity();
+    await reconcileSubscriptions(
+      makeDeps(identity, makeSubscriptions(), {
+        voiceEnabled: true,
+        phoneVoiceStack: "inkbox_voice_ai",
+      }),
+      PUBLIC_URL,
+    );
+
+    expect(identity.setIncomingCallAction).toHaveBeenCalledWith({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
     });
   });
 

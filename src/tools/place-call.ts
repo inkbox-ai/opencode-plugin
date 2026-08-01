@@ -1,21 +1,16 @@
-import { CallOrigin, VoicemailDetection } from "@inkbox/sdk";
+import { CallMode, CallOrigin, VoicemailDetection } from "@inkbox/sdk";
 import { z } from "zod";
 import { runTool } from "../errors.js";
-import { approveOutbound } from "../permissions.js";
+import { assertHostedCallTarget } from "../gateway/hosted-call-registry.js";
+import { approveOutbound, checkOutboundRecipients } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
-const placeCallArgs = {
+const commonPlaceCallArgs = {
   toNumber: z.string().describe("Recipient phone number in E.164 format."),
   origination: z
     .enum(["dedicated_number", "shared_imessage_number"])
     .describe(
       'Which line to call from. Use "dedicated_number" to call from your own phone number (the same line SMS/voice conversations use). Use "shared_imessage_number" to call someone over the shared iMessage line you are already messaging them on — this only works if they are connected to you over iMessage (otherwise the call is rejected). If omitted, it is resolved automatically: the only available line, or the dedicated number when both are available.',
-    )
-    .optional(),
-  purpose: z
-    .string()
-    .describe(
-      "Why this call is being placed. Loaded into the live call so it opens with context instead of a generic greeting. If no topic was given, say the user asked for a general call.",
     )
     .optional(),
   openingMessage: z
@@ -26,19 +21,53 @@ const placeCallArgs = {
     .string()
     .describe("Optional background facts the voice agent may need after the opening.")
     .optional(),
+  voicemailDetection: z
+    .enum(["enabled", "disabled"])
+    .describe(
+      "Whether the call should end when voicemail is detected. Omit to keep the configured default.",
+    )
+    .optional(),
+};
+
+const localPlaceCallArgs = {
+  ...commonPlaceCallArgs,
+  purpose: z
+    .string()
+    .describe("Optional purpose loaded into the live OpenCode call context.")
+    .optional(),
   clientWebsocketUrl: z
     .string()
     .describe(
       "Optional WebSocket URL (wss://...) that Inkbox will connect to for the call stream. Omit to use the callWebsocketUrl configured for the plugin.",
     )
     .optional(),
-  voicemailDetection: z
-    .enum(["enabled", "disabled"])
-    .describe(
-      "Whether the call should end when voicemail is detected. Omit to keep detection enabled.",
-    )
-    .optional(),
 };
+
+const hostedPlaceCallArgs = {
+  ...commonPlaceCallArgs,
+  purpose: z
+    .string()
+    .min(1)
+    .describe(
+      "Why Inkbox Voice AI is placing this call. If no topic was given, say the user asked for a general call.",
+    ),
+};
+
+export function buildVoiceAiReason(params: {
+  purpose: string;
+  openingMessage?: string;
+  context?: string;
+}): string {
+  const reason = [
+    ["Purpose", params.purpose],
+    ["Opening message", params.openingMessage],
+    ["Context", params.context],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]?.trim()))
+    .map(([label, value]) => `${label}: ${value.trim()}`)
+    .join("\n");
+  return reason.length <= 2_000 ? reason : `${reason.slice(0, 1_999).trimEnd()}…`;
+}
 
 // Fold call context onto the media WebSocket URL as query params. This is the
 // only channel that survives to the call bridge, which may run in a separate
@@ -58,7 +87,15 @@ function decorateCallUrl(
   }
 }
 
-type PlaceCallArgs = z.infer<z.ZodObject<typeof placeCallArgs>>;
+interface PlaceCallArgs {
+  toNumber: string;
+  origination?: "dedicated_number" | "shared_imessage_number";
+  purpose?: string;
+  openingMessage?: string;
+  context?: string;
+  clientWebsocketUrl?: string;
+  voicemailDetection?: "enabled" | "disabled";
+}
 
 // Pick which line an outbound call originates from: an explicit choice always
 // wins; otherwise the only available line (dedicated number vs shared
@@ -89,44 +126,76 @@ function resolveCallOrigination(
 // per-call or via the plugin's callWebsocketUrl option.
 export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
   const { runtime, config } = deps;
+  const hosted = config.phoneVoiceStack === "inkbox_voice_ai";
   return [
     {
       name: "inkbox_place_call",
       group: "calls",
       defaultEnabled: false,
       definition: {
-        description:
-          "Place an outbound voice call. Calls can go out over two lines: your own dedicated phone number, or the shared Inkbox iMessage line you are already messaging the recipient on. Match the channel you're talking on — call SMS/phone contacts from your dedicated number, and call an iMessage contact over the shared iMessage line (set `origination` accordingly). Returns the queued call's id + status + origination + rate-limit info.",
-        args: placeCallArgs,
-        async execute(args: PlaceCallArgs, ctx) {
+        description: hosted
+          ? "Ask Inkbox Voice AI to place an outbound call and complete the stated task. OpenCode is notified after the call ends."
+          : "Place an outbound voice call through the configured OpenCode phone call voice stack. Calls can use the dedicated number or shared iMessage line.",
+        args: hosted ? hostedPlaceCallArgs : localPlaceCallArgs,
+        async execute(rawArgs, ctx) {
+          const args = rawArgs as unknown as PlaceCallArgs;
           return runTool(async () => {
             // Resolve the audio bridge before asking for approval so the
             // approver sees exactly where the call's media will stream.
-            const clientWebsocketUrl = args.clientWebsocketUrl ?? config.callWebsocketUrl;
-            if (!clientWebsocketUrl) {
+            const purpose = args.purpose?.trim() || "";
+            if (hosted && !purpose) {
               throw new Error(
-                "No call WebSocket configured. Pass clientWebsocketUrl (wss://...) or set the callWebsocketUrl plugin option / INKBOX_CALL_WEBSOCKET_URL so Inkbox has an audio bridge to connect to.",
+                "Inkbox Voice AI calls require a purpose. If no topic was given, say the user asked for a general call.",
               );
             }
-            if (!/^wss?:\/\//.test(clientWebsocketUrl)) {
+            const clientWebsocketUrl = hosted
+              ? undefined
+              : (args.clientWebsocketUrl ?? config.callWebsocketUrl);
+            if (!hosted && !clientWebsocketUrl) {
+              throw new Error(
+                "No call WebSocket configured. Pass clientWebsocketUrl (wss://...) or set INKBOX_CALL_WEBSOCKET_URL.",
+              );
+            }
+            if (clientWebsocketUrl && !/^wss?:\/\//.test(clientWebsocketUrl)) {
               throw new Error("clientWebsocketUrl must be a ws:// or wss:// URL.");
             }
-            await approveOutbound(ctx, config, {
-              tool: "inkbox_place_call",
-              recipients: [args.toNumber],
-              summary: `Place voice call to ${args.toNumber} (audio bridge: ${clientWebsocketUrl})`,
-              metadata: {
-                origination: args.origination ?? "auto",
-                clientWebsocketUrl,
-                ...(args.purpose ? { purpose: args.purpose } : {}),
-              },
-            });
+            const hostedCompletion = assertHostedCallTarget(ctx.sessionID, args.toNumber);
+            if (hostedCompletion) {
+              if (
+                config.outbound.approval === "allowlist" &&
+                config.outbound.allowedRecipients.length === 0
+              ) {
+                throw new Error(
+                  'outbound.approval is "allowlist" but outbound.allowedRecipients is empty.',
+                );
+              }
+              const block = checkOutboundRecipients(
+                [args.toNumber],
+                config.outbound.allowedRecipients,
+              );
+              if (block) throw new Error(block);
+            } else {
+              await approveOutbound(ctx, config, {
+                tool: "inkbox_place_call",
+                recipients: [args.toNumber],
+                summary: hosted
+                  ? `Ask Inkbox Voice AI to call ${args.toNumber}: ${purpose}`
+                  : `Place voice call to ${args.toNumber} (audio bridge: ${clientWebsocketUrl})`,
+                metadata: {
+                  origination: args.origination ?? "auto",
+                  ...(clientWebsocketUrl ? { clientWebsocketUrl } : {}),
+                  ...(args.purpose ? { purpose: args.purpose } : {}),
+                },
+              });
+            }
 
-            const decoratedUrl = decorateCallUrl(clientWebsocketUrl, {
-              purpose: args.purpose,
-              openingMessage: args.openingMessage,
-              context: args.context,
-            });
+            const decoratedUrl = clientWebsocketUrl
+              ? decorateCallUrl(clientWebsocketUrl, {
+                  purpose: args.purpose,
+                  openingMessage: args.openingMessage,
+                  context: args.context,
+                })
+              : undefined;
             const identity = await runtime.getIdentity();
             // Resolve the outbound line (dedicated number vs shared iMessage line).
             const origination = resolveCallOrigination(identity, args.origination ?? "");
@@ -136,6 +205,7 @@ export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
               );
             }
             let call: Awaited<ReturnType<typeof identity.placeCall>>;
+            const voicemailDetection = args.voicemailDetection ?? config.voicemailDetection;
             try {
               call = await identity.placeCall({
                 toNumber: args.toNumber,
@@ -143,11 +213,20 @@ export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
                   origination === "shared_imessage_number"
                     ? CallOrigin.SHARED_IMESSAGE_NUMBER
                     : CallOrigin.DEDICATED_NUMBER,
-                clientWebsocketUrl: decoratedUrl,
-                ...(args.voicemailDetection !== undefined
+                mode: hosted ? CallMode.HOSTED_AGENT : CallMode.CLIENT_WEBSOCKET,
+                ...(hosted
+                  ? {
+                      reason: buildVoiceAiReason({
+                        purpose,
+                        openingMessage: args.openingMessage,
+                        context: args.context,
+                      }),
+                    }
+                  : { clientWebsocketUrl: decoratedUrl }),
+                ...(voicemailDetection
                   ? {
                       voicemailDetection:
-                        args.voicemailDetection === "disabled"
+                        voicemailDetection === "disabled"
                           ? VoicemailDetection.DISABLED
                           : VoicemailDetection.ENABLED,
                     }
@@ -170,7 +249,7 @@ export function placeCallTools(deps: ToolDeps): RegisteredTool[] {
             return {
               title: `Call placed to ${args.toNumber}`,
               output:
-                `Placed call id=${call.id} to=${args.toNumber} status=${call.status} origination=${origination}` +
+                `Placed call id=${call.id} to=${args.toNumber} status=${call.status} origination=${origination} mode=${hosted ? "inkbox_voice_ai" : "client_websocket"}` +
                 (remaining !== undefined ? ` callsRemaining=${remaining}` : ""),
             };
           });

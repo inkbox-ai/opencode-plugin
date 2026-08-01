@@ -1,9 +1,10 @@
-name: Live — voice calls (Inkbox STT/TTS + Realtime)
+name: Live — voice calls (Voice AI + Realtime + Inkbox TTS/STT)
 
 # Boots the AUT gateway plus a driver process that bridges the other side of a
-# real phone call over its own Inkbox tunnel. Two matrix legs:
+# real phone call over its own Inkbox tunnel. Three available matrix legs:
 #   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
 #   outbound_realtime — driver texts "call me"; agent calls back on Realtime.
+#   outbound_hosted   — driver requests a Voice AI call and one exact post-call SMS.
 # Each leg verifies the stored call transcript shows the agent spoke to the
 # caller. Real model + real calls — the priciest suite — so it runs only on
 # ready (non-draft) PRs + manual dispatch, and shares the AUT tunnel lock.
@@ -51,14 +52,14 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT + driver identities → one at a time
       matrix:
-        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime"]' || '["outbound_realtime"]') }}
+        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime","outbound_hosted"]' || '["outbound_realtime","outbound_hosted"]') }}
 
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
           repository: inkbox-ai/inkbox
-          ref: a4dd76b534e33c0a8352148d8f0e9ab25199f05b
+          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
           path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
@@ -82,8 +83,9 @@ jobs:
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           INKBOX_VOICE_ENABLED: "true"
-          # Inbound leg proves the Inkbox STT/TTS path; the others prove Realtime.
-          INKBOX_REALTIME_ENABLED: ${{ matrix.scenario == 'inbound_inkbox' && 'false' || 'true' }}
+          INKBOX_VOICE_STACK: ${{ matrix.scenario == 'outbound_hosted' && 'inkbox_voice_ai' || (matrix.scenario == 'outbound_realtime' && 'openai_realtime' || 'inkbox_tts_stt') }}
+          INKBOX_VOICEMAIL_DETECTION: "disabled"
+          INKBOX_REALTIME_ENABLED: ${{ matrix.scenario == 'outbound_realtime' && 'true' || 'false' }}
           INKBOX_REALTIME_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: bash scripts/live-aut.sh
 
@@ -93,6 +95,24 @@ jobs:
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL }}
           VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
         run: |
+          if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            RADIO_WORDS=(
+              alpha bravo charlie delta echo foxtrot golf hotel india juliet
+              kilo lima mike november oscar papa quebec romeo sierra tango
+              uniform victor whiskey xray yankee zulu
+            )
+            marker_value=$((GITHUB_RUN_ID * 10 + GITHUB_RUN_ATTEMPT))
+            HOSTED_MARKER="opencode"
+            for _ in 1 2 3 4 5; do
+              marker_index=$((marker_value % ${#RADIO_WORDS[@]}))
+              HOSTED_MARKER="$HOSTED_MARKER ${RADIO_WORDS[$marker_index]}"
+              marker_value=$((marker_value / ${#RADIO_WORDS[@]}))
+            done
+            echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
+            export VOICE_DRIVER_LISTEN=45
+            export VOICE_DRIVER_AUTO_STOP=false
+          fi
           nohup node tests/live/voice-driver.mjs > "$RUNNER_TEMP/driver.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/driver.pid"
           for _ in $(seq 1 30); do        # up to ~90s

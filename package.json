@@ -1,6 +1,6 @@
 {
   "name": "@inkbox/opencode-plugin",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "Inkbox for opencode \u2014 give your agent an email address, a phone number (SMS/MMS + voice), iMessage, contacts, notes, and an encrypted credential vault.",
   "license": "MIT",
@@ -55,7 +55,7 @@
     "opencode": ">=1.15.0 <1.19.0"
   },
   "dependencies": {
-    "@inkbox/sdk": ">=0.5.8 <1.0.0",
+    "@inkbox/sdk": "0.5.9",
     "@opencode-ai/sdk": ">=1.17.18 <1.19.0",
     "ws": "^8.21.0",
     "zod": "4.1.8"

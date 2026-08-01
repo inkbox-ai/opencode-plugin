@@ -2,6 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { ActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { HostedSmsAttempt } from "./hosted-call-registry.js";
 import type { StateStore } from "./state.js";
 
 export interface GatewayLogger {
@@ -87,6 +88,13 @@ export interface ReplyTarget {
 // to completion and never deliver their text as a channel reply by default.
 export type TurnKind = "normal" | "capture";
 
+export class HostedCaptureDeferredError extends Error {
+  constructor() {
+    super("Hosted-call capture deferred because the gateway is closing.");
+    this.name = "HostedCaptureDeferredError";
+  }
+}
+
 export interface TurnRequest {
   kind: TurnKind;
   // Fully framed message text (channel tag + body + media paths).
@@ -105,6 +113,16 @@ export interface SessionManager {
   // Run an already-framed turn and return the assistant text without
   // delivering it anywhere (used by the voice bridge to speak the reply).
   runText(chatKey: string, framedText: string): Promise<string | undefined>;
+  runHostedCapture?(
+    chatKey: string,
+    framedText: string,
+    capture: {
+      identityId: string;
+      callId: string;
+      phase: "initial" | "correction";
+      expectedTarget: string;
+    },
+  ): Promise<{ output?: string; attempt?: HostedSmsAttempt }>;
   runA2A(chatKey: string, framedText: string, context: ActiveA2ATurn): Promise<string | undefined>;
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8 (unreleased)
+
+- Adds explicit Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT phone-call stacks to setup.
+- Routes hosted calls through Voice AI and reconciles `call.ended` commitments in the OpenCode session.
+- Guards hosted post-call SMS with an exact-target durable journal and a bounded correction policy.
+- Uses `@inkbox/sdk` 0.5.9 and disables voicemail detection throughout live call CI.
+
 ## 0.2.7 (unreleased)
 
 - Adds safely framed matched-contact memories to inbound email, SMS, iMessage,
@@ -31,7 +38,7 @@
   existing approval and recipient-allowlist controls.
 - Adds paginated task and message history with direction, participant,
   lifecycle, context, role, keyword, and timestamp filters.
-- The plugin requires `@inkbox/sdk` 0.5.8 or newer.
+- The plugin uses exactly `@inkbox/sdk` 0.5.9.
 
 ## 0.1.0 (unreleased)
 

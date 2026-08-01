@@ -33,6 +33,12 @@ function healthyRuntime() {
       displayName: "Agent",
       emailAddress: "agent@inkbox.ai",
       phoneNumber: { number: "+15550001111" },
+      imessageEnabled: false,
+      getIncomingCallAction: vi.fn(async () => ({
+        incomingCallAction: "auto_accept",
+        clientWebsocketUrl: "wss://agent.inkboxwire.com/phone/media/ws",
+        incomingCallWebhookUrl: "https://agent.inkboxwire.com/webhook",
+      })),
     })),
   } as any;
 }
@@ -168,6 +174,125 @@ describe("runDoctor", () => {
     ).toBe(true);
   });
 
+  it("fails when remote incoming-call routing does not match Voice AI", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://agent.inkboxwire.com/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(makeConfig({ phoneVoiceStack: "inkbox_voice_ai" }), {
+      runtime,
+      opencode: reachableOpencode(),
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(result.findings.some((finding) => /routing mismatch/.test(finding.message))).toBe(true);
+  });
+
+  it("fails when a local voice stack has no media WebSocket route", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(makeConfig({ phoneVoiceStack: "inkbox_tts_stt" }), {
+      runtime,
+      opencode: reachableOpencode(),
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((finding) => /missing a local callback URL/.test(finding.message)),
+    ).toBe(true);
+  });
+
+  it("fails when a local voice stack has no completion webhook route", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://agent.inkboxwire.com/phone/media/ws",
+      incomingCallWebhookUrl: null,
+    });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(makeConfig({ phoneVoiceStack: "openai_realtime" }), {
+      runtime,
+      opencode: reachableOpencode(),
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((finding) => /missing a local callback URL/.test(finding.message)),
+    ).toBe(true);
+  });
+
+  it("fails when configured public routing points at stale local callback URLs", async () => {
+    const result = await runDoctor(
+      makeConfig({
+        phoneVoiceStack: "inkbox_tts_stt",
+        gateway: {
+          ...defaultGatewayConfig(),
+          publicUrl: "https://current.example",
+        },
+      }),
+      {
+        runtime: healthyRuntime(),
+        opencode: reachableOpencode(),
+        print: () => {},
+      },
+    );
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((finding) => /stale local callback URLs/.test(finding.message)),
+    ).toBe(true);
+  });
+
+  it("fails when Voice AI retains an obsolete media WebSocket route", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: "wss://stale.example/ws",
+      incomingCallWebhookUrl: null,
+    });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(makeConfig({ phoneVoiceStack: "inkbox_voice_ai" }), {
+      runtime,
+      opencode: reachableOpencode(),
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((finding) => /obsolete local callback URLs/.test(finding.message)),
+    ).toBe(true);
+  });
+
+  it("fails when Voice AI retains an obsolete completion webhook route", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: "https://agent.inkboxwire.com/webhook",
+    });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(makeConfig({ phoneVoiceStack: "inkbox_voice_ai" }), {
+      runtime,
+      opencode: reachableOpencode(),
+      print: () => {},
+    });
+    expect(result.ok).toBe(false);
+    expect(
+      result.findings.some((finding) => /obsolete local callback URLs/.test(finding.message)),
+    ).toBe(true);
+  });
+
   it("names the source each credential resolved from, without leaking secrets", async () => {
     const { lines, print } = collect();
     await runDoctor(
@@ -188,7 +313,7 @@ describe("runDoctor", () => {
   });
 
   it("calls out a shell export shadowing a different key in the wizard's env file", async () => {
-    // Dima's setup: the wizard saved a fresh key to the state-dir .env, but a
+    // A common setup: the wizard saved a fresh key to the state-dir .env, but a
     // stale shell export wins for every new process and the API 401s.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-home-"));
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "inkbox-doctor-cwd-"));

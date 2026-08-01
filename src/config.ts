@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isPhoneVoiceStack, type PhoneVoiceStack } from "./voice-stack.js";
 
 export type OutboundApproval = "ask" | "allowlist" | "auto";
 
@@ -15,6 +16,8 @@ export interface InkboxPluginOptions {
   // WebSocket URL (wss://) Inkbox connects to for outbound-call audio.
   // Only needed for inkbox_place_call when no per-call URL is passed.
   callWebsocketUrl?: string;
+  phoneVoiceStack?: PhoneVoiceStack;
+  voicemailDetection?: "enabled" | "disabled";
   vault?: {
     keyEnvVar?: string;
   };
@@ -148,6 +151,11 @@ export interface ResolvedConfig {
   baseUrl?: string;
   signingKey?: string;
   callWebsocketUrl?: string;
+  phoneVoiceStack?: PhoneVoiceStack;
+  // Retained so the setup wizard can warn when a plugin option would shadow
+  // a newly saved INKBOX_VOICE_STACK selection.
+  phoneVoiceStackOption?: PhoneVoiceStack;
+  voicemailDetection?: "enabled" | "disabled";
   vaultKeyEnvVar: string;
   tools: {
     enable: string[];
@@ -246,6 +254,33 @@ export function resolveConfig(
     fromFile("signing_key");
   const callWebsocketUrl =
     nonEmptyString(opts.callWebsocketUrl) ?? nonEmptyString(env.INKBOX_CALL_WEBSOCKET_URL);
+  const phoneVoiceStackOption = isPhoneVoiceStack(opts.phoneVoiceStack)
+    ? opts.phoneVoiceStack
+    : undefined;
+  const configuredVoiceStack = phoneVoiceStackOption ?? env.INKBOX_VOICE_STACK;
+  const gatewayOptions = isRecord(opts.gateway) ? opts.gateway : {};
+  const voiceOptions = isRecord(gatewayOptions.voice) ? gatewayOptions.voice : {};
+  const realtimeOptions = isRecord(voiceOptions.realtime) ? voiceOptions.realtime : {};
+  const configuredRealtimeKeyEnvVar =
+    nonEmptyString(realtimeOptions.apiKeyEnvVar) ?? "INKBOX_REALTIME_API_KEY";
+  const legacyRealtimeKeyPresent = Boolean(
+    nonEmptyString(env[configuredRealtimeKeyEnvVar]) ?? nonEmptyString(env.OPENAI_API_KEY),
+  );
+  const legacyRealtimeEnabled = boolEnv(env.INKBOX_REALTIME_ENABLED);
+  const phoneVoiceStack = isPhoneVoiceStack(configuredVoiceStack)
+    ? configuredVoiceStack
+    : legacyRealtimeEnabled !== undefined
+      ? legacyRealtimeEnabled
+        ? "openai_realtime"
+        : "inkbox_tts_stt"
+      : legacyRealtimeKeyPresent
+        ? "openai_realtime"
+        : "inkbox_tts_stt";
+  const configuredVoicemailDetection = opts.voicemailDetection ?? env.INKBOX_VOICEMAIL_DETECTION;
+  const voicemailDetection =
+    configuredVoicemailDetection === "enabled" || configuredVoicemailDetection === "disabled"
+      ? configuredVoicemailDetection
+      : undefined;
 
   const outbound = isRecord(opts.outbound) ? opts.outbound : {};
   const approval =
@@ -268,6 +303,9 @@ export function resolveConfig(
     baseUrl,
     signingKey,
     callWebsocketUrl,
+    phoneVoiceStack,
+    phoneVoiceStackOption,
+    voicemailDetection,
     vaultKeyEnvVar: nonEmptyString(vault.keyEnvVar) ?? DEFAULT_VAULT_KEY_ENV_VAR,
     tools: {
       enable: stringArray(tools.enable),
@@ -278,7 +316,7 @@ export function resolveConfig(
       approval,
       askTimeoutMs,
     },
-    gateway: resolveGatewayConfig(opts.gateway, env, identity),
+    gateway: resolveGatewayConfig(opts.gateway, env, identity, phoneVoiceStack),
   };
 }
 
@@ -317,6 +355,7 @@ function resolveGatewayConfig(
   options: unknown,
   env: NodeJS.ProcessEnv,
   identity: string | undefined,
+  phoneVoiceStack?: PhoneVoiceStack,
 ): ResolvedGatewayConfig {
   const opts: GatewayOptions = isRecord(options) ? (options as GatewayOptions) : {};
   const voice = isRecord(opts.voice) ? opts.voice : {};
@@ -377,7 +416,11 @@ function resolveGatewayConfig(
       // the gateway (Inkbox STT/TTS needs no extra key); explicit false wins.
       enabled: voice.enabled ?? boolEnv(env.INKBOX_VOICE_ENABLED) ?? true,
       realtime: {
-        enabled: realtime.enabled ?? boolEnv(env.INKBOX_REALTIME_ENABLED) ?? realtimeKeyPresent,
+        enabled:
+          realtime.enabled ??
+          (phoneVoiceStack
+            ? phoneVoiceStack === "openai_realtime"
+            : (boolEnv(env.INKBOX_REALTIME_ENABLED) ?? realtimeKeyPresent)),
         model:
           nonEmptyString(realtime.model) ??
           nonEmptyString(env.INKBOX_REALTIME_MODEL) ??

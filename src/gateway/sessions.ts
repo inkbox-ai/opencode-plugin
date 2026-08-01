@@ -2,6 +2,16 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import {
+  clearDeliveryFailures,
+  deliveryFailureKey,
+  deliveryFailureRecovery,
+} from "./delivery-policy.js";
+import {
+  activateHostedSmsCapture,
+  clearHostedSmsCapture,
+  getHostedCall,
+} from "./hosted-call-registry.js";
 import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
 import { deliverReply } from "./reply.js";
 import type { StateStore } from "./state.js";
@@ -12,6 +22,7 @@ import type {
   SessionManager,
   TurnKind,
 } from "./types.js";
+import { HostedCaptureDeferredError } from "./types.js";
 
 interface QueuedTurn {
   kind: TurnKind;
@@ -20,10 +31,17 @@ interface QueuedTurn {
   // Per-contact/per-channel opencode agent override for this turn.
   agent?: string;
   replyTarget?: ReplyTarget;
-  // True for a follow-up turn enqueued after a delivery failure, so a second
-  // failure doesn't spawn another recovery (bounded to one attempt).
-  recovered?: boolean;
   a2aContext?: ActiveA2ATurn;
+  hostedCapture?: {
+    identityId: string;
+    callId: string;
+    phase: "initial" | "correction";
+    expectedTarget: string;
+  };
+  hostedResolve?: (result: {
+    output?: string;
+    attempt?: import("./hosted-call-registry.js").HostedSmsAttempt;
+  }) => void;
   resolve: (out: string | undefined) => void;
   reject: (err: unknown) => void;
 }
@@ -131,16 +149,33 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     sessionID: string,
     text: string,
     agentOverride?: string,
+    hostedPhase?: "initial" | "correction",
   ): Promise<string | undefined> {
     const g = deps.config.gateway;
     const agent = agentOverride ?? g.agent;
     const system = await identitySystem();
+    let hostedTools: Record<string, boolean> | undefined;
+    if (hostedPhase === "initial") {
+      // A delegated task runs under another session id and would escape the
+      // durable SMS guard. Keep the initial turn otherwise fully capable of
+      // completing its non-SMS commitments.
+      hostedTools = { task: false, inkbox_a2a_call: false };
+    } else if (hostedPhase === "correction") {
+      const listed = await deps.opencode.tool.ids({ query: { directory: deps.directory } });
+      const ids = (listed as any)?.data ?? listed;
+      if (!Array.isArray(ids)) {
+        throw new Error("Could not restrict the hosted correction turn to the SMS tool.");
+      }
+      hostedTools = Object.fromEntries(ids.map((id) => [String(id), false]));
+      hostedTools.inkbox_send_sms = true;
+    }
     const res = await deps.opencode.session.prompt({
       path: { id: sessionID },
       query: { directory: deps.directory },
       body: {
         ...(agent ? { agent } : {}),
         ...(system ? { system } : {}),
+        ...(hostedTools ? { tools: hostedTools } : {}),
         ...(g.model?.includes("/")
           ? {
               model: {
@@ -175,8 +210,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           }
           let out: string | undefined;
           try {
-            out = await runPrompt(sessionID, turn.text, turn.agent);
+            if (turn.hostedCapture) {
+              activateHostedSmsCapture({
+                ...turn.hostedCapture,
+                sessionID,
+              });
+            }
+            out = await runPrompt(sessionID, turn.text, turn.agent, turn.hostedCapture?.phase);
           } catch (err) {
+            if (turn.hostedCapture) throw err;
             // A session that passed validation can still fail server-side
             // (stale project state); one retry on a brand-new session keeps
             // the contact reachable instead of failing the turn.
@@ -195,26 +237,59 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
               await deliverReply(deps.inkbox, turn.replyTarget, out, deps.logger);
             } catch (err) {
               deps.logger.error("reply.failed", { chatKey, error: String(err) });
-              // One bounded recovery turn: tell the agent the send failed so it
-              // can shorten or switch channel. A recovery that also fails stops.
-              if (!turn.recovered && turn.replyTarget) {
-                entry.queue.push({
-                  kind: "normal",
-                  text: `Your previous reply could not be delivered (${err instanceof Error ? err.message : String(err)}). Send a shorter plain-text reply, or handle it another way.`,
-                  deliver: true,
-                  replyTarget: turn.replyTarget,
-                  recovered: true,
-                  resolve: () => {},
-                  reject: () => {},
+              if (turn.replyTarget) {
+                const recovery = deliveryFailureRecovery({
+                  key: deliveryFailureKey(
+                    turn.replyTarget.channel,
+                    turn.replyTarget.to,
+                    turn.replyTarget.conversationId,
+                  ),
+                  channel: turn.replyTarget.channel,
+                  target: turn.replyTarget.to,
+                  failure: err,
+                  failedBody: out,
                 });
+                if (recovery.prompt) {
+                  entry.queue.push({
+                    kind: "normal",
+                    text: recovery.prompt,
+                    deliver: true,
+                    replyTarget: turn.replyTarget,
+                    resolve: () => {},
+                    reject: () => {},
+                  });
+                }
               }
             }
+          }
+          if (turn.hostedCapture && turn.hostedResolve) {
+            const entry = getHostedCall(turn.hostedCapture.identityId, turn.hostedCapture.callId);
+            turn.hostedResolve({
+              output: out,
+              attempt: entry?.smsAttempts.find(
+                (attempt) => attempt.phase === turn.hostedCapture?.phase,
+              ),
+            });
+            clearHostedSmsCapture(turn.hostedCapture.identityId, turn.hostedCapture.callId);
           }
           turn.resolve(out);
         } catch (err) {
           deps.logger.error("turn.failed", { chatKey, error: String(err) });
           turn.reject(err);
         } finally {
+          if (turn.hostedCapture) {
+            try {
+              clearHostedSmsCapture(turn.hostedCapture.identityId, turn.hostedCapture.callId);
+            } catch (err) {
+              // The turn has already settled. Contention must not reject the
+              // entire drain and strand later turns; capture ownership is
+              // bounded and a replay or later cleanup can remove it.
+              deps.logger.warn("hosted_call.capture_cleanup_failed", {
+                callId: turn.hostedCapture.callId,
+                error: String(err),
+              });
+            }
+          }
           const sessionID = deps.state.getSession(chatKey);
           if (sessionID && turn.a2aContext) {
             clearActiveA2ATurn(sessionID, turn.a2aContext);
@@ -256,6 +331,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         subject: msg.subject,
         rfcMessageId: msg.rfcMessageId,
       };
+      clearDeliveryFailures(deliveryFailureKey(msg.channel, msg.from, msg.conversationId));
       const entry = per(msg.chatKey);
       // A new inbound while a NORMAL turn runs interrupts it. Await the abort
       // before enqueuing so it can't outlive its turn and truncate the next.
@@ -294,6 +370,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           text: framedText,
           deliver: false,
           resolve,
+          reject,
+        });
+        void drain(chatKey);
+      });
+    },
+
+    async runHostedCapture(chatKey, framedText, capture) {
+      if (closing) throw new HostedCaptureDeferredError();
+      const entry = per(chatKey);
+      return new Promise((resolve, reject) => {
+        entry.queue.push({
+          kind: "capture",
+          text: framedText,
+          deliver: false,
+          hostedCapture: capture,
+          hostedResolve: resolve,
+          resolve: () => {},
           reject,
         });
         void drain(chatKey);

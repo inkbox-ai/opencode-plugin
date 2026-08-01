@@ -2,6 +2,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
+import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
 
@@ -72,6 +73,43 @@ export async function runDoctor(
         "info",
         `Identity "${id.agentHandle}" resolves (email: ${id.emailAddress ?? "none"}, phone: ${id.phoneNumber?.number ?? "none"}).`,
       );
+      if (config.gateway.voice.enabled && (id.phoneNumber || id.imessageEnabled)) {
+        if (typeof id.getIncomingCallAction !== "function") {
+          add("error", "The installed Inkbox SDK cannot inspect incoming-call routing.");
+        } else {
+          const incoming = await id.getIncomingCallAction();
+          const actual = String(incoming.incomingCallAction);
+          const hosted = config.phoneVoiceStack === "inkbox_voice_ai";
+          const expected = hosted ? "hosted_agent" : "auto_accept";
+          const publicUrl = config.gateway.publicUrl?.trim().replace(/\/+$/, "");
+          const expectedWebsocketUrl = publicUrl
+            ? `${publicUrl.replace(/^http/, "ws")}${CALL_MEDIA_WS_PATH}`
+            : undefined;
+          const expectedWebhookUrl = publicUrl ? `${publicUrl}${WEBHOOK_PATH}` : undefined;
+          if (actual !== expected) {
+            add(
+              "error",
+              `Incoming-call routing mismatch: voice stack ${config.phoneVoiceStack} expects ${expected}, but Inkbox reports ${actual}.`,
+            );
+          } else if (hosted && (incoming.clientWebsocketUrl || incoming.incomingCallWebhookUrl)) {
+            add("error", "Inkbox Voice AI routing still has obsolete local callback URLs.");
+          } else if (
+            !hosted &&
+            (!incoming.clientWebsocketUrl || !incoming.incomingCallWebhookUrl)
+          ) {
+            add("error", `${config.phoneVoiceStack} routing is missing a local callback URL.`);
+          } else if (
+            !hosted &&
+            expectedWebsocketUrl &&
+            (incoming.clientWebsocketUrl !== expectedWebsocketUrl ||
+              incoming.incomingCallWebhookUrl !== expectedWebhookUrl)
+          ) {
+            add("error", `${config.phoneVoiceStack} routing points at stale local callback URLs.`);
+          } else {
+            add("info", `Incoming-call routing matches ${config.phoneVoiceStack}.`);
+          }
+        }
+      }
     } catch (err) {
       add("error", `Identity "${config.identity}" did not resolve: ${inkboxErrorMessage(err)}`);
     }
@@ -218,6 +256,7 @@ function printReport(
   print(`  publicUrl:  ${g.publicUrl ?? `(tunnel: ${g.tunnelName ?? "auto"})`}`);
   print(`  bind:       ${g.host}:${g.port}`);
   print(`  voice:      ${g.voice.enabled ? "enabled" : "disabled"}`);
+  print(`  voiceStack: ${config.phoneVoiceStack}`);
   print("");
   print(ok ? "doctor: ok" : "doctor: issues found");
 }
