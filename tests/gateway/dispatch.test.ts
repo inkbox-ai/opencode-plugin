@@ -452,3 +452,26 @@ describe("dispatchEvent external providers", () => {
     expect(deps.sessions.handleInbound).not.toHaveBeenCalled();
   });
 });
+
+describe("dispatchEvent call completion", () => {
+  it("routes call.ended to hosted settlement and acknowledges the webhook", async () => {
+    const onHostedCallEnded = vi.fn(async () => {});
+    const deps = makeDeps({ onHostedCallEnded });
+    const ended: VerifiedEvent = {
+      provider: "inkbox",
+      verified: true,
+      eventType: "call.ended",
+      requestId: "req-call-ended",
+      body: {
+        id: "evt-call-ended",
+        event_type: "call.ended",
+        data: { call: { id: "call-1", mode: "hosted_agent" } },
+      },
+      headers: {},
+    };
+
+    expect(await dispatchEvent(deps, ended)).toBe(true);
+    expect(onHostedCallEnded).toHaveBeenCalledOnce();
+    expect(onHostedCallEnded).toHaveBeenCalledWith(ended.body);
+  });
+});

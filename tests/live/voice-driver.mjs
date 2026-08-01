@@ -11,7 +11,8 @@
 // file (ws url + phone-number id) the test reads.
 //
 // Env: REMOTE_INKBOX_API_KEY, INKBOX_BASE_URL, VOICE_DRIVER_STATE,
-//      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s), VOICE_DRIVER_LISTEN (s)
+//      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s), VOICE_DRIVER_LISTEN (s),
+//      VOICE_DRIVER_AUTO_STOP (false lets the test own hangup timing)
 import { writeFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
 import { connect } from "@inkbox/sdk/tunnels/connect";
@@ -32,6 +33,7 @@ const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
 // explicit stop is required or the leg lingers to the server max-duration cap).
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
+const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
 
 if (!API_KEY) {
   console.error("REMOTE_INKBOX_API_KEY required");
@@ -71,6 +73,7 @@ async function callWsHandler(ws) {
     await sleep(SPEAK_AFTER_MS);
     await speak(LINE);
     await sleep(LISTEN_MS);
+    if (!AUTO_STOP) return;
     try {
       await ws.send(JSON.stringify({ event: "stop" }));
       console.log("sent stop (hangup)");

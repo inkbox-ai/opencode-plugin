@@ -8,6 +8,7 @@ import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
 import { dispatchEvent } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
+import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
 import { deliverReply } from "./reply.js";
 import { createWebhookServer } from "./server.js";
@@ -77,6 +78,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
   });
+  const hostedCalls = createHostedCallCompletion({
+    inkbox: opts.inkbox,
+    contacts,
+    sessions,
+    logger,
+  });
 
   // Last delivery target per human, so escalation questions reach them on the
   // channel they last used.
@@ -129,6 +136,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   try {
     await reconcileSubscriptions(deps, transport.publicUrl);
     await a2a.catchUp();
+    await hostedCalls.catchUp();
   } catch (err) {
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
@@ -181,6 +189,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         logger,
         bursts,
         onExternal: g.externalEvents ? handleExternal : undefined,
+        onHostedCallEnded: (event) => hostedCalls.ingest(event),
       },
       event,
     );

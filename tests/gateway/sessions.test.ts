@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
+import { saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
@@ -13,6 +14,7 @@ import type { InboundMessage } from "../../src/gateway/types.js";
 const tmpDirs: string[] = [];
 
 afterEach(() => {
+  delete process.env.INKBOX_OPENCODE_HOME;
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   vi.useRealTimers();
 });
@@ -32,7 +34,7 @@ function makeIdentity() {
 interface PromptArg {
   path: { id: string };
   query: { directory: string };
-  body: { parts: Array<{ type: string; text: string }> };
+  body: { parts: Array<{ type: string; text: string }>; tools?: Record<string, boolean> };
 }
 
 function makeManager() {
@@ -43,6 +45,11 @@ function makeManager() {
   const inkbox = { getIdentity: vi.fn(async () => identity), getClient: vi.fn() };
   let created = 0;
   const opencode = {
+    tool: {
+      ids: vi.fn(async () => ({
+        data: ["bash", "edit", "task", "inkbox_send_sms", "inkbox_send_email"],
+      })),
+    },
     session: {
       create: vi.fn(async (_o: { body: { title: string }; query: { directory: string } }) => ({
         data: { id: `sess-${++created}` },
@@ -74,7 +81,23 @@ function makeManager() {
     logger,
     directory: "/proj",
   });
-  return { mgr, opencode, identity, state, inkbox };
+  return { mgr, opencode, identity, state, inkbox, dir };
+}
+
+function prepareHostedCall(dir: string): void {
+  process.env.INKBOX_OPENCODE_HOME = dir;
+  saveHostedCall({
+    identityId: "ident-1",
+    callId: "call-1",
+    eventId: "evt-1",
+    state: "running",
+    event: {
+      id: "evt-1",
+      event_type: "call.ended",
+      timestamp: "2026-08-01T00:00:00Z",
+      data: { call: { id: "call-1", mode: "hosted_agent" } },
+    } as any,
+  });
 }
 
 function sms(text: string, over: Partial<InboundMessage> = {}): InboundMessage {
@@ -196,6 +219,42 @@ describe("runCapture", () => {
     expect(identity.sendText).not.toHaveBeenCalled();
     expect(identity.sendEmail).not.toHaveBeenCalled();
     expect(identity.sendIMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("runHostedCapture", () => {
+  it("disables delegation during the initial hosted settlement turn", async () => {
+    const { mgr, opencode, dir } = makeManager();
+    prepareHostedCall(dir);
+    await mgr.runHostedCapture?.("contact-1", "settle the call", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "initial",
+      expectedTarget: "+14155550123",
+    });
+    expect(opencode.session.prompt.mock.calls[0][0].body.tools).toMatchObject({
+      task: false,
+      inkbox_a2a_call: false,
+    });
+  });
+
+  it("exposes only the journaled SMS tool during correction", async () => {
+    const { mgr, opencode, dir } = makeManager();
+    prepareHostedCall(dir);
+    await mgr.runHostedCapture?.("contact-1", "correct the SMS", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "correction",
+      expectedTarget: "+14155550123",
+    });
+    expect(opencode.tool.ids).toHaveBeenCalledWith({ query: { directory: "/proj" } });
+    expect(opencode.session.prompt.mock.calls[0][0].body.tools).toEqual({
+      bash: false,
+      edit: false,
+      task: false,
+      inkbox_send_sms: true,
+      inkbox_send_email: false,
+    });
   });
 });
 

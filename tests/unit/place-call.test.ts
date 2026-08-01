@@ -1,6 +1,13 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { ResolvedConfig } from "../../src/config.js";
+import {
+  activateHostedSmsCapture,
+  saveHostedCall,
+} from "../../src/gateway/hosted-call-registry.js";
 import { placeCallTools } from "../../src/tools/place-call.js";
 import type { ToolDeps } from "../../src/tools/types.js";
 
@@ -64,6 +71,7 @@ describe("placeCallTools", () => {
     expect(identity.placeCall).toHaveBeenCalledWith({
       toNumber: "+14155550123",
       origination: "dedicated_number",
+      mode: "client_websocket",
       clientWebsocketUrl: "wss://bridge.example.com/audio",
     });
     expect(result).toMatchObject({ title: expect.stringContaining("+14155550123") });
@@ -73,6 +81,39 @@ describe("placeCallTools", () => {
     expect(output).toContain("status=queued");
     expect(output).toContain("origination=dedicated_number");
     expect(output).toContain("callsRemaining=4");
+  });
+
+  it("places a hosted Voice AI call with a task reason and no media WebSocket", async () => {
+    const identity = makeIdentity();
+    const [tool] = placeCallTools(
+      makeDeps(identity, { phoneVoiceStack: "inkbox_voice_ai", callWebsocketUrl: undefined }),
+    );
+    const result = await tool.definition.execute(
+      {
+        toNumber: "+14155550123",
+        purpose: "Confirm the release",
+        openingMessage: "Hi — quick release check.",
+        context: "The release is planned for Friday.",
+      },
+      makeCtx(),
+    );
+    expect(identity.placeCall).toHaveBeenCalledWith({
+      toNumber: "+14155550123",
+      origination: "dedicated_number",
+      mode: "hosted_agent",
+      reason:
+        "Purpose: Confirm the release\nOpening message: Hi — quick release check.\nContext: The release is planned for Friday.",
+    });
+    expect(outputOf(result)).toContain("mode=inkbox_voice_ai");
+  });
+
+  it("requires a purpose for hosted calls", async () => {
+    const identity = makeIdentity();
+    const [tool] = placeCallTools(makeDeps(identity, { phoneVoiceStack: "inkbox_voice_ai" }));
+    await expect(tool.definition.execute({ toNumber: "+14155550123" }, makeCtx())).rejects.toThrow(
+      /require a purpose/,
+    );
+    expect(identity.placeCall).not.toHaveBeenCalled();
   });
 
   it("omits rate-limit info when the response has none", async () => {
@@ -207,6 +248,69 @@ describe("placeCallTools", () => {
     expect(schema.safeParse({ toNumber: "+14155550123", origination: "landline" }).success).toBe(
       false,
     );
+  });
+
+  it("exposes only hosted-call inputs and requires the Voice AI purpose", () => {
+    const [tool] = placeCallTools(makeDeps(makeIdentity(), { phoneVoiceStack: "inkbox_voice_ai" }));
+    const schema = z.object(tool.definition.args);
+    expect(Object.keys(tool.definition.args)).not.toContain("clientWebsocketUrl");
+    expect(schema.safeParse({ toNumber: "+14155550123" }).success).toBe(false);
+    expect(
+      schema.safeParse({ toNumber: "+14155550123", purpose: "Confirm the release" }).success,
+    ).toBe(true);
+  });
+
+  it("allows a post-call callback only to the authoritative remote number", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-hosted-callback-"));
+    process.env.INKBOX_OPENCODE_HOME = dir;
+    try {
+      const event = {
+        id: "evt-1",
+        event_type: "call.ended",
+        timestamp: "2026-08-01T00:00:00Z",
+        data: {
+          call: { id: "call-1", mode: "hosted_agent", remote_phone_number: "+14155550123" },
+          contacts: [],
+          post_call_action_items: [],
+        },
+      } as any;
+      saveHostedCall({
+        identityId: "ident-1",
+        callId: "call-1",
+        eventId: "evt-1",
+        state: "running",
+        event,
+      });
+      activateHostedSmsCapture({
+        identityId: "ident-1",
+        callId: "call-1",
+        sessionID: "session-1",
+        phase: "initial",
+        expectedTarget: "+14155550123",
+      });
+      const identity = makeIdentity();
+      const [tool] = placeCallTools(
+        makeDeps(identity, { phoneVoiceStack: "inkbox_voice_ai", callWebsocketUrl: undefined }),
+      );
+      const ctx = { ...makeCtx(), sessionID: "session-1" };
+
+      await expect(
+        tool.definition.execute(
+          { toNumber: "+14155550999", purpose: "Return the caller's call" },
+          ctx,
+        ),
+      ).rejects.toThrow("non-authoritative");
+      expect(identity.placeCall).not.toHaveBeenCalled();
+
+      await tool.definition.execute(
+        { toNumber: "+14155550123", purpose: "Return the caller's call" },
+        ctx,
+      );
+      expect(identity.placeCall).toHaveBeenCalledOnce();
+    } finally {
+      delete process.env.INKBOX_OPENCODE_HOME;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects recipients missing from the allowlist", async () => {

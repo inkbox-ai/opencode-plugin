@@ -184,6 +184,75 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("phone call voice stack", () => {
+    it("keeps the legacy local stack unless Realtime was already enabled", () => {
+      expect(resolveConfig({}, FULL_ENV).phoneVoiceStack).toBe("inkbox_tts_stt");
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_REALTIME_ENABLED: "true" }).phoneVoiceStack,
+      ).toBe("openai_realtime");
+    });
+
+    it("accepts the explicit hosted stack and lets plugin options beat the environment", () => {
+      const envConfig = resolveConfig({}, { ...FULL_ENV, INKBOX_VOICE_STACK: "inkbox_voice_ai" });
+      expect(envConfig.phoneVoiceStack).toBe("inkbox_voice_ai");
+      expect(envConfig.phoneVoiceStackOption).toBeUndefined();
+      const optionConfig = resolveConfig(
+        { phoneVoiceStack: "inkbox_tts_stt" },
+        {
+          ...FULL_ENV,
+          INKBOX_VOICE_STACK: "inkbox_voice_ai",
+          OPENAI_API_KEY: "sk-present",
+        },
+      );
+      expect(optionConfig.phoneVoiceStack).toBe("inkbox_tts_stt");
+      expect(optionConfig.phoneVoiceStackOption).toBe("inkbox_tts_stt");
+      expect(
+        resolveConfig(
+          { phoneVoiceStack: "inkbox_tts_stt" },
+          { ...FULL_ENV, OPENAI_API_KEY: "sk-present" },
+        ).gateway.voice.realtime.enabled,
+      ).toBe(false);
+      expect(
+        resolveConfig(
+          { phoneVoiceStack: "inkbox_voice_ai" },
+          { ...FULL_ENV, OPENAI_API_KEY: "sk-present" },
+        ).gateway.voice.realtime.enabled,
+      ).toBe(false);
+    });
+
+    it("resolves the canonical Voice AI authority mirror with option precedence", () => {
+      expect(resolveConfig({}, FULL_ENV).voiceAiAuthorityMode).toBe("contact_scoped");
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo" })
+          .voiceAiAuthorityMode,
+      ).toBe("yolo");
+      expect(
+        resolveConfig(
+          { voiceAiAuthorityMode: "contact_scoped" },
+          { ...FULL_ENV, INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo" },
+        ).voiceAiAuthorityMode,
+      ).toBe("contact_scoped");
+    });
+
+    it("omits voicemail detection by default and accepts exact explicit values", () => {
+      expect(resolveConfig({}, FULL_ENV).voicemailDetection).toBeUndefined();
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_VOICEMAIL_DETECTION: "disabled" })
+          .voicemailDetection,
+      ).toBe("disabled");
+      expect(
+        resolveConfig(
+          { voicemailDetection: "enabled" },
+          { ...FULL_ENV, INKBOX_VOICEMAIL_DETECTION: "disabled" },
+        ).voicemailDetection,
+      ).toBe("enabled");
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_VOICEMAIL_DETECTION: "Disabled" })
+          .voicemailDetection,
+      ).toBeUndefined();
+    });
+  });
+
   describe("gateway voice defaults", () => {
     it("answers calls by default, with realtime off when no key exists", () => {
       const cfg = resolveConfig({}, FULL_ENV);

@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
+import { assertHostedToolAllowed } from "../gateway/hosted-call-registry.js";
 import { a2aTools } from "./a2a.js";
 import { accessTools } from "./access.js";
 import { callReadTools } from "./call-reads.js";
@@ -59,5 +60,15 @@ export function registerTools(deps: ToolDeps): {
   const all = buildGroups(deps, () => gating);
   const result = selectTools(all, deps.config.tools);
   gating = result.summary;
+  for (const [name, definition] of Object.entries(result.tools)) {
+    const execute = definition.execute;
+    result.tools[name] = {
+      ...definition,
+      async execute(args, context) {
+        assertHostedToolAllowed(context.sessionID, name);
+        return execute(args, context);
+      },
+    };
+  }
   return result;
 }

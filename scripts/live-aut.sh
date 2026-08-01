@@ -111,13 +111,17 @@ echo "==> starting opencode serve on :$SERVE_PORT"
   INKBOX_SIGNING_KEY="$AUT_INKBOX_SIGNING_KEY" \
   INKBOX_BASE_URL="$BASE_URL" \
   INKBOX_CALL_WEBSOCKET_URL="$AUT_CALL_WS" \
+  INKBOX_VOICE_STACK="${INKBOX_VOICE_STACK:-}" \
+  INKBOX_VOICEMAIL_DETECTION="${INKBOX_VOICEMAIL_DETECTION:-disabled}" \
   nohup opencode serve --port "$SERVE_PORT" > "$SERVE_LOG" 2>&1 &
  echo $! > "$WORKDIR/serve.pid")
 for _ in $(seq 1 30); do
-  curl -sf "http://127.0.0.1:$SERVE_PORT/config" >/dev/null 2>&1 && break
+  curl -sf --connect-timeout 1 --max-time 3 \
+    "http://127.0.0.1:$SERVE_PORT/config" >/dev/null 2>&1 && break
   sleep 2
 done
-curl -sf "http://127.0.0.1:$SERVE_PORT/config" >/dev/null || {
+curl -sf --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$SERVE_PORT/config" >/dev/null || {
   echo "::error::opencode serve did not come up"; cat "$SERVE_LOG"; exit 1; }
 
 echo "==> starting the gateway sidecar ($MODE model: $GATEWAY_MODEL)"
@@ -132,6 +136,8 @@ echo "==> starting the gateway sidecar ($MODE model: $GATEWAY_MODEL)"
   INKBOX_GATEWAY_AGENT=inkbox-channel \
   INKBOX_GATEWAY_MODEL="$GATEWAY_MODEL" \
   INKBOX_VOICE_ENABLED="${INKBOX_VOICE_ENABLED:-}" \
+  INKBOX_VOICE_STACK="${INKBOX_VOICE_STACK:-}" \
+  INKBOX_VOICEMAIL_DETECTION="${INKBOX_VOICEMAIL_DETECTION:-disabled}" \
   INKBOX_REALTIME_ENABLED="${INKBOX_REALTIME_ENABLED:-}" \
   INKBOX_REALTIME_API_KEY="${INKBOX_REALTIME_API_KEY:-}" \
   OPENCODE_SERVER_URL="http://127.0.0.1:$SERVE_PORT" \

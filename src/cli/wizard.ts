@@ -2,9 +2,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { DEFAULT_REALTIME_MODEL, type ResolvedConfig } from "../config.js";
 import { gatewayHome } from "../gateway/state.js";
+import { CALL_MEDIA_WS_PATH, normalizePublicUrl, WEBHOOK_PATH } from "../gateway/subscriptions.js";
+import type { PhoneVoiceStack } from "../voice-stack.js";
 import { installAutostart } from "./autostart.js";
 import { restartDaemon, runningDaemonPid, startDaemon } from "./daemon.js";
 import { saveEnvVar } from "./env-file.js";
+import { type RealtimeValidationResult, validateOpenAIRealtime } from "./realtime-validation.js";
 
 // Interactive setup wizard, ported from the claude-code/codex bridges:
 // self-signup (or bring a key), iMessage, a dedicated number, the START
@@ -46,7 +49,7 @@ export interface WizardDeps {
   // loadEnvFile). Vars set in `env` but absent here came from the shell.
   envSources?: Map<string, string>;
   sdk?: (baseUrl: string | undefined) => WizardSdk;
-  fetchFn?: typeof fetch;
+  realtimeValidatorFn?: (apiKey: string, model: string) => Promise<RealtimeValidationResult>;
   installAutostartFn?: typeof installAutostart;
   startDaemonFn?: typeof startDaemon;
   restartDaemonFn?: typeof restartDaemon;
@@ -64,7 +67,7 @@ interface Ctx {
   envSources: Map<string, string>;
   sdk: WizardSdk;
   baseUrl: string | undefined;
-  fetchFn: typeof fetch;
+  realtimeValidatorFn: (apiKey: string, model: string) => Promise<RealtimeValidationResult>;
   installAutostartFn: typeof installAutostart;
   startDaemonFn: typeof startDaemon;
   restartDaemonFn: typeof restartDaemon;
@@ -72,6 +75,7 @@ interface Ctx {
   confirmTimeoutMs: number;
   sleep: (ms: number) => Promise<void>;
   cwd: string;
+  rejectedRealtimeKeys: Set<string>;
 }
 
 function defaultSdk(baseUrl: string | undefined): WizardSdk {
@@ -122,7 +126,7 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
     envSources: deps.envSources ?? new Map(),
     sdk: (deps.sdk ?? defaultSdk)(baseUrl),
     baseUrl,
-    fetchFn: deps.fetchFn ?? fetch,
+    realtimeValidatorFn: deps.realtimeValidatorFn ?? validateOpenAIRealtime,
     installAutostartFn: deps.installAutostartFn ?? installAutostart,
     startDaemonFn: deps.startDaemonFn ?? startDaemon,
     restartDaemonFn: deps.restartDaemonFn ?? restartDaemon,
@@ -130,6 +134,7 @@ export async function runWizard(config: ResolvedConfig, deps: WizardDeps = {}): 
     confirmTimeoutMs: deps.confirmTimeoutMs ?? START_CONFIRM_TIMEOUT_MS,
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     cwd: deps.cwd ?? process.cwd(),
+    rejectedRealtimeKeys: new Set(),
   };
   try {
     return await wizard(c, config);
@@ -214,7 +219,11 @@ async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {
   printSummary(c, fullIdentity, imessageOn);
   if (provisioned.didProvision) await waitForSmsOptIn(c, client, fullIdentity.phoneNumber);
 
-  if (fullIdentity.phoneNumber || imessageOn) await configureRealtime(c);
+  if (fullIdentity.phoneNumber || imessageOn) {
+    await io.ask("  Press Enter to continue and set up phone call handling");
+    if (!(await configurePhoneVoiceStack(c, config, fullIdentity, resolved.authorityIdentity)))
+      return 1;
+  }
 
   if (!(await setupSigningKey(c, fullIdentity))) return 1;
 
@@ -240,6 +249,7 @@ async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {
 interface ResolvedIdentity {
   identity: any;
   apiKey: string;
+  authorityIdentity?: any;
 }
 
 async function selfSignupFlow(c: Ctx): Promise<ResolvedIdentity | undefined> {
@@ -413,7 +423,7 @@ async function adminFlow(c: Ctx, client: any): Promise<ResolvedIdentity | undefi
     const agentKey = String(created?.apiKey ?? "");
     if (!agentKey) throw new Error("response had no apiKey");
     io.print("  Minted an agent-scoped key for the gateway.");
-    return { identity, apiKey: agentKey };
+    return { identity, apiKey: agentKey, authorityIdentity: identity };
   } catch (err) {
     io.print(`  error: could not mint an agent-scoped key: ${errText(err)}`);
     return undefined;
@@ -521,46 +531,270 @@ async function waitForSmsOptIn(c: Ctx, client: any, phone: any): Promise<void> {
 
 // --- voice / signing key / project dir / autostart ----------------------------
 
-async function configureRealtime(c: Ctx): Promise<void> {
-  const { io } = c;
-  io.print("");
-  io.print("  --- OpenAI Realtime calls ---");
-  io.print("  Realtime sends raw phone audio to OpenAI for a natural, low-latency");
-  io.print("  voice. Skip it to use Inkbox's built-in STT/TTS instead.");
+type VoiceAiAuthorityMode = "contact_scoped" | "yolo";
 
-  const detected = c.env.INKBOX_REALTIME_API_KEY || c.env.OPENAI_API_KEY || "";
-  if (detected) io.print("  Found an OpenAI API key in your environment.");
-  else io.print("  No OpenAI API key detected for Realtime.");
-
-  if (!(await io.confirm("  Use OpenAI Realtime for phone calls?", Boolean(detected)))) {
-    save(c, "INKBOX_REALTIME_ENABLED", "false");
-    io.print("  Realtime disabled. Calls will use Inkbox STT/TTS.");
-    return;
+async function adminIdentityForAuthority(c: Ctx, handle: string): Promise<any | undefined> {
+  const key = (
+    await c.io.ask("  Paste an admin-scoped Inkbox API key for this authority change", {
+      password: true,
+    })
+  ).trim();
+  if (!key) {
+    c.io.print("  An admin-scoped API key is required to change saved Voice AI authority.");
+    return undefined;
   }
+  try {
+    const client = await c.sdk.client(key);
+    const info = await client.whoami();
+    if (String(info?.authSubtype ?? "") !== "api_key.admin_scoped") {
+      c.io.print("  That credential is not an admin-scoped API key.");
+      return undefined;
+    }
+    return await client.getIdentity(handle);
+  } catch (err) {
+    c.io.print(
+      `  Could not validate the admin-scoped API key: ${errText(err).replaceAll(key, "***")}`,
+    );
+    return undefined;
+  }
+}
+
+async function configureVoiceAi(
+  c: Ctx,
+  identity: any,
+  authorityIdentity?: any,
+): Promise<{ configured: boolean; authorityIdentity?: any }> {
+  if (
+    typeof identity.getHostedAgentConfig !== "function" ||
+    typeof identity.getIncomingCallAction !== "function" ||
+    typeof identity.setIncomingCallAction !== "function"
+  ) {
+    c.io.print("  Inkbox Voice AI setup requires @inkbox/sdk 0.5.9.");
+    return { configured: false, authorityIdentity };
+  }
+  let hosted: any;
+  let incoming: any;
+  try {
+    [hosted, incoming] = await Promise.all([
+      identity.getHostedAgentConfig(),
+      identity.getIncomingCallAction(),
+    ]);
+  } catch (err) {
+    c.io.print(`  Could not read the current Voice AI configuration: ${errText(err)}`);
+    return { configured: false, authorityIdentity };
+  }
+  const previous: VoiceAiAuthorityMode =
+    hosted?.authorityMode === "yolo" ? "yolo" : "contact_scoped";
+  const authorityIndex = await c.io.choose(
+    "  How much authority should Inkbox Voice AI have?",
+    [
+      "Contact-scoped — tools are limited to the current caller and conversation.",
+      "YOLO mode — tools can use the identity's wider authorized capabilities.",
+    ],
+    previous === "yolo" ? 1 : 0,
+  );
+  const selected: VoiceAiAuthorityMode = authorityIndex === 1 ? "yolo" : "contact_scoped";
+  let adminIdentity = authorityIdentity;
+  if (selected !== previous && !adminIdentity) {
+    adminIdentity = await adminIdentityForAuthority(c, identity.agentHandle);
+    if (!adminIdentity) return { configured: false, authorityIdentity };
+  }
+  let authorityChanged = false;
+  let routingAttempted = false;
+  try {
+    if (selected !== previous) {
+      await adminIdentity.setHostedAgentAuthorityMode({ authorityMode: selected });
+      authorityChanged = true;
+    }
+    routingAttempted = true;
+    await identity.setIncomingCallAction({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+  } catch (err) {
+    const rollbackErrors: string[] = [];
+    if (routingAttempted) {
+      try {
+        await identity.setIncomingCallAction({
+          incomingCallAction: incoming.incomingCallAction,
+          clientWebsocketUrl: incoming.clientWebsocketUrl ?? null,
+          incomingCallWebhookUrl: incoming.incomingCallWebhookUrl ?? null,
+        });
+      } catch (rollbackError) {
+        rollbackErrors.push(`incoming routing: ${errText(rollbackError)}`);
+      }
+    }
+    if (authorityChanged) {
+      try {
+        await adminIdentity.setHostedAgentAuthorityMode({ authorityMode: previous });
+      } catch (rollbackError) {
+        rollbackErrors.push(`authority: ${errText(rollbackError)}`);
+      }
+    }
+    c.io.print(`  Inkbox Voice AI configuration failed: ${errText(err)}`);
+    if (rollbackErrors.length) {
+      c.io.print(`  warning: remote rollback was incomplete (${rollbackErrors.join("; ")}).`);
+    }
+    return { configured: false, authorityIdentity: adminIdentity };
+  }
+  save(c, "INKBOX_VOICE_STACK", "inkbox_voice_ai");
+  save(c, "INKBOX_VOICE_AI_AUTHORITY_MODE", selected);
+  save(c, "INKBOX_REALTIME_ENABLED", "false");
+  c.io.print("  Inkbox Voice AI is configured for phone calls.");
+  c.io.print("  OpenCode will be notified when each call ends.");
+  return { configured: true, authorityIdentity: adminIdentity };
+}
+
+function setupGatewayPublicUrl(c: Ctx, config: ResolvedConfig, identity: any): string | undefined {
+  const configured = config.gateway.publicUrl?.trim();
+  if (configured) {
+    try {
+      return normalizePublicUrl(configured);
+    } catch {
+      c.io.print(
+        "  The configured gateway.publicUrl is invalid; enter an HTTP(S) public URL and rerun setup.",
+      );
+      return undefined;
+    }
+  }
+
+  const tunnelPublicHost = identity?.tunnel?.publicHost;
+  if (typeof tunnelPublicHost !== "string" || !tunnelPublicHost.trim()) {
+    c.io.print(
+      "  Inkbox did not return a server-issued tunnel public host; provision the identity tunnel and rerun setup.",
+    );
+    return undefined;
+  }
+  try {
+    const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(tunnelPublicHost.trim())
+      ? tunnelPublicHost.trim()
+      : `https://${tunnelPublicHost.trim()}`;
+    return normalizePublicUrl(candidate);
+  } catch {
+    c.io.print(
+      "  Inkbox returned an invalid tunnel public host; repair the identity tunnel and rerun setup.",
+    );
+    return undefined;
+  }
+}
+
+function localCallWebsocketUrl(publicUrl: string): string {
+  return `${publicUrl.replace(/^http/, "ws")}${CALL_MEDIA_WS_PATH}`;
+}
+
+async function configureLocalIncomingCalls(
+  c: Ctx,
+  config: ResolvedConfig,
+  identity: any,
+): Promise<boolean> {
+  const publicUrl = setupGatewayPublicUrl(c, config, identity);
+  if (!publicUrl) return false;
+  if (typeof identity.setIncomingCallAction !== "function") {
+    c.io.print("  The installed Inkbox SDK cannot configure incoming calls.");
+    return false;
+  }
+  try {
+    await identity.setIncomingCallAction({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: localCallWebsocketUrl(publicUrl),
+      incomingCallWebhookUrl: `${publicUrl}${WEBHOOK_PATH}`,
+    });
+    return true;
+  } catch (err) {
+    c.io.print(`  Could not configure incoming calls: ${errText(err)}`);
+    return false;
+  }
+}
+
+async function configureRealtime(c: Ctx): Promise<string | undefined> {
+  const { io } = c;
+  const candidate = c.env.INKBOX_REALTIME_API_KEY || c.env.OPENAI_API_KEY || "";
+  const detected = c.rejectedRealtimeKeys.has(candidate) ? "" : candidate;
+  if (detected) io.print("  Found an OpenAI API key in your environment.");
   const apiKey =
     detected ||
     (await io.ask("  Paste your OpenAI API key for Realtime calls", { password: true })).trim();
   if (!apiKey) {
-    save(c, "INKBOX_REALTIME_ENABLED", "false");
-    io.print("  No key entered. Realtime disabled; calls will use Inkbox STT/TTS.");
-    return;
+    io.print("  No key entered. Choose a phone call voice stack again.");
+    return undefined;
   }
 
-  io.print(`  Testing OpenAI access with ${DEFAULT_REALTIME_MODEL}...`);
+  io.print(`  Testing OpenAI Realtime access with ${DEFAULT_REALTIME_MODEL}...`);
   try {
-    const res = await c.fetchFn(`https://api.openai.com/v1/models/${DEFAULT_REALTIME_MODEL}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const result = await c.realtimeValidatorFn(apiKey, DEFAULT_REALTIME_MODEL);
+    if (!result.ok) throw new Error(result.detail);
   } catch (err) {
-    save(c, "INKBOX_REALTIME_ENABLED", "false");
-    io.print(`  error: OpenAI validation failed (${errText(err)}).`);
-    io.print("  Realtime disabled; calls will use Inkbox STT/TTS. Rerun setup to retry.");
-    return;
+    c.rejectedRealtimeKeys.add(apiKey);
+    io.print(`  error: OpenAI validation failed (${errText(err).replaceAll(apiKey, "***")}).`);
+    io.print("  Choose a phone call voice stack again.");
+    return undefined;
   }
-  save(c, "INKBOX_REALTIME_ENABLED", "true");
-  save(c, "INKBOX_REALTIME_API_KEY", apiKey);
-  io.print("  OpenAI Realtime validated — enabled for calls.");
+  return apiKey;
+}
+
+async function configurePhoneVoiceStack(
+  c: Ctx,
+  config: ResolvedConfig,
+  identity: any,
+  authorityIdentity?: any,
+): Promise<boolean> {
+  let reusableAuthorityIdentity = authorityIdentity;
+  const configured = c.env.INKBOX_VOICE_STACK ?? config.phoneVoiceStack;
+  let defaultIndex =
+    configured === "inkbox_voice_ai" ? 0 : configured === "openai_realtime" ? 1 : 2;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    c.io.print("");
+    c.io.print("  --- Phone call voice stack ---");
+    const selected = await c.io.choose(
+      "  Choose how this agent should handle phone calls:",
+      [
+        "Inkbox Voice AI — Inkbox handles calls on behalf of your agent; OpenCode is notified when the call ends.",
+        "OpenAI Realtime API — Bring your own API key; the realtime agent can consult OpenCode for complex tasks.",
+        "Inkbox TTS/STT — OpenCode talks through the Inkbox voice stack with increased latency.",
+      ],
+      defaultIndex,
+    );
+    defaultIndex = selected;
+    const selectedStack: PhoneVoiceStack =
+      selected === 0 ? "inkbox_voice_ai" : selected === 1 ? "openai_realtime" : "inkbox_tts_stt";
+    if (config.phoneVoiceStackOption && selectedStack !== config.phoneVoiceStackOption) {
+      c.io.print(
+        `  The plugin option phoneVoiceStack=${config.phoneVoiceStackOption} overrides saved environment selections.`,
+      );
+      c.io.print("  Update or remove that plugin option, then choose the matching stack here.");
+      defaultIndex =
+        config.phoneVoiceStackOption === "inkbox_voice_ai"
+          ? 0
+          : config.phoneVoiceStackOption === "openai_realtime"
+            ? 1
+            : 2;
+      continue;
+    }
+    if (selected === 0) {
+      const result = await configureVoiceAi(c, identity, reusableAuthorityIdentity);
+      reusableAuthorityIdentity = result.authorityIdentity;
+      if (result.configured) return true;
+      continue;
+    }
+    if (selected === 1) {
+      const realtimeApiKey = await configureRealtime(c);
+      if (!realtimeApiKey) continue;
+      if (!(await configureLocalIncomingCalls(c, config, identity))) continue;
+      save(c, "INKBOX_REALTIME_ENABLED", "true");
+      save(c, "INKBOX_REALTIME_API_KEY", realtimeApiKey);
+      save(c, "INKBOX_VOICE_STACK", "openai_realtime");
+      c.io.print("  OpenAI Realtime validated — enabled for calls.");
+      return true;
+    }
+    if (!(await configureLocalIncomingCalls(c, config, identity))) continue;
+    save(c, "INKBOX_VOICE_STACK", "inkbox_tts_stt");
+    save(c, "INKBOX_REALTIME_ENABLED", "false");
+    c.io.print("  Inkbox TTS/STT is configured for phone calls.");
+    return true;
+  }
+  c.io.print("  error: phone call handling could not be configured after 5 attempts.");
+  return false;
 }
 
 async function setupSigningKey(c: Ctx, identity: any): Promise<boolean> {

@@ -58,13 +58,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install protocol driver
-        run: pip install 'inkbox==0.5.8'
+        run: pip install 'inkbox==0.5.9'
 
       - name: Install plugin and host
         run: |
           npm ci
           npm install --no-save --package-lock=false \
-            @inkbox/sdk@0.5.8 \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
           npm install -g opencode-ai@latest
 
@@ -75,6 +75,7 @@ jobs:
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.AUT_INKBOX_SIGNING_KEY }}
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INKBOX_VOICEMAIL_DETECTION: "disabled"
         run: bash scripts/live-aut.sh
 
       - name: Run ${{ matrix.scenario }}

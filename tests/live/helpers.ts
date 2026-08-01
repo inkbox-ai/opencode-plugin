@@ -192,21 +192,40 @@ export async function autSpeechMode(
   aut: Inkbox,
   direction: "inbound" | "outbound",
   driverNumber: string,
-): Promise<{ tts: boolean | null; stt: boolean | null } | undefined> {
+  excludedCallIds: Set<string> = new Set(),
+): Promise<
+  | {
+      id: string;
+      tts: boolean | null;
+      stt: boolean | null;
+      voicemailDetection?: string | null;
+    }
+  | undefined
+> {
   const tail = driverNumber.replace(/\D/g, "").slice(-10);
   const calls = (await aut.calls.list({ limit: 10 })) as Array<{
+    id: string;
     direction?: string;
     remotePhoneNumber?: string;
     useInkboxTts: boolean | null;
     useInkboxStt: boolean | null;
+    voicemailDetection?: string | null;
   }>;
   const c = calls.find(
     (x) =>
       (x.direction ?? "").toLowerCase() === direction &&
+      !excludedCallIds.has(x.id) &&
       (x.remotePhoneNumber ?? "").replace(/\D/g, "").slice(-10) === tail &&
       x.useInkboxTts !== null,
   );
-  return c ? { tts: c.useInkboxTts, stt: c.useInkboxStt } : undefined;
+  return c
+    ? {
+        id: c.id,
+        tts: c.useInkboxTts,
+        stt: c.useInkboxStt,
+        voicemailDetection: c.voicemailDetection,
+      }
+    : undefined;
 }
 
 // Settle, send an SMS to the AUT, and return the first NEW inbound reply.

@@ -44,8 +44,8 @@ That's the whole setup. The clone lives in `~/.inkbox-opencode/app`; the
 plugin is installed into your **global opencode config** (`~/.config/opencode`)
 with a one-file wrapper. The wizard creates a fresh Inkbox agent via
 self-signup (or takes an existing API key), enables iMessage, provisions a
-dedicated phone number, waits for your START opt-in, validates an OpenAI key
-for Realtime voice, mints the webhook signing key, picks the agent's working
+dedicated phone number, waits for your START opt-in, configures the phone call
+voice stack, mints the webhook signing key, picks the agent's working
 directory, and offers to **keep the gateway running on every boot**. When it
 finishes, text, email, or call your agent and it answers.
 
@@ -223,10 +223,14 @@ Outbound calls can originate from either line, chosen with `origination` on
   iMessage; the underlying number is never surfaced.
 
 When `origination` is omitted the plugin uses whichever line exists, and
-prefers the dedicated number when both do. Note that `inkbox_place_call`
-currently requires an audio bridge: pass `clientWebsocketUrl` per call or set
-the `callWebsocketUrl` option (env `INKBOX_CALL_WEBSOCKET_URL`) — Inkbox
-connects to that WebSocket for the call's media.
+prefers the dedicated number when both do. OpenAI Realtime and Inkbox TTS/STT
+calls require an audio bridge: pass `clientWebsocketUrl` per call or set the
+`callWebsocketUrl` option (env `INKBOX_CALL_WEBSOCKET_URL`). Inkbox Voice AI
+handles media itself and receives the call's required `purpose` as its task brief.
+Hosted outbound calls do not send a per-call authority override: Inkbox applies
+the saved Voice AI default. The wizard changes that server-side default only
+with an admin credential and records `INKBOX_VOICE_AI_AUTHORITY_MODE` as a local
+mirror so `doctor` can report configuration drift.
 
 ## Configuration reference
 
@@ -236,7 +240,10 @@ connects to that WebSocket for the call's media.
 | `identity` | `INKBOX_IDENTITY` (also `INKBOX_AGENT_IDENTITY`, `INKBOX_AGENT_HANDLE`) | Agent handle (required) |
 | `baseUrl` | `INKBOX_BASE_URL` | API base URL override |
 | `signingKey` | `INKBOX_SIGNING_KEY` | Webhook signature key (future inbound use) |
-| `callWebsocketUrl` | `INKBOX_CALL_WEBSOCKET_URL` | Audio-bridge WebSocket for `inkbox_place_call` |
+| `callWebsocketUrl` | `INKBOX_CALL_WEBSOCKET_URL` | Audio bridge used by OpenAI Realtime and Inkbox TTS/STT calls |
+| `phoneVoiceStack` | `INKBOX_VOICE_STACK` | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt` |
+| `voiceAiAuthorityMode` | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Local mirror of saved Voice AI authority: `contact_scoped` or `yolo` |
+| `voicemailDetection` | `INKBOX_VOICEMAIL_DETECTION` | Optional explicit `enabled` / `disabled`; omission uses the Inkbox API default |
 | `vault.keyEnvVar` | — (default `INKBOX_VAULT_KEY`) | Which env var holds the vault unlock key |
 | `tools.enable` / `tools.disable` | — | Tool gating (names, groups, `"all"`) |
 | `outbound.approval` | — | `"ask"` (default) / `"allowlist"` / `"auto"` |
@@ -312,8 +319,10 @@ inbound events. What it does:
   decline") and time out to a decline.
 - **Control commands** (whole-message): `/clear`, `/stop`, `/status`,
   `/health`, `/resume`, `/usage`.
-- **Voice** (on by default with the gateway): the agent answers calls. Realtime
-  auto-enables when an OpenAI key is present (`INKBOX_REALTIME_API_KEY`, or
+- **Voice** (on by default with the gateway): setup offers Inkbox Voice AI,
+  OpenAI Realtime API, and Inkbox TTS/STT. Voice AI handles the live call and
+  notifies OpenCode after it ends; the two local stacks keep the call attached
+  to the OpenCode gateway. Realtime uses `INKBOX_REALTIME_API_KEY` (or
   `OPENAI_API_KEY` as the backstop) and runs the call as a live raw-audio
   conversation with in-call actions; otherwise Inkbox handles speech-to-text
   and text-to-speech. Opt out with `INKBOX_VOICE_ENABLED=false` (stop answering)

@@ -1,3 +1,4 @@
+import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import type { BurstBuffer } from "./burst.js";
@@ -5,6 +6,7 @@ import { matchedContactMemories } from "./contact-memories.js";
 import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
+import { deliveryFailureKey, deliveryFailureRecovery } from "./delivery-policy.js";
 import { downloadMedia, mediaDir } from "./media.js";
 import { SILENT } from "./prompts.js";
 import type {
@@ -40,6 +42,7 @@ export interface DispatchDeps {
   bursts?: BurstBuffer;
   // Handle a verified non-Inkbox (external) webhook.
   onExternal?(event: VerifiedEvent): Promise<void>;
+  onHostedCallEnded?(event: CallEndedWebhookPayload): Promise<void>;
 }
 
 // Route a verified event to the right handler. Returns false only on a
@@ -65,6 +68,11 @@ export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): P
     case "message.bounced":
     case "message.failed":
       return handleDeliveryFailure(deps, type, event);
+    case "call.ended":
+      if (deps.onHostedCallEnded) {
+        await deps.onHostedCallEnded(event.body as unknown as CallEndedWebhookPayload);
+      }
+      return true;
     // Carrier uncertainty, not a failure — the message usually landed, so a
     // capture here would prompt a resend of a message that was delivered.
     // Ack and log only.
@@ -411,11 +419,16 @@ async function handleDeliveryFailure(
   const isText = type.startsWith("text");
   const isImessage = type.startsWith("imessage");
   const r = resourceOf(event.body, isText ? "text_message" : "message");
+  if (str(r?.direction)?.toLowerCase() === "inbound") return true;
   const messageId = str(r?.id);
+  const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];
+  const failedRecipient = recipientRows
+    .map((item) => record(item))
+    .find((item) => str(item?.error_code) || str(item?.error_message) || str(item?.error_reason));
   const to = isText
     ? str(r?.remote_phone_number)
     : isImessage
-      ? str(r?.remote_number)
+      ? (str(failedRecipient?.remote_number) ?? str(r?.remote_number))
       : firstString(r?.to_addresses);
   const from = to;
   // Check recoverability before consuming the once-per-TTL notify slot.
@@ -431,12 +444,28 @@ async function handleDeliveryFailure(
         : "email") as Exclude<Channel, "voice">,
     from,
   });
-  const reason = str(r?.error_detail) ?? str(r?.error_code) ?? str(r?.error_reason) ?? type;
+  const reason =
+    str(r?.error_detail) ??
+    str(r?.error_code) ??
+    str(r?.error_reason) ??
+    str(failedRecipient?.error_message) ??
+    str(failedRecipient?.error_code) ??
+    type;
+  const conversationId = str(r?.conversation_id);
+  const recovery = deliveryFailureRecovery({
+    key: deliveryFailureKey(
+      isImessage ? "imessage" : isText ? "sms" : "email",
+      from,
+      conversationId,
+    ),
+    channel: isImessage ? "imessage" : isText ? "sms" : "email",
+    target: from,
+    failure: reason,
+    failedBody: str(r?.text) ?? str(r?.content) ?? str(r?.snippet) ?? str(r?.subject),
+  });
+  if (!recovery.prompt) return true;
   void deps.sessions
-    .runCapture(
-      chatKey,
-      `A message to ${from} failed to deliver (${type}: ${reason}). Consider retrying or switching channel.`,
-    )
+    .runCapture(chatKey, recovery.prompt)
     .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
 }

@@ -1,8 +1,14 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
+import {
+  beginHostedSmsAttempt,
+  classifyHostedSmsError,
+  type HostedSmsGuard,
+  settleHostedSmsAttempt,
+} from "../gateway/hosted-call-registry.js";
 import { uploadLocalMedia } from "../gateway/media.js";
 import { assertSmsTextWithinLimit, SMS_MAX_TEXT_CHARS } from "../limits.js";
-import { approveOutbound } from "../permissions.js";
+import { approveOutbound, checkOutboundRecipients } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
 const sendSmsArgs = {
@@ -81,62 +87,105 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
         args: sendSmsArgs,
         async execute(args: SendSmsArgs, ctx) {
           return runTool(async () => {
-            const conversationId =
-              typeof args.conversationId === "string" ? args.conversationId.trim() : "";
-            const toList = normalizeRecipients(args.to);
-            const hasTo = toList !== undefined && toList.length > 0;
-            const hasConversation = Boolean(conversationId);
-            if (hasTo === hasConversation) {
-              throw new Error("Specify exactly one of `to` or `conversationId`.");
-            }
-            if (toList?.length === 0) {
-              throw new Error("`to` must include at least one recipient.");
-            }
-            if (toList && toList.length > 8) {
-              throw new Error("Inkbox group texts support at most 8 recipients.");
-            }
-            assertSmsTextWithinLimit(args.text);
+            let hostedGuard: HostedSmsGuard | undefined;
+            let providerAccepted = false;
+            try {
+              const conversationId =
+                typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+              const toList = normalizeRecipients(args.to);
+              hostedGuard = beginHostedSmsAttempt({
+                sessionID: ctx.sessionID,
+                messageId: ctx.messageID,
+                target: toList?.length === 1 ? toList[0] : undefined,
+                hasConversationId: Boolean(conversationId),
+              });
+              if (hostedGuard && toList?.length === 1) {
+                // The guard proved this is the authoritative caller; send its
+                // canonical E.164 form rather than a model-formatted variant.
+                toList[0] = hostedGuard.expectedTarget;
+              }
+              const hasTo = toList !== undefined && toList.length > 0;
+              const hasConversation = Boolean(conversationId);
+              if (hasTo === hasConversation) {
+                throw new Error("Specify exactly one of `to` or `conversationId`.");
+              }
+              if (toList?.length === 0) {
+                throw new Error("`to` must include at least one recipient.");
+              }
+              if (toList && toList.length > 8) {
+                throw new Error("Inkbox group texts support at most 8 recipients.");
+              }
+              assertSmsTextWithinLimit(args.text);
 
-            // A conversation send resolves recipients server-side, so a local
-            // allowlist cannot vet them — refuse rather than silently bypass.
-            if (hasConversation && config.outbound.allowedRecipients.length > 0) {
-              throw new Error(
-                "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use explicit `to` recipients or adjust the allowlist.",
-              );
-            }
-            const recipients = hasConversation ? [] : (toList ?? []);
-            await approveOutbound(ctx, config, {
-              tool: "inkbox_send_sms",
-              recipients,
-              ...(hasConversation ? { patterns: [`conversation:${conversationId}`] } : {}),
-              summary: hasConversation
-                ? `Send text to conversation ${conversationId} (${args.text.length} chars)`
-                : `Send text to ${recipients.join(", ")} (${args.text.length} chars)`,
-              metadata: { textChars: args.text.length },
-            });
+              // A conversation send resolves recipients server-side, so a local
+              // allowlist cannot vet them — refuse rather than silently bypass.
+              if (hasConversation && config.outbound.allowedRecipients.length > 0) {
+                throw new Error(
+                  "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use explicit `to` recipients or adjust the allowlist.",
+                );
+              }
+              const recipients = hasConversation ? [] : (toList ?? []);
+              if (hostedGuard) {
+                if (
+                  config.outbound.approval === "allowlist" &&
+                  config.outbound.allowedRecipients.length === 0
+                ) {
+                  throw new Error(
+                    'outbound.approval is "allowlist" but outbound.allowedRecipients is empty.',
+                  );
+                }
+                const block = checkOutboundRecipients(
+                  recipients,
+                  config.outbound.allowedRecipients,
+                );
+                if (block) throw new Error(block);
+              } else {
+                await approveOutbound(ctx, config, {
+                  tool: "inkbox_send_sms",
+                  recipients,
+                  ...(hasConversation ? { patterns: [`conversation:${conversationId}`] } : {}),
+                  summary: hasConversation
+                    ? `Send text to conversation ${conversationId} (${args.text.length} chars)`
+                    : `Send text to ${recipients.join(", ")} (${args.text.length} chars)`,
+                  metadata: { textChars: args.text.length },
+                });
+              }
 
-            const identity = await runtime.getIdentity();
-            // Uploaded local files lead, then any caller-supplied URLs.
-            const uploaded = args.mediaPaths?.length
-              ? await uploadLocalMedia(identity, args.mediaPaths)
-              : [];
-            const mediaUrls = [...uploaded, ...(args.mediaUrls ?? [])];
-            const payload = {
-              text: args.text,
-              ...(mediaUrls.length ? { mediaUrls } : {}),
-              ...(hasConversation
-                ? { conversationId }
-                : { to: recipients.length === 1 ? recipients[0] : recipients }),
-            };
-            const msg = await identity.sendText(payload);
-            const target = formatTargetSummary(msg, args);
-            const status = msg.deliveryStatus ?? "unknown";
-            return {
-              title: hasConversation
-                ? `Text sent to conversation ${conversationId}`
-                : `Text sent to ${recipients.join(", ")}`,
-              output: `Sent text id=${msg.id} ${target} status=${status} (${args.text.length} chars)`,
-            };
+              const identity = await runtime.getIdentity();
+              // Uploaded local files lead, then any caller-supplied URLs.
+              const uploaded = args.mediaPaths?.length
+                ? await uploadLocalMedia(identity, args.mediaPaths)
+                : [];
+              const mediaUrls = [...uploaded, ...(args.mediaUrls ?? [])];
+              const payload = {
+                text: args.text,
+                ...(mediaUrls.length ? { mediaUrls } : {}),
+                ...(hasConversation
+                  ? { conversationId }
+                  : { to: recipients.length === 1 ? recipients[0] : recipients }),
+              };
+              const msg = await identity.sendText(payload);
+              providerAccepted = true;
+              if (hostedGuard) settleHostedSmsAttempt(hostedGuard, "success");
+              const target = formatTargetSummary(msg, args);
+              const status = msg.deliveryStatus ?? "unknown";
+              return {
+                title: hasConversation
+                  ? `Text sent to conversation ${conversationId}`
+                  : `Text sent to ${recipients.join(", ")}`,
+                output: `Sent text id=${msg.id} ${target} status=${status} (${args.text.length} chars)`,
+              };
+            } catch (error) {
+              if (hostedGuard && !providerAccepted) {
+                settleHostedSmsAttempt(hostedGuard, "failed", classifyHostedSmsError(error));
+              }
+              if (hostedGuard && providerAccepted) {
+                throw new Error(
+                  `SMS provider accepted the message, but durable hosted-call settlement failed; do not retry this send. ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+              throw error;
+            }
           });
         },
       },
