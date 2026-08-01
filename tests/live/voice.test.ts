@@ -272,7 +272,6 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
         expect(agentSaid.length).toBeGreaterThan(0);
         const persistedDriverCall = await remote.calls.get(call.id);
-        expect(String(persistedDriverCall.voicemailDetection).toLowerCase()).toBe("disabled");
 
         const freshAutCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
         const pair = requireExactCallPair([persistedDriverCall], freshAutCalls, {
@@ -284,6 +283,8 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           mode.useInkboxTts === false && mode.useInkboxStt === false,
           `outbound should be Realtime, got ${JSON.stringify(mode)}`,
         ).toBe(true);
+        // Voicemail detection belongs to the AUT's call-capable outbound request.
+        // The driver's mirrored inbound leg can report its unrelated provider default.
         expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {
         await hangupCall(remote, call?.id);
