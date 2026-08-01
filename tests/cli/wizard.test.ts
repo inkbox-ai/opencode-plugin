@@ -24,6 +24,7 @@ afterEach(() => {
 
 function makeConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   return {
+    voiceAiAuthorityMode: "contact_scoped",
     vaultKeyEnvVar: "INKBOX_VAULT_KEY",
     tools: { enable: [], disable: [] },
     outbound: { allowedRecipients: [], approval: "auto", askTimeoutMs: 0 },
@@ -140,7 +141,7 @@ function deps(
     env: {},
     envFilePath: path.join(tmp, ".env"),
     sdk: () => world.sdk,
-    fetchFn: vi.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch,
+    realtimeValidatorFn: vi.fn(async () => ({ ok: true, detail: "session updated" })),
     installAutostartFn: vi.fn(async () => true),
     startDaemonFn: vi.fn(async () => 0),
     restartDaemonFn: vi.fn(async () => 0),
@@ -391,6 +392,7 @@ describe("runWizard", () => {
     });
     expect(savedEnv(d.envFilePath)).toMatchObject({
       INKBOX_VOICE_STACK: "inkbox_voice_ai",
+      INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo",
       INKBOX_REALTIME_API_KEY: "sk-validated-existing",
       INKBOX_REALTIME_MODEL: "gpt-realtime-2",
       INKBOX_REALTIME_VOICE: "cedar",
@@ -512,6 +514,53 @@ describe("runWizard", () => {
     expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBe("inkbox_tts_stt");
   });
 
+  it("rolls authority and routing back when Voice AI routing fails without persisting selection", async () => {
+    const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
+    (world.client.whoami as ReturnType<typeof vi.fn>).mockResolvedValue({
+      authType: "api_key",
+      authSubtype: "api_key.admin_scoped",
+      organizationId: "org-1",
+    });
+    (world.identity.getIncomingCallAction as ReturnType<typeof vi.fn>).mockResolvedValue({
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/phone/media/ws",
+      incomingCallWebhookUrl: "https://old.example/webhook",
+    });
+    (world.identity.setIncomingCallAction as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("routing failed"))
+      .mockResolvedValueOnce({});
+    const { io, lines } = scriptedIO([
+      true,
+      "ApiKey_admin",
+      0,
+      false,
+      0,
+      1,
+      2,
+      false,
+      true,
+      "",
+      false,
+      false,
+    ]);
+    const d = deps(world, io);
+    expect(await runWizard(makeConfig(), d)).toBe(0);
+    expect(world.identity.setHostedAgentAuthorityMode).toHaveBeenNthCalledWith(1, {
+      authorityMode: "yolo",
+    });
+    expect(world.identity.setHostedAgentAuthorityMode).toHaveBeenNthCalledWith(2, {
+      authorityMode: "contact_scoped",
+    });
+    expect(world.identity.setIncomingCallAction).toHaveBeenNthCalledWith(2, {
+      incomingCallAction: "auto_accept",
+      clientWebsocketUrl: "wss://old.example/phone/media/ws",
+      incomingCallWebhookUrl: "https://old.example/webhook",
+    });
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_AI_AUTHORITY_MODE).toBeUndefined();
+    expect(savedEnv(d.envFilePath).INKBOX_VOICE_STACK).toBe("inkbox_tts_stt");
+    expect(lines.join("\n")).toContain("routing failed");
+  });
+
   it("preserves validated Realtime credentials when selecting a non-Realtime stack", async () => {
     const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
     const { io } = scriptedIO([
@@ -562,7 +611,7 @@ describe("runWizard", () => {
 
   it("disables realtime when key validation fails", async () => {
     const world = fakeWorld({ phone: { id: "pn-1", number: "+15550001111", type: "local" } });
-    const { io } = scriptedIO([
+    const { io, lines } = scriptedIO([
       true,
       "ApiKey_agent",
       false, // iMessage no
@@ -576,7 +625,10 @@ describe("runWizard", () => {
     ]);
     const d = deps(world, io, {
       env: { OPENAI_API_KEY: "sk-bad" },
-      fetchFn: vi.fn(async () => ({ ok: false, status: 401 })) as unknown as typeof fetch,
+      realtimeValidatorFn: vi.fn(async () => ({
+        ok: false,
+        detail: "HTTP 401 for sk-bad",
+      })),
     });
     expect(await runWizard(makeConfig(), d)).toBe(0);
     expect(savedEnv(d.envFilePath)).toMatchObject({
@@ -585,6 +637,7 @@ describe("runWizard", () => {
     });
     expect(savedEnv(d.envFilePath).INKBOX_REALTIME_API_KEY).toBeUndefined();
     expect(world.identity.setIncomingCallAction).not.toHaveBeenCalled();
+    expect(lines.join("\n")).not.toContain("sk-bad");
   });
 
   it("warns when a differing shell export will shadow the saved key", async () => {

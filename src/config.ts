@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { isPhoneVoiceStack, type PhoneVoiceStack } from "./voice-stack.js";
 
 export type OutboundApproval = "ask" | "allowlist" | "auto";
+export type VoiceAiAuthorityMode = "contact_scoped" | "yolo";
 
 // Options passed to InkboxPlugin(input, { ...options }) from your
 // .opencode/plugins/inkbox.ts wrapper. Every credential also resolves from env
@@ -17,6 +18,7 @@ export interface InkboxPluginOptions {
   // Only needed for inkbox_place_call when no per-call URL is passed.
   callWebsocketUrl?: string;
   phoneVoiceStack?: PhoneVoiceStack;
+  voiceAiAuthorityMode?: VoiceAiAuthorityMode;
   voicemailDetection?: "enabled" | "disabled";
   vault?: {
     keyEnvVar?: string;
@@ -155,6 +157,7 @@ export interface ResolvedConfig {
   // Retained so the setup wizard can warn when a plugin option would shadow
   // a newly saved INKBOX_VOICE_STACK selection.
   phoneVoiceStackOption?: PhoneVoiceStack;
+  voiceAiAuthorityMode?: VoiceAiAuthorityMode;
   voicemailDetection?: "enabled" | "disabled";
   vaultKeyEnvVar: string;
   tools: {
@@ -258,6 +261,10 @@ export function resolveConfig(
     ? opts.phoneVoiceStack
     : undefined;
   const configuredVoiceStack = phoneVoiceStackOption ?? env.INKBOX_VOICE_STACK;
+  const configuredAuthority =
+    opts.voiceAiAuthorityMode ?? nonEmptyString(env.INKBOX_VOICE_AI_AUTHORITY_MODE);
+  const voiceAiAuthorityMode: VoiceAiAuthorityMode =
+    configuredAuthority === "yolo" ? "yolo" : "contact_scoped";
   const gatewayOptions = isRecord(opts.gateway) ? opts.gateway : {};
   const voiceOptions = isRecord(gatewayOptions.voice) ? gatewayOptions.voice : {};
   const realtimeOptions = isRecord(voiceOptions.realtime) ? voiceOptions.realtime : {};
@@ -305,6 +312,7 @@ export function resolveConfig(
     callWebsocketUrl,
     phoneVoiceStack,
     phoneVoiceStackOption,
+    voiceAiAuthorityMode,
     voicemailDetection,
     vaultKeyEnvVar: nonEmptyString(vault.keyEnvVar) ?? DEFAULT_VAULT_KEY_ENV_VAR,
     tools: {

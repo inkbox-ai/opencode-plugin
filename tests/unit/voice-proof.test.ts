@@ -8,14 +8,14 @@ import {
 
 describe("hosted live voice proof normalization", () => {
   it("normalizes punctuation without accepting reordered marker words", () => {
-    expect(normalizedVoiceTokens("OpenCode, Alpha-Bravo! 42")).toEqual([
-      "opencode",
+    expect(normalizedVoiceTokens("Zulu, Alpha-Bravo! 42")).toEqual([
+      "zulu",
       "alpha",
       "bravo",
       "42",
     ]);
-    expect(containsVoiceMarker("marker: OpenCode, alpha—bravo", "opencode alpha bravo")).toBe(true);
-    expect(containsVoiceMarker("opencode bravo alpha", "opencode alpha bravo")).toBe(false);
+    expect(containsVoiceMarker("marker: zulu, alpha—bravo", "zulu alpha bravo")).toBe(true);
+    expect(containsVoiceMarker("zulu bravo alpha", "zulu alpha bravo")).toBe(false);
   });
 
   it("requires both after-call timing and an SMS intent for caller evidence", () => {

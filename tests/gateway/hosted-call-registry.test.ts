@@ -11,6 +11,8 @@ import {
   classifyHostedSmsError,
   clearHostedSmsCapture,
   getHostedCall,
+  HOSTED_REGISTRY_DIRECTORY_MODE,
+  HOSTED_REGISTRY_FILE_MODE,
   saveHostedCall,
   settleHostedSmsAttempt,
 } from "../../src/gateway/hosted-call-registry.js";
@@ -65,6 +67,34 @@ afterEach(() => {
 });
 
 describe("hosted SMS durable guard", () => {
+  it("fails closed on corrupt or non-object journal contents", () => {
+    const file = path.join(dir, "hosted-call-completions.json");
+    fs.writeFileSync(file, "{not-json", { mode: 0o600 });
+    expect(() => getHostedCall("ident-1", "call-1")).toThrow();
+    fs.writeFileSync(file, "[]\n", { mode: 0o600 });
+    expect(() => getHostedCall("ident-1", "call-1")).toThrow("must contain a JSON object");
+    fs.writeFileSync(file, '{"bad":42}\n', { mode: 0o600 });
+    expect(() => getHostedCall("ident-1", "call-1")).toThrow("contains an invalid entry");
+  });
+
+  it("fails closed when the journal path cannot be read as a file", () => {
+    const file = path.join(dir, "hosted-call-completions.json");
+    fs.unlinkSync(file);
+    fs.mkdirSync(file);
+    expect(() => getHostedCall("ident-1", "call-1")).toThrow();
+  });
+
+  it("keeps its directory, journal, temp, and lock private", () => {
+    fs.chmodSync(dir, 0o755);
+    clearHostedSmsCapture("ident-1", "call-1");
+    expect(HOSTED_REGISTRY_DIRECTORY_MODE).toBe(0o700);
+    expect(HOSTED_REGISTRY_FILE_MODE).toBe(0o600);
+    expect(fs.statSync(dir).mode & 0o777).toBe(HOSTED_REGISTRY_DIRECTORY_MODE);
+    expect(fs.statSync(path.join(dir, "hosted-call-completions.json")).mode & 0o777).toBe(
+      HOSTED_REGISTRY_FILE_MODE,
+    );
+  });
+
   it("fails closed immediately while another process owns the journal lock", () => {
     const lock = path.join(dir, "hosted-call-completions.json.lock");
     fs.writeFileSync(lock, "99999\n");
@@ -225,5 +255,6 @@ describe("hosted SMS durable guard", () => {
     expect(() => assertHostedToolAllowed("session-1", "inkbox_send_email")).toThrow(
       "permits only inkbox_send_sms",
     );
+    expect(() => assertHostedToolAllowed("ordinary-session", "inkbox_send_email")).not.toThrow();
   });
 });

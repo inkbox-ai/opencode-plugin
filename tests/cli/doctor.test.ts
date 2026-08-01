@@ -39,6 +39,7 @@ function healthyRuntime() {
         clientWebsocketUrl: "wss://agent.inkboxwire.com/phone/media/ws",
         incomingCallWebhookUrl: "https://agent.inkboxwire.com/webhook",
       })),
+      getHostedAgentConfig: vi.fn(async () => ({ authorityMode: "contact_scoped" })),
     })),
   } as any;
 }
@@ -190,6 +191,24 @@ describe("runDoctor", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.findings.some((finding) => /routing mismatch/.test(finding.message))).toBe(true);
+  });
+
+  it("reports Voice AI authority drift against the saved local mirror", async () => {
+    const runtime = healthyRuntime();
+    const identity = await runtime.getIdentity();
+    identity.getIncomingCallAction.mockResolvedValue({
+      incomingCallAction: "hosted_agent",
+      clientWebsocketUrl: null,
+      incomingCallWebhookUrl: null,
+    });
+    identity.getHostedAgentConfig.mockResolvedValue({ authorityMode: "contact_scoped" });
+    runtime.getIdentity.mockResolvedValue(identity);
+    const result = await runDoctor(
+      makeConfig({ phoneVoiceStack: "inkbox_voice_ai", voiceAiAuthorityMode: "yolo" }),
+      { runtime, opencode: reachableOpencode(), print: () => {} },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.findings.some((finding) => /authority drift/.test(finding.message))).toBe(true);
   });
 
   it("fails when a local voice stack has no media WebSocket route", async () => {

@@ -227,6 +227,10 @@ prefers the dedicated number when both do. OpenAI Realtime and Inkbox TTS/STT
 calls require an audio bridge: pass `clientWebsocketUrl` per call or set the
 `callWebsocketUrl` option (env `INKBOX_CALL_WEBSOCKET_URL`). Inkbox Voice AI
 handles media itself and receives the call's required `purpose` as its task brief.
+Hosted outbound calls do not send a per-call authority override: Inkbox applies
+the saved Voice AI default. The wizard changes that server-side default only
+with an admin credential and records `INKBOX_VOICE_AI_AUTHORITY_MODE` as a local
+mirror so `doctor` can report configuration drift.
 
 ## Configuration reference
 
@@ -238,6 +242,7 @@ handles media itself and receives the call's required `purpose` as its task brie
 | `signingKey` | `INKBOX_SIGNING_KEY` | Webhook signature key (future inbound use) |
 | `callWebsocketUrl` | `INKBOX_CALL_WEBSOCKET_URL` | Audio bridge used by OpenAI Realtime and Inkbox TTS/STT calls |
 | `phoneVoiceStack` | `INKBOX_VOICE_STACK` | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt` |
+| `voiceAiAuthorityMode` | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Local mirror of saved Voice AI authority: `contact_scoped` or `yolo` |
 | `voicemailDetection` | `INKBOX_VOICEMAIL_DETECTION` | Optional explicit `enabled` / `disabled`; omission uses the Inkbox API default |
 | `vault.keyEnvVar` | — (default `INKBOX_VAULT_KEY`) | Which env var holds the vault unlock key |
 | `tools.enable` / `tools.disable` | — | Tool gating (names, groups, `"all"`) |

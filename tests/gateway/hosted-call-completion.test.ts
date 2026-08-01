@@ -106,6 +106,13 @@ afterEach(() => {
 });
 
 describe("hosted call completion", () => {
+  it("rejects a corrupt durable journal before dispatching any reconciliation", async () => {
+    fs.writeFileSync(path.join(dir, "hosted-call-completions.json"), "{broken", { mode: 0o600 });
+    const d = deps([]);
+    await expect(createHostedCallCompletion(d).ingest(event())).rejects.toThrow();
+    expect(d.runHostedCapture).not.toHaveBeenCalled();
+  });
+
   it("does not turn a caller's third-party texting plan into an agent commitment", () => {
     expect(
       hasHostedSmsCommitment(

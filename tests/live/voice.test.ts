@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import { PhoneRuleAction, PhoneRuleMatchType, VoicemailDetection } from "@inkbox/sdk";
 import { describe, expect, it } from "vitest";
+import { requireExactCallPair } from "./call-pairing.js";
 import {
   AUT_KEY,
   autSpeechMode,
@@ -19,7 +20,6 @@ import {
   inboundTextsFrom,
   LIVE,
   phoneOf,
-  pollUntil,
   REAL_MODEL,
   REMOTE_KEY,
   waitTwoWayCall,
@@ -212,7 +212,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const aut = client(AUT_KEY as string);
       const autPhone = await phoneOf(aut);
       const autTail = tail(autPhone.number);
-      const beforeAutCalls = new Set((await aut.calls.list({ limit: 30 })).map((item) => item.id));
+      const driverTail = tail(st.number);
 
       const inboundFromAut = async () =>
         (await remote.calls.list({ limit: 30 })).filter(
@@ -222,11 +222,20 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         );
 
       const before = new Set((await inboundFromAut()).map((c) => c.id));
+      const outboundFromAut = async () =>
+        (await aut.calls.list({ limit: 30 })).filter(
+          (c) =>
+            (c.direction ?? "").toLowerCase() === "outbound" &&
+            tail(c.remotePhoneNumber ?? "") === driverTail,
+        );
+      const beforeAut = new Set((await outboundFromAut()).map((c) => c.id));
       const beforeTexts = new Set(
         (await inboundTextsFrom(remote, st.number_id, autPhone.number)).map(
           (message) => message.id,
         ),
       );
+      const scenarioStartedAt = Date.now() - 5_000;
+      const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
         text: "Please call me right now by phone and set voicemailDetection to disabled.",
@@ -235,11 +244,25 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       let call: Awaited<ReturnType<typeof inboundFromAut>>[number] | undefined;
       try {
         try {
-          call = await pollUntil(
-            "agent call-back",
-            async () => (await inboundFromAut()).find((c) => !before.has(c.id)),
-            VOICE_TIMEOUT_MS,
-          );
+          const duplicateGraceMs = 10_000;
+          let firstPairAt: number | undefined;
+          while (Date.now() < deadline) {
+            const driverCalls = (await inboundFromAut()).filter((c) => !before.has(c.id));
+            const autCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
+            if (driverCalls.length > 0 && autCalls.length > 0) {
+              firstPairAt ??= Date.now();
+              if (Date.now() - firstPairAt >= duplicateGraceMs) {
+                const pair = requireExactCallPair(driverCalls, autCalls, {
+                  scenarioStartedAt,
+                  maxCreationSkewMs: 60_000,
+                });
+                call = pair.driver;
+                break;
+              }
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2_000));
+          }
+          if (!call) throw new Error("Timed out waiting for one unambiguous Realtime call pair.");
         } catch (error) {
           const replies = (await inboundTextsFrom(remote, st.number_id, autPhone.number)).filter(
             (message) => !beforeTexts.has(message.id),
@@ -251,13 +274,17 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         const persistedDriverCall = await remote.calls.get(call.id);
         expect(String(persistedDriverCall.voicemailDetection).toLowerCase()).toBe("disabled");
 
-        const mode = await autSpeechMode(aut, "outbound", st.number, beforeAutCalls);
-        expect(mode, "no answered outbound AUT call with the driver").toBeDefined();
+        const freshAutCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
+        const pair = requireExactCallPair([persistedDriverCall], freshAutCalls, {
+          scenarioStartedAt,
+          maxCreationSkewMs: 60_000,
+        });
+        const mode: any = await aut.calls.get(pair.aut.id);
         expect(
-          mode?.tts === false && mode?.stt === false,
+          mode.useInkboxTts === false && mode.useInkboxStt === false,
           `outbound should be Realtime, got ${JSON.stringify(mode)}`,
         ).toBe(true);
-        expect(String(mode?.voicemailDetection).toLowerCase()).toBe("disabled");
+        expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {
         await hangupCall(remote, call?.id);
       }
@@ -301,18 +328,6 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const baselineAutCalls = await autLegs();
       const beforeDriverCalls = new Set(baselineDriverCalls.map((call) => call.id));
       const beforeAutCalls = new Set(baselineAutCalls.map((call) => call.id));
-      const driverCallWatermark = Math.max(
-        0,
-        ...baselineDriverCalls
-          .map(recordCreatedAt)
-          .filter((value): value is number => value !== undefined),
-      );
-      const autCallWatermark = Math.max(
-        0,
-        ...baselineAutCalls
-          .map(recordCreatedAt)
-          .filter((value): value is number => value !== undefined),
-      );
       const baseline = await outboundTextsTo(aut, autPhone.id, st.number);
       const beforeSmsIds = new Set(baseline.map((message: any) => message.id));
       const watermark = Math.max(
@@ -320,6 +335,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         ...baseline.map(recordCreatedAt).filter((value): value is number => value !== undefined),
       );
 
+      const scenarioStartedAt = Date.now() - 5_000;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
         text:
@@ -331,38 +347,32 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       let driverCallId: string | undefined;
       let autCallId: string | undefined;
       try {
+        const duplicateGraceMs = 10_000;
+        let firstPairAt: number | undefined;
         while (Date.now() < deadline) {
           progress.phase = "hosted call placement";
-          const freshDriver = (await driverLegs())
-            .filter(
-              (call) =>
-                !beforeDriverCalls.has(call.id) &&
-                (recordCreatedAt(call) ?? -1) >= driverCallWatermark,
-            )
-            .sort((left, right) => (recordCreatedAt(right) ?? 0) - (recordCreatedAt(left) ?? 0));
-          const freshAut = (await autLegs())
-            .filter(
-              (call) =>
-                !beforeAutCalls.has(call.id) && (recordCreatedAt(call) ?? -1) >= autCallWatermark,
-            )
-            .sort((left, right) => (recordCreatedAt(right) ?? 0) - (recordCreatedAt(left) ?? 0));
+          const freshDriver = (await driverLegs()).filter(
+            (call) => !beforeDriverCalls.has(call.id),
+          );
+          const freshAut = (await autLegs()).filter((call) => !beforeAutCalls.has(call.id));
           progress.last = `driver_records=${freshDriver.length} aut_records=${freshAut.length}`;
-          if (freshDriver[0] && freshAut[0]) {
-            driverCallId = freshDriver[0].id;
-            autCallId = freshAut[0].id;
-            break;
+          if (freshDriver.length > 0 && freshAut.length > 0) {
+            firstPairAt ??= Date.now();
+            if (Date.now() - firstPairAt >= duplicateGraceMs) {
+              const pair = requireExactCallPair(freshDriver, freshAut, {
+                scenarioStartedAt,
+                maxCreationSkewMs: 60_000,
+              });
+              driverCallId = pair.driver.id;
+              autCallId = pair.aut.id;
+              break;
+            }
           }
           await new Promise((resolve) => setTimeout(resolve, 5_000));
         }
         expect(driverCallId && autCallId, JSON.stringify(progress)).toBeTruthy();
         if (!driverCallId || !autCallId) throw new Error(JSON.stringify(progress));
         const call: any = await aut.calls.get(autCallId);
-        const driverCall: any = await remote.calls.get(driverCallId);
-        const driverCreatedAt = recordCreatedAt(driverCall);
-        const autCreatedAt = recordCreatedAt(call);
-        expect(driverCreatedAt).toBeDefined();
-        expect(autCreatedAt).toBeDefined();
-        expect(Math.abs((driverCreatedAt ?? 0) - (autCreatedAt ?? 0))).toBeLessThanOrEqual(60_000);
         expect(String(call.mode?.value ?? call.mode).toLowerCase()).toBe("hosted_agent");
         expect(
           String(call.voicemailDetection?.value ?? call.voicemailDetection).toLowerCase(),
@@ -395,9 +405,16 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           const actionReady = actionEvidence.some(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
+          const smsActionCount = actionEvidence.filter((value: string) =>
+            hasSmsIntent(value),
+          ).length;
+          const markerActionCount = actionEvidence.filter((value: string) =>
+            containsVoiceMarker(value, HOSTED_MARKER),
+          ).length;
           progress.last =
             `agent_segments=${segments.agent.length} caller_ready=${callerReady} ` +
-            `action_ready=${actionReady} open_actions=${JSON.stringify(actionEvidence)}`;
+            `action_ready=${actionReady} open_actions=${openActions.length} ` +
+            `sms_actions=${smsActionCount} marker_actions=${markerActionCount}`;
           if (callerReady && actionReady) break;
           await new Promise((resolve) => setTimeout(resolve, 5_000));
         }

@@ -220,6 +220,20 @@ describe("resolveConfig", () => {
       ).toBe(false);
     });
 
+    it("resolves the canonical Voice AI authority mirror with option precedence", () => {
+      expect(resolveConfig({}, FULL_ENV).voiceAiAuthorityMode).toBe("contact_scoped");
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo" })
+          .voiceAiAuthorityMode,
+      ).toBe("yolo");
+      expect(
+        resolveConfig(
+          { voiceAiAuthorityMode: "contact_scoped" },
+          { ...FULL_ENV, INKBOX_VOICE_AI_AUTHORITY_MODE: "yolo" },
+        ).voiceAiAuthorityMode,
+      ).toBe("contact_scoped");
+    });
+
     it("omits voicemail detection by default and accepts exact explicit values", () => {
       expect(resolveConfig({}, FULL_ENV).voicemailDetection).toBeUndefined();
       expect(

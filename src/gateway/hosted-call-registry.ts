@@ -41,16 +41,43 @@ export interface HostedCallEntry {
 
 type Registry = Record<string, HostedCallEntry>;
 
+export const HOSTED_REGISTRY_DIRECTORY_MODE = 0o700;
+export const HOSTED_REGISTRY_FILE_MODE = 0o600;
+
 function registryPath(): string {
   return path.join(gatewayHome(), "hosted-call-completions.json");
+}
+
+function ensurePrivateRegistryDirectory(file: string): void {
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: HOSTED_REGISTRY_DIRECTORY_MODE });
+  fs.chmodSync(directory, HOSTED_REGISTRY_DIRECTORY_MODE);
 }
 
 function read(): Registry {
   try {
     const value = JSON.parse(fs.readFileSync(registryPath(), "utf8"));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  } catch {
-    return {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("The hosted-call journal must contain a JSON object.");
+    }
+    for (const entry of Object.values(value)) {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        typeof (entry as HostedCallEntry).identityId !== "string" ||
+        typeof (entry as HostedCallEntry).callId !== "string" ||
+        typeof (entry as HostedCallEntry).eventId !== "string" ||
+        !["queued", "running", "completed", "failed"].includes((entry as HostedCallEntry).state) ||
+        !Array.isArray((entry as HostedCallEntry).smsAttempts) ||
+        typeof (entry as HostedCallEntry).updatedAt !== "number"
+      ) {
+        throw new Error("The hosted-call journal contains an invalid entry.");
+      }
+    }
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
 }
 
@@ -61,7 +88,7 @@ function acquireRegistryLock(lock: string): number {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let handle: number | undefined;
     try {
-      handle = fs.openSync(lock, "wx", 0o600);
+      handle = fs.openSync(lock, "wx", HOSTED_REGISTRY_FILE_MODE);
       try {
         fs.writeFileSync(handle, `${process.pid}\n`);
       } catch (error) {
@@ -92,7 +119,7 @@ function acquireRegistryLock(lock: string): number {
 
 function withRegistryMutation<T>(change: (registry: Registry) => T): T {
   const file = registryPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensurePrivateRegistryDirectory(file);
   const lock = `${file}.lock`;
   const handle = acquireRegistryLock(lock);
   try {
@@ -112,7 +139,7 @@ function withRegistryMutation<T>(change: (registry: Registry) => T): T {
 
 function write(registry: Registry): void {
   const file = registryPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensurePrivateRegistryDirectory(file);
   const bounded = Object.fromEntries(
     Object.entries(registry)
       .filter(([, entry]) => Date.now() - entry.updatedAt < 30 * 24 * 60 * 60 * 1000)
@@ -120,9 +147,12 @@ function write(registry: Registry): void {
       .slice(0, 1_000),
   );
   const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(bounded, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  fs.writeFileSync(temp, `${JSON.stringify(bounded, null, 2)}\n`, {
+    mode: HOSTED_REGISTRY_FILE_MODE,
+    flag: "wx",
+  });
   fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
+  fs.chmodSync(file, HOSTED_REGISTRY_FILE_MODE);
 }
 
 function bounded(value: unknown, max: number): string | undefined {

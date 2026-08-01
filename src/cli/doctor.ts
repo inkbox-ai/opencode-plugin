@@ -108,6 +108,23 @@ export async function runDoctor(
           } else {
             add("info", `Incoming-call routing matches ${config.phoneVoiceStack}.`);
           }
+          if (hosted) {
+            if (typeof id.getHostedAgentConfig !== "function") {
+              add("error", "The installed Inkbox SDK cannot inspect Voice AI authority.");
+            } else {
+              const hostedConfig = await id.getHostedAgentConfig();
+              const actualAuthority = String(hostedConfig.authorityMode);
+              const expectedAuthority = config.voiceAiAuthorityMode ?? "contact_scoped";
+              if (actualAuthority !== expectedAuthority) {
+                add(
+                  "error",
+                  `Voice AI authority drift: local config expects ${expectedAuthority}, but Inkbox reports ${actualAuthority}.`,
+                );
+              } else {
+                add("info", `Voice AI authority matches ${expectedAuthority}.`);
+              }
+            }
+          }
         }
       }
     } catch (err) {
