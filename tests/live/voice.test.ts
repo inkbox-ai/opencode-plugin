@@ -341,6 +341,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         to: autPhone.number,
         text:
           "Use inkbox_place_call to call me now. Inkbox Voice AI must handle the call. " +
+          "Set voicemailDetection to disabled. " +
           "The purpose is to complete my spoken request and record any post-call action. " +
           `Do not text before calling. Request ref ${Date.now().toString(36)}.`,
       });
