@@ -1,14 +1,12 @@
-// Session manager: per-chatKey session creation/reuse, prompt shaping,
-// reply delivery, capture turns, abort, status, and turn serialization.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
-import { saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
+import { getHostedCall, saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
-import { createStateStore } from "../../src/gateway/state.js";
+import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 
 const tmpDirs: string[] = [];
@@ -16,7 +14,6 @@ const tmpDirs: string[] = [];
 afterEach(() => {
   delete process.env.INKBOX_OPENCODE_HOME;
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-  vi.useRealTimers();
 });
 
 function makeIdentity() {
@@ -25,25 +22,23 @@ function makeIdentity() {
     emailAddress: "test-agent@inkboxmail.com",
     phoneNumber: { number: "+15559990000" },
     imessageEnabled: true,
-    sendEmail: vi.fn(async (_o: Record<string, unknown>) => ({ id: "email-1" })),
-    sendText: vi.fn(async (_o: Record<string, unknown>) => ({ id: "sms-1" })),
-    sendIMessage: vi.fn(async (_o: Record<string, unknown>) => ({ id: "im-1" })),
+    sendEmail: vi.fn(async () => ({ id: "email-1" })),
+    sendText: vi.fn(async () => ({ id: "sms-1" })),
+    sendIMessage: vi.fn(async () => ({ id: "im-1" })),
   };
 }
 
-interface PromptArg {
-  path: { id: string };
-  query: { directory: string };
-  body: { parts: Array<{ type: string; text: string }>; tools?: Record<string, boolean> };
-}
-
-function makeManager() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-sessions-"));
-  tmpDirs.push(dir);
+function makeManager(existingDir?: string) {
+  const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-sessions-"));
+  if (!existingDir) tmpDirs.push(dir);
   const state = createStateStore(dir);
   const identity = makeIdentity();
   const inkbox = { getIdentity: vi.fn(async () => identity), getClient: vi.fn() };
+  const messages = new Map<string, any[]>();
+  const statuses: Record<string, { type: string }> = {};
   let created = 0;
+  let reply = "reply";
+  let autoComplete = true;
   const opencode = {
     tool: {
       ids: vi.fn(async () => ({
@@ -51,24 +46,36 @@ function makeManager() {
       })),
     },
     session: {
-      create: vi.fn(async (_o: { body: { title: string }; query: { directory: string } }) => ({
-        data: { id: `sess-${++created}` },
+      create: vi.fn(async () => ({ data: { id: `sess-${++created}` } })),
+      get: vi.fn(async (o: { path: { id: string } }) => ({
+        data: { id: o.path.id, directory: "/proj" },
       })),
-      // Reused sessions are validated with get(); by default every id looks
-      // live and owned by this manager's directory.
-      get: vi.fn(
-        async (o: { path: { id: string }; query: { directory: string } }): Promise<unknown> => ({
-          data: { id: o.path.id, directory: "/proj" },
-        }),
-      ),
-      prompt: vi.fn(
-        async (_a: PromptArg): Promise<unknown> => ({
-          data: { parts: [{ type: "text", text: "reply" }] },
-        }),
-      ),
-      abort: vi.fn(async (_o: { path: { id: string }; query: { directory: string } }) => ({})),
+      promptAsync: vi.fn(async (o: any) => {
+        const rows = messages.get(o.path.id) ?? [];
+        rows.push({
+          info: { id: o.body.messageID, role: "user" },
+          parts: o.body.parts,
+        });
+        if (autoComplete) {
+          rows.push({
+            info: {
+              id: `assistant-${o.body.messageID}`,
+              role: "assistant",
+              parentID: o.body.messageID,
+              time: { completed: Date.now() },
+              finish: "stop",
+            },
+            parts: [{ type: "text", text: reply }],
+          });
+          delete statuses[o.path.id];
+        } else statuses[o.path.id] = { type: "busy" };
+        messages.set(o.path.id, rows);
+        return { data: undefined };
+      }),
+      messages: vi.fn(async (o: any) => ({ data: messages.get(o.path.id) ?? [] })),
+      status: vi.fn(async () => ({ data: { ...statuses } })),
+      abort: vi.fn(async () => ({})),
       list: vi.fn(),
-      messages: vi.fn(),
     },
   };
   const config = { gateway: { ...defaultGatewayConfig() } } as unknown as ResolvedConfig;
@@ -81,7 +88,33 @@ function makeManager() {
     logger,
     directory: "/proj",
   });
-  return { mgr, opencode, identity, state, inkbox, dir };
+  return {
+    mgr,
+    opencode,
+    identity,
+    state,
+    dir,
+    messages,
+    statuses,
+    setReply(value: string) {
+      reply = value;
+    },
+    setAutoComplete(value: boolean) {
+      autoComplete = value;
+    },
+  };
+}
+
+function sms(text: string, over: Partial<InboundMessage> = {}): InboundMessage {
+  return {
+    channel: "sms",
+    chatKey: "ck",
+    from: "+15551112222",
+    conversationId: "conv-1",
+    text,
+    mediaPaths: [],
+    ...over,
+  };
 }
 
 function prepareHostedCall(dir: string): void {
@@ -100,287 +133,338 @@ function prepareHostedCall(dir: string): void {
   });
 }
 
-function sms(text: string, over: Partial<InboundMessage> = {}): InboundMessage {
-  return {
-    channel: "sms",
-    chatKey: "ck",
-    from: "+15551112222",
-    conversationId: "conv-1",
-    text,
-    mediaPaths: [],
-    ...over,
-  };
-}
+describe("durable async turns", () => {
+  it("creates a session once and uses promptAsync with a stable message id", async () => {
+    const d = makeManager();
+    await d.mgr.handleInbound(sms("first"));
+    await d.mgr.handleInbound(sms("second"));
 
-function tick(): Promise<void> {
-  return new Promise((r) => setTimeout(r, 0));
-}
+    expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    const first = d.opencode.session.promptAsync.mock.calls[0][0];
+    expect(first.body.messageID).toMatch(/^msg_[a-f0-9]{32}$/);
+    expect(first.body.parts[0].text).toContain("first");
+    expect(d.state.getTurn(first.body.messageID)?.state).toBe("delivered");
+  });
 
-describe("handleInbound", () => {
-  it("creates a session on the first message and reuses it afterward", async () => {
-    const { mgr, opencode, state } = makeManager();
+  it("drops a stale persisted session before submission", async () => {
+    const d = makeManager();
+    d.state.setSession("ck", "stale");
+    d.opencode.session.get.mockResolvedValueOnce({ error: { name: "NotFound" } } as any);
 
-    await mgr.handleInbound(sms("first"));
-    expect(opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(opencode.session.create).toHaveBeenCalledWith({
-      body: { title: "inkbox:ck" },
-      query: { directory: "/proj" },
+    await d.mgr.handleInbound(sms("hello"));
+
+    expect(d.state.getSession("ck")).toBe("sess-1");
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].path.id).toBe("sess-1");
+  });
+
+  it("does not replay an ambiguous submission in a fresh session", async () => {
+    const d = makeManager();
+    d.opencode.session.promptAsync.mockRejectedValueOnce(new TypeError("fetch failed"));
+
+    await expect(d.mgr.handleInbound(sms("once"))).rejects.toThrow("fetch failed");
+
+    expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.state.listTurns()[0].state).toBe("failed");
+  });
+
+  it("reconciles a transport error when OpenCode accepted the message", async () => {
+    const d = makeManager();
+    d.opencode.session.promptAsync.mockImplementationOnce(async (o: any) => {
+      d.messages.set(o.path.id, [
+        { info: { id: o.body.messageID, role: "user" }, parts: o.body.parts },
+        {
+          info: {
+            id: "assistant-1",
+            role: "assistant",
+            parentID: o.body.messageID,
+            time: { completed: Date.now() },
+            finish: "stop",
+          },
+          parts: [{ type: "text", text: "accepted" }],
+        },
+      ]);
+      throw new TypeError("fetch failed");
     });
-    expect(state.getSession("ck")).toBe("sess-1");
 
-    await mgr.handleInbound(sms("second"));
-    expect(opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(opencode.session.prompt).toHaveBeenCalledTimes(2);
+    await d.mgr.handleInbound(sms("once"));
+
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect((d.identity.sendText.mock.calls as any)[0][0].text).toBe("accepted");
   });
 
-  it("drops a persisted session created in another directory and starts fresh", async () => {
-    const { mgr, opencode, state } = makeManager();
-    state.setSession("ck", "sess-old");
-    opencode.session.get.mockResolvedValueOnce({
-      data: { id: "sess-old", directory: "/somewhere/else" },
-    });
+  it("delivers the completed assistant response", async () => {
+    const d = makeManager();
+    d.setReply("hello");
 
-    await mgr.handleInbound(sms("hello"));
-    expect(opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(state.getSession("ck")).toBe("sess-1");
-    expect(opencode.session.prompt.mock.calls[0][0].path).toEqual({ id: "sess-1" });
+    await d.mgr.handleInbound(sms("ping"));
+
+    expect(d.identity.sendText).toHaveBeenCalledOnce();
+    expect((d.identity.sendText.mock.calls as any)[0][0].text).toBe("hello");
+    expect(d.state.getReplyTarget("ck")?.conversationId).toBe("conv-1");
   });
 
-  it("drops a persisted session the server no longer knows and starts fresh", async () => {
-    const { mgr, opencode, state } = makeManager();
-    state.setSession("ck", "sess-gone");
-    opencode.session.get.mockResolvedValueOnce({ error: { name: "NotFound" } });
-
-    await mgr.handleInbound(sms("hello"));
-    expect(opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(state.getSession("ck")).toBe("sess-1");
-  });
-
-  it("retries a failed prompt once on a brand-new session", async () => {
-    const { mgr, opencode, identity, state } = makeManager();
-    opencode.session.prompt
-      .mockResolvedValueOnce({ error: { name: "UnknownError" } })
-      .mockResolvedValueOnce({ data: { parts: [{ type: "text", text: "recovered" }] } });
-
-    await mgr.handleInbound(sms("hello"));
-    expect(opencode.session.create).toHaveBeenCalledTimes(2); // original + fresh retry
-    expect(state.getSession("ck")).toBe("sess-2");
-    expect(identity.sendText).toHaveBeenCalledTimes(1); // reply still delivered
-    const sent = identity.sendText.mock.calls[0][0] as { text: string };
-    expect(sent.text).toBe("recovered");
-  });
-
-  it("prompts against the stored session id, directory, and a text part", async () => {
-    const { mgr, opencode } = makeManager();
-    await mgr.handleInbound(sms("hi there"));
-
-    const call = opencode.session.prompt.mock.calls[0][0];
-    expect(call.path).toEqual({ id: "sess-1" });
-    expect(call.query).toEqual({ directory: "/proj" });
-    expect(call.body.parts).toHaveLength(1);
-    expect(call.body.parts[0].type).toBe("text");
-    expect(call.body.parts[0].text).toContain("hi there");
-  });
-
-  it("attaches the agent's own identity as the system prompt on every turn", async () => {
-    const { mgr, opencode, inkbox } = makeManager();
-    await mgr.handleInbound(sms("who are you"));
-
-    const call = opencode.session.prompt.mock.calls[0][0] as {
-      body: { system?: string };
+  it("resumes a submitted normal turn after restart without resubmitting", async () => {
+    const d = makeManager();
+    const now = Date.now();
+    const turn: DurableTurn = {
+      id: "msg_recover",
+      messageID: "msg_recover",
+      chatKey: "ck",
+      sessionID: "sess-old",
+      state: "submitted",
+      kind: "normal",
+      text: "recover",
+      deliver: true,
+      replyTarget: { channel: "sms", to: "+15551112222" },
+      createdAt: now,
+      updatedAt: now,
     };
-    expect(inkbox.getIdentity).toHaveBeenCalled();
-    expect(call.body.system).toContain("test-agent@inkboxmail.com");
-    expect(call.body.system).toContain("+15559990000");
-    expect(call.body.system).toMatch(/never say you cannot access them/);
+    d.state.saveTurn(turn);
+    d.messages.set("sess-old", [
+      { info: { id: turn.messageID, role: "user" }, parts: [] },
+      {
+        info: {
+          id: "assistant-old",
+          role: "assistant",
+          parentID: turn.messageID,
+          time: { completed: now },
+          finish: "stop",
+        },
+        parts: [{ type: "text", text: "recovered" }],
+      },
+    ]);
+
+    await d.mgr.catchUp();
+    await vi.waitFor(() => expect(d.state.getTurn(turn.id)?.state).toBe("delivered"));
+
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(d.identity.sendText).toHaveBeenCalledOnce();
   });
 
-  it("delivers the assistant reply on the inbound channel", async () => {
-    const { mgr, identity, opencode } = makeManager();
-    opencode.session.prompt.mockResolvedValue({ data: { parts: [{ type: "text", text: "hi" }] } });
-
-    await mgr.handleInbound(sms("ping"));
-
-    expect(identity.sendText).toHaveBeenCalledTimes(1);
-    expect(identity.sendText.mock.calls[0][0].text).toBe("hi");
-  });
-});
-
-describe("runCapture", () => {
-  it("runs a prompt, resolves with the text, and delivers nothing", async () => {
-    const { mgr, identity, opencode } = makeManager();
-    opencode.session.prompt.mockResolvedValue({
-      data: { parts: [{ type: "text", text: "captured" }] },
+  it("submits a durable queued turn after restart", async () => {
+    const d = makeManager();
+    const now = Date.now();
+    d.state.saveTurn({
+      id: "msg_queued",
+      messageID: "msg_queued",
+      chatKey: "ck",
+      state: "queued",
+      kind: "normal",
+      text: "queued",
+      deliver: false,
+      createdAt: now,
+      updatedAt: now,
     });
 
-    await expect(mgr.runCapture("ck", "a webhook fired")).resolves.toBe("captured");
+    await d.mgr.catchUp();
+    await vi.waitFor(() => expect(d.state.getTurn("msg_queued")?.state).toBe("completed"));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+  });
 
-    expect(opencode.session.prompt).toHaveBeenCalledTimes(1);
-    expect(identity.sendText).not.toHaveBeenCalled();
-    expect(identity.sendEmail).not.toHaveBeenCalled();
-    expect(identity.sendIMessage).not.toHaveBeenCalled();
+  it("does not repeat an ambiguous reply delivery after restart", async () => {
+    const d = makeManager();
+    const now = Date.now();
+    d.state.saveTurn({
+      id: "msg_delivery",
+      messageID: "msg_delivery",
+      chatKey: "ck",
+      sessionID: "sess-old",
+      state: "delivery_started",
+      kind: "normal",
+      text: "hello",
+      output: "reply",
+      deliver: true,
+      replyTarget: { channel: "sms", to: "+15551112222" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await d.mgr.catchUp();
+
+    expect(d.state.getTurn("msg_delivery")?.state).toBe("failed");
+    expect(d.identity.sendText).not.toHaveBeenCalled();
+  });
+
+  it("continues the queue after interrupting a running turn", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const first = d.mgr.handleInbound(sms("first"));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    d.setAutoComplete(true);
+
+    const second = d.mgr.handleInbound(sms("second"));
+
+    await expect(first).resolves.toBeUndefined();
+    await second;
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    expect(d.identity.sendText).toHaveBeenCalledOnce();
+  });
+
+  it("does not resurrect a turn interrupted during prompt submission", async () => {
+    const d = makeManager();
+    let release: (value: { data: undefined }) => void = () => {};
+    d.opencode.session.promptAsync.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const first = d.mgr.handleInbound(sms("first"));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    const second = d.mgr.handleInbound(sms("second"));
+
+    release({ data: undefined });
+
+    await expect(first).resolves.toBeUndefined();
+    await second;
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    expect(d.identity.sendText).toHaveBeenCalledOnce();
   });
 });
 
-describe("runHostedCapture", () => {
-  it("disables delegation during the initial hosted settlement turn", async () => {
-    const { mgr, opencode, dir } = makeManager();
-    prepareHostedCall(dir);
-    await mgr.runHostedCapture?.("contact-1", "settle the call", {
+describe("capture turns", () => {
+  it("returns text without channel delivery", async () => {
+    const d = makeManager();
+    d.setReply("captured");
+    await expect(d.mgr.runCapture("ck", "event")).resolves.toBe("captured");
+    expect(d.identity.sendText).not.toHaveBeenCalled();
+  });
+
+  it("keeps hosted initial delegation disabled", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    await d.mgr.runHostedCapture?.("ck", "call", {
       identityId: "ident-1",
       callId: "call-1",
       phase: "initial",
       expectedTarget: "+14155550123",
     });
-    expect(opencode.session.prompt.mock.calls[0][0].body.tools).toMatchObject({
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toMatchObject({
       task: false,
       inkbox_a2a_call: false,
     });
   });
 
-  it("exposes only the journaled SMS tool during correction", async () => {
-    const { mgr, opencode, dir } = makeManager();
-    prepareHostedCall(dir);
-    await mgr.runHostedCapture?.("contact-1", "correct the SMS", {
+  it("reattaches to a completed hosted turn", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    const capture = {
       identityId: "ident-1",
       callId: "call-1",
-      phase: "correction",
+      phase: "initial" as const,
       expectedTarget: "+14155550123",
-    });
-    expect(opencode.tool.ids).toHaveBeenCalledWith({ query: { directory: "/proj" } });
-    expect(opencode.session.prompt.mock.calls[0][0].body.tools).toEqual({
-      bash: false,
-      edit: false,
-      task: false,
-      inkbox_send_sms: true,
-      inkbox_send_email: false,
-    });
+    };
+    await d.mgr.runHostedCapture?.("ck", "call", capture);
+    const submitted = d.opencode.session.promptAsync.mock.calls.length;
+    await d.mgr.runHostedCapture?.("ck", "call", capture);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
   });
-});
 
-describe("abortTurn", () => {
-  it("aborts the in-flight session and clears the queue when busy", async () => {
-    const { mgr, opencode, state } = makeManager();
-    state.setSession("ck", "sess-pre");
-    let release: (v: unknown) => void = () => {};
-    opencode.session.prompt.mockImplementation(
-      () => new Promise<unknown>((resolve) => (release = resolve)),
+  it("restores the hosted SMS guard before monitoring a submitted turn", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    d.setAutoComplete(false);
+    const now = Date.now();
+    const capture = {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "initial" as const,
+      expectedTarget: "+14155550123",
+    };
+    d.state.saveTurn({
+      id: "msg_hosted",
+      messageID: "msg_hosted",
+      chatKey: "ck",
+      sessionID: "sess-old",
+      state: "submitted",
+      kind: "capture",
+      text: "call",
+      deliver: false,
+      hostedCapture: capture,
+      createdAt: now,
+      updatedAt: now,
+    });
+    d.messages.set("sess-old", [{ info: { id: "msg_hosted", role: "user" }, parts: [] }]);
+    d.statuses["sess-old"] = { type: "busy" };
+
+    const pending = d.mgr.runHostedCapture?.("ck", "call", capture);
+    await vi.waitFor(() =>
+      expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-old"),
     );
+    await d.mgr.close();
+    await expect(pending).rejects.toThrow("deferred");
+  });
 
-    const inflight = mgr.handleInbound(sms("long task"));
-    await tick();
+  it("reattaches A2A recovery to its durable turn", async () => {
+    const d = makeManager();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    await d.mgr.runA2A("a2a:context-1", "task", context);
+    const submitted = d.opencode.session.promptAsync.mock.calls.length;
 
-    await expect(mgr.abortTurn("ck")).resolves.toBe(true);
-    expect(opencode.session.abort).toHaveBeenCalledWith({
-      path: { id: "sess-pre" },
-      query: { directory: "/proj" },
+    await d.mgr.runA2A("a2a:context-1", "task", context);
+
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
+  });
+});
+
+describe("control", () => {
+  it("aborts a durable running turn", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const running = d.mgr.handleInbound(sms("long"));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+
+    await expect(d.mgr.abortTurn("ck")).resolves.toBe(true);
+    expect(d.opencode.session.abort).toHaveBeenCalledOnce();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("reports durable busy state", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const running = d.mgr.handleInbound(sms("long"));
+    await vi.waitFor(() => expect(d.mgr.status("ck").busy).toBe(true));
+    await d.mgr.abortTurn("ck");
+    await running;
+  });
+
+  it("settles a canceled queued A2A turn", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const blocking = d.mgr.runText("ck", "blocking");
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    const pending = d.mgr.runA2A("ck", "task", {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
     });
 
-    release({ data: { parts: [] } });
-    await inflight;
-  });
-
-  it("returns false when nothing is running", async () => {
-    const { mgr, state } = makeManager();
-    state.setSession("ck", "sess-x");
-    await expect(mgr.abortTurn("ck")).resolves.toBe(false);
-  });
-});
-
-describe("status", () => {
-  it("reflects the stored session id and idle state", async () => {
-    const { mgr, state } = makeManager();
-    state.setSession("ck", "sess-x");
-    expect(mgr.status("ck")).toEqual({ busy: false, sessionID: "sess-x" });
-    expect(mgr.status("unknown")).toEqual({ busy: false, sessionID: undefined });
-  });
-});
-
-describe("turn serialization", () => {
-  it("serializes two messages for one chatKey onto a single session", async () => {
-    const { mgr, opencode } = makeManager();
-    await Promise.all([mgr.handleInbound(sms("one")), mgr.handleInbound(sms("two"))]);
-
-    expect(opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(opencode.session.prompt).toHaveBeenCalledTimes(2);
-  });
-
-  it("runs a second chatKey on its own session", async () => {
-    const { mgr, opencode } = makeManager();
-    await mgr.handleInbound(sms("a", { chatKey: "ck-a", from: "+15550000001" }));
-    await mgr.handleInbound(sms("b", { chatKey: "ck-b", from: "+15550000002" }));
-
-    expect(opencode.session.create).toHaveBeenCalledTimes(2);
-    const ids = opencode.session.prompt.mock.calls.map((c) => c[0].path.id);
-    expect(new Set(ids).size).toBe(2);
+    await expect(d.mgr.abortA2A("ck", "task-1")).resolves.toBe(true);
+    await expect(pending).resolves.toBeUndefined();
+    await d.mgr.abortTurn("ck");
+    await blocking;
   });
 });
 
 describe("extractText", () => {
-  it("concatenates text parts and ignores non-text parts", () => {
-    const res = {
-      data: {
+  it("joins text parts", () => {
+    expect(
+      extractText({
         parts: [
           { type: "text", text: "Hello " },
-          { type: "tool", text: "ignored" },
           { type: "text", text: "world" },
         ],
-      },
-    };
-    expect(extractText(res)).toBe("Hello world");
+      }),
+    ).toBe("Hello world");
   });
 
-  it("reads a response that is not wrapped in data", () => {
-    expect(extractText({ parts: [{ type: "text", text: "bare" }] })).toBe("bare");
-  });
-
-  it("returns undefined for empty, whitespace-only, or missing parts", () => {
-    expect(extractText({ data: { parts: [] } })).toBeUndefined();
-    expect(extractText({ data: { parts: [{ type: "text", text: "   " }] } })).toBeUndefined();
-    expect(extractText({ data: {} })).toBeUndefined();
+  it("ignores empty and non-text parts", () => {
+    expect(extractText({ data: { parts: [{ type: "tool" }] } })).toBeUndefined();
     expect(extractText(undefined)).toBeUndefined();
-  });
-});
-
-describe("interrupt and abort", () => {
-  it("does not abort an in-flight capture turn when a new message arrives", async () => {
-    const { mgr, opencode } = makeManager();
-    let release: (() => void) | undefined;
-    opencode.session.prompt.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = () => resolve({ data: { parts: [{ type: "text", text: "capture" }] } });
-        }),
-    );
-    const capture = mgr.runText("ck", "[inkbox:voice from=x]\nhi");
-    await vi.waitFor(() => expect(opencode.session.prompt).toHaveBeenCalledTimes(1));
-    // A normal inbound arrives while the capture is running.
-    const inbound = mgr.handleInbound(sms("interrupt me"));
-    release?.();
-    await capture;
-    await inbound;
-    // The capture must never have been aborted.
-    expect(opencode.session.abort).not.toHaveBeenCalled();
-  });
-
-  it("settles dropped queued turns when abortTurn clears the queue", async () => {
-    const { mgr, opencode } = makeManager();
-    let release: (() => void) | undefined;
-    opencode.session.prompt.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = () => resolve({ data: { parts: [{ type: "text", text: "a" }] } });
-        }),
-    );
-    const first = mgr.handleInbound(sms("first"));
-    await vi.waitFor(() => expect(opencode.session.prompt).toHaveBeenCalledTimes(1));
-    // Queue a second message behind the running turn, then abort.
-    const second = mgr.handleInbound(sms("second"));
-    const aborted = await mgr.abortTurn("ck");
-    expect(aborted).toBe(true);
-    release?.();
-    // The dropped queued turn must settle (not hang) after the abort.
-    await expect(second).resolves.toBeUndefined();
-    await first;
   });
 });

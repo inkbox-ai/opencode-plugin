@@ -16,14 +16,7 @@ import { createSessionManager } from "./sessions.js";
 import { createStateStore } from "./state.js";
 import { reconcileSubscriptions } from "./subscriptions.js";
 import { openTransport } from "./transport.js";
-import type {
-  Channel,
-  GatewayDeps,
-  GatewayHandle,
-  GatewayLogger,
-  ReplyTarget,
-  VerifiedEvent,
-} from "./types.js";
+import type { Channel, GatewayDeps, GatewayHandle, GatewayLogger, VerifiedEvent } from "./types.js";
 import { createCallBridge } from "./voice/bridge.js";
 
 export interface StartGatewayOptions {
@@ -85,10 +78,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     logger,
   });
 
-  // Last delivery target per human, so escalation questions reach them on the
-  // channel they last used.
-  const lastTarget = new Map<string, ReplyTarget>();
-
   // Voice turns run directly (runText → spoken reply), so the call bridge
   // uses the raw session manager, not the text-channel command/pending facade.
   const callBridge = g.voice.enabled
@@ -135,8 +124,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   try {
     await reconcileSubscriptions(deps, transport.publicUrl);
-    await a2a.catchUp();
-    await hostedCalls.catchUp();
   } catch (err) {
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
@@ -150,10 +137,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     logger,
     timeoutMs: g.permissionTimeoutS * 1000,
     directory: opts.directory,
+    state,
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
       async ask(chatKey, prompt) {
-        const target = lastTarget.get(chatKey);
+        const target = state.getReplyTarget(chatKey);
         if (target) {
           await deliverReply(opts.inkbox, target, prompt, logger).catch(() => {});
         }
@@ -163,6 +151,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   });
 
   const events = subscribeEvents(opts.opencode, escalation, logger, opts.directory);
+  void sessions
+    .catchUp()
+    .catch((error) => logger.error("sessions.catch_up_failed", { error: String(error) }));
+  void escalation
+    .catchUp()
+    .catch((error) => logger.error("escalation.catch_up_failed", { error: String(error) }));
+  void a2a
+    .catchUp()
+    .catch((error) => logger.error("a2a.catch_up_failed", { error: String(error) }));
+  void hostedCalls
+    .catchUp()
+    .catch((error) => logger.error("hosted_call.catch_up_failed", { error: String(error) }));
 
   // Fragment batching for phone channels, when a quiet window is configured.
   const bursts =
@@ -219,7 +219,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const resumeCandidates = new Map<string, string[]>();
 
   async function say(chatKey: string, text: string): Promise<void> {
-    const target = lastTarget.get(chatKey);
+    const target = state.getReplyTarget(chatKey);
     if (target) await deliverReply(opts.inkbox, target, text, logger).catch(() => {});
   }
 
@@ -230,7 +230,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     return {
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage) => {
-        lastTarget.set(msg.chatKey, {
+        state.setReplyTarget(msg.chatKey, {
           channel: msg.channel,
           to: msg.from,
           conversationId: msg.conversationId,

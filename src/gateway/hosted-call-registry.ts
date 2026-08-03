@@ -33,6 +33,7 @@ export interface HostedCallEntry {
     phase: "initial" | "correction";
     expectedTarget: string;
     ownerPid: number;
+    ownerId?: string;
     startedAt: number;
   };
   smsAttempts: HostedSmsAttempt[];
@@ -222,6 +223,7 @@ export function activateHostedSmsCapture(params: {
   sessionID: string;
   phase: "initial" | "correction";
   expectedTarget: string;
+  ownerId?: string;
 }): void {
   withRegistryMutation((registry) => {
     const key = hostedCallKey(params.identityId, params.callId);
@@ -232,16 +234,18 @@ export function activateHostedSmsCapture(params: {
       phase: params.phase,
       expectedTarget: params.expectedTarget,
       ownerPid: process.pid,
+      ownerId: params.ownerId,
       startedAt: Date.now(),
     };
     entry.updatedAt = Date.now();
   });
 }
 
-export function clearHostedSmsCapture(identityId: string, callId: string): void {
+export function clearHostedSmsCapture(identityId: string, callId: string, ownerId?: string): void {
   withRegistryMutation((registry) => {
     const entry = registry[hostedCallKey(identityId, callId)];
     if (!entry) return;
+    if (ownerId && entry.active?.ownerId && entry.active.ownerId !== ownerId) return;
     delete entry.active;
     entry.updatedAt = Date.now();
   });
