@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
@@ -53,6 +53,16 @@ const ACTIVE = new Set(["queued", "submitting", "submitted", "delivery_started"]
 const INTERRUPTIBLE = ["queued", "submitting", "submitted"] as const;
 const POLL_MS = 250;
 const LEASE_MS = 60_000;
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let lastMessageSequence = 0n;
+
+function createMessageID(): string {
+  const current = BigInt(Date.now()) * 0x1000n + 1n;
+  lastMessageSequence = current > lastMessageSequence ? current : lastMessageSequence + 1n;
+  const timestamp = (lastMessageSequence & 0xffffffffffffn).toString(16).padStart(12, "0");
+  const random = [...randomBytes(14)].map((byte) => BASE62[byte % BASE62.length]).join("");
+  return `msg_${timestamp}${random}`;
+}
 
 export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const keys = new Map<string, PerKey>();
@@ -458,7 +468,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     replyTarget?: ReplyTarget,
     extra: Partial<DurableTurn> = {},
   ): DurableTurn {
-    const id = `msg_${randomUUID().replaceAll("-", "")}`;
+    const id = createMessageID();
     const now = Date.now();
     return {
       id,

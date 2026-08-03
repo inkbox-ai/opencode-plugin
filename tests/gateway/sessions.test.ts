@@ -142,7 +142,9 @@ describe("durable async turns", () => {
     expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
     const first = d.opencode.session.promptAsync.mock.calls[0][0];
-    expect(first.body.messageID).toMatch(/^msg_[a-f0-9]{32}$/);
+    const second = d.opencode.session.promptAsync.mock.calls[1][0];
+    expect(first.body.messageID).toMatch(/^msg_[a-f0-9]{12}[0-9A-Za-z]{14}$/);
+    expect(first.body.messageID < second.body.messageID).toBe(true);
     expect(first.body.parts[0].text).toContain("first");
     expect(d.state.getTurn(first.body.messageID)?.state).toBe("delivered");
   });
