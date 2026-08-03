@@ -1,13 +1,25 @@
 // Permission escalation: reply parsing, session ownership gating, response
 // relay, timeout fallback, and per-permission in-flight dedupe.
-import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EscalationDeps, PendingPermission } from "../../src/gateway/escalation.js";
 import { createEscalationBridge, parsePermissionReply } from "../../src/gateway/escalation.js";
+import { createStateStore } from "../../src/gateway/state.js";
+
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 function makeDeps(over: Partial<EscalationDeps> = {}): EscalationDeps & {
   opencode: { postSessionIdPermissionsPermissionId: ReturnType<typeof vi.fn> };
 } {
   const opencode = { postSessionIdPermissionsPermissionId: vi.fn(async () => ({})) };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-escalation-"));
+  dirs.push(dir);
   return {
     opencode: opencode as never,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -15,6 +27,7 @@ function makeDeps(over: Partial<EscalationDeps> = {}): EscalationDeps & {
     chatKeyForSession: vi.fn(() => "ck"),
     timeoutMs: 0,
     directory: "/proj",
+    state: createStateStore(dir),
     ...over,
   } as never;
 }
@@ -98,5 +111,72 @@ describe("handlePermission", () => {
     release("1");
     await Promise.all([first, second]);
     expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a persisted permission after restart", async () => {
+    const deps = makeDeps({ relay: { ask: vi.fn(async () => "1") }, timeoutMs: 60_000 });
+    deps.state.savePermission({
+      permissionID: perm.permissionID,
+      sessionID: perm.sessionID,
+      chatKey: "ck",
+      title: perm.title,
+      deadline: Date.now() + 60_000,
+      state: "relayed",
+    });
+
+    await createEscalationBridge(deps).catchUp();
+
+    expect(deps.relay.ask).toHaveBeenCalledOnce();
+    expect(deps.state.listPermissions()).toEqual([]);
+  });
+
+  it("retains a permission when the response fails", async () => {
+    const deps = makeDeps();
+    deps.opencode.postSessionIdPermissionsPermissionId.mockResolvedValueOnce({
+      error: { name: "Unavailable" },
+    });
+
+    await createEscalationBridge(deps).handlePermission(perm);
+
+    expect(deps.state.listPermissions()).toHaveLength(1);
+  });
+
+  it("rejects an expired permission without relaying it again", async () => {
+    const deps = makeDeps({ timeoutMs: 60_000 });
+    deps.state.savePermission({
+      permissionID: perm.permissionID,
+      sessionID: perm.sessionID,
+      chatKey: "ck",
+      title: perm.title,
+      deadline: Date.now() - 1,
+      state: "relayed",
+    });
+
+    await createEscalationBridge(deps).catchUp();
+
+    expect(deps.relay.ask).not.toHaveBeenCalled();
+    expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledWith(
+      expect.objectContaining({ body: { response: "reject" } }),
+    );
+  });
+
+  it("retries a persisted response without prompting again", async () => {
+    const deps = makeDeps({ timeoutMs: 60_000 });
+    deps.state.savePermission({
+      permissionID: perm.permissionID,
+      sessionID: perm.sessionID,
+      chatKey: "ck",
+      title: perm.title,
+      deadline: Date.now() + 60_000,
+      state: "responding",
+      response: "always",
+    });
+
+    await createEscalationBridge(deps).catchUp();
+
+    expect(deps.relay.ask).not.toHaveBeenCalled();
+    expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledWith(
+      expect.objectContaining({ body: { response: "always" } }),
+    );
   });
 });

@@ -11,9 +11,6 @@ import {
 import { frameCapture } from "./prompts.js";
 import { type GatewayLogger, HostedCaptureDeferredError, type SessionManager } from "./types.js";
 
-const running = new Set<string>();
-let chain: Promise<void> = Promise.resolve();
-
 const POST_CALL_TIMING = String.raw`(?:after|when|once)\s+(?:(?:i|we|you)\s+hang\s*up|(?:this|the)\s+call\s+(?:ends?|is\s+over))`;
 const TEXT_VERB = String.raw`text\s+me\b`;
 const SEND_SMS = String.raw`(?:send\s+me\b.{0,80}\b(?:an?\s+)?(?:sms|text(?:\s+message)?)\b|send\b.{0,80}\b(?:sms|text(?:\s+message)?)\b.{0,40}\bto\s+me\b)`;
@@ -89,7 +86,10 @@ function decision(
   return { outcome: "terminal", reason: attempt.errorKind ?? "ambiguous_tool_outcome" };
 }
 
-function recovery(entry: HostedCallEntry): "initial" | "correction" | "complete" | "terminal" {
+function recovery(
+  entry: HostedCallEntry,
+  durableState?: "pending" | "completed",
+): "initial" | "correction" | "complete" | "terminal" {
   if (entry.smsAttempts.some((attempt) => attempt.targetMatches && attempt.state === "success"))
     return "complete";
   if (entry.retryable && entry.outcome === "initial_deferred_for_shutdown") return "initial";
@@ -98,8 +98,8 @@ function recovery(entry: HostedCallEntry): "initial" | "correction" | "complete"
     return "initial";
   if (entry.retryable && entry.outcome === "correction_pre_dispatch_retries_exhausted")
     return "correction";
-  if (entry.outcome === "initial_dispatch_started" || entry.outcome === "correction_started")
-    return "terminal";
+  if (entry.outcome === "initial_dispatch_started") return durableState ? "initial" : "terminal";
+  if (entry.outcome === "correction_started") return durableState ? "correction" : "terminal";
   if (entry.smsAttempts.length === 0) return "initial";
   const only = entry.smsAttempts[0];
   if (
@@ -114,6 +114,8 @@ function recovery(entry: HostedCallEntry): "initial" | "correction" | "complete"
 }
 
 export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
+  const running = new Set<string>();
+  let chain: Promise<void> = Promise.resolve();
   async function run(
     identityId: string,
     event: CallEndedWebhookPayload,
@@ -438,7 +440,11 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
         schedule(identity.id, event);
         return;
       }
-      const phase = recovery(existing);
+      const startedPhase = existing.outcome === "correction_started" ? "correction" : "initial";
+      const phase = recovery(
+        existing,
+        deps.sessions.hostedCaptureState?.(identity.id, event.data.call.id, startedPhase),
+      );
       if (phase === "complete") {
         saveHostedCall({
           ...existing,
@@ -462,7 +468,11 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
     async catchUp(): Promise<void> {
       const identity = await deps.inkbox.getIdentity();
       for (const entry of listRecoverableHostedCalls(identity.id)) {
-        const phase = recovery(entry);
+        const startedPhase = entry.outcome === "correction_started" ? "correction" : "initial";
+        const phase = recovery(
+          entry,
+          deps.sessions.hostedCaptureState?.(identity.id, entry.callId, startedPhase),
+        );
         if (phase === "complete") {
           saveHostedCall({
             ...entry,

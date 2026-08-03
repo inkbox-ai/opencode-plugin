@@ -33,6 +33,7 @@ export interface HostedCallEntry {
     phase: "initial" | "correction";
     expectedTarget: string;
     ownerPid: number;
+    ownerId?: string;
     startedAt: number;
   };
   smsAttempts: HostedSmsAttempt[];
@@ -209,6 +210,7 @@ export function saveHostedCall(
     const replayable = entry.state === "queued" || entry.state === "running" || entry.retryable;
     registry[key] = {
       ...entry,
+      active: entry.active ?? existing?.active,
       event: replayable ? replayEvent(entry.event) : receiptEvent(entry.event),
       smsAttempts: entry.smsAttempts ?? existing?.smsAttempts ?? [],
       updatedAt: Date.now(),
@@ -222,6 +224,7 @@ export function activateHostedSmsCapture(params: {
   sessionID: string;
   phase: "initial" | "correction";
   expectedTarget: string;
+  ownerId?: string;
 }): void {
   withRegistryMutation((registry) => {
     const key = hostedCallKey(params.identityId, params.callId);
@@ -232,16 +235,18 @@ export function activateHostedSmsCapture(params: {
       phase: params.phase,
       expectedTarget: params.expectedTarget,
       ownerPid: process.pid,
+      ownerId: params.ownerId,
       startedAt: Date.now(),
     };
     entry.updatedAt = Date.now();
   });
 }
 
-export function clearHostedSmsCapture(identityId: string, callId: string): void {
+export function clearHostedSmsCapture(identityId: string, callId: string, ownerId?: string): void {
   withRegistryMutation((registry) => {
     const entry = registry[hostedCallKey(identityId, callId)];
     if (!entry) return;
+    if (ownerId && entry.active?.ownerId && entry.active.ownerId !== ownerId) return;
     delete entry.active;
     entry.updatedAt = Date.now();
   });
@@ -260,10 +265,7 @@ function phoneDigits(value: string): string {
 
 function activeHostedEntry(registry: Registry, sessionID: string): HostedCallEntry | undefined {
   const matches = Object.values(registry).filter(
-    (entry) =>
-      entry.state === "running" &&
-      entry.active?.sessionID === sessionID &&
-      !activeCaptureIsExpired(entry),
+    (entry) => entry.active?.sessionID === sessionID && !activeCaptureIsExpired(entry),
   );
   if (matches.length > 1) {
     throw new Error("Blocked side effect because the hosted-call capture is ambiguous.");
@@ -308,10 +310,7 @@ export function assertHostedCallTarget(sessionID: string, target: string): boole
 export function assertHostedToolAllowed(sessionID: string, toolName: string): void {
   const registry = read();
   const matches = Object.values(registry).filter(
-    (entry) =>
-      entry.state === "running" &&
-      entry.active?.sessionID === sessionID &&
-      !activeCaptureIsExpired(entry),
+    (entry) => entry.active?.sessionID === sessionID && !activeCaptureIsExpired(entry),
   );
   if (matches.length > 1) {
     throw new Error("Blocked tool call because the hosted-call capture is ambiguous.");

@@ -123,13 +123,20 @@ export interface SessionManager {
       expectedTarget: string;
     },
   ): Promise<{ output?: string; attempt?: HostedSmsAttempt }>;
+  hostedCaptureState?(
+    identityId: string,
+    callId: string,
+    phase: "initial" | "correction",
+  ): "pending" | "completed" | undefined;
   runA2A(chatKey: string, framedText: string, context: ActiveA2ATurn): Promise<string | undefined>;
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
   resetSession(chatKey: string): Promise<void>;
   abortTurn(chatKey: string): Promise<boolean>;
   status(chatKey: string): { busy: boolean; sessionID?: string };
-  // Stop accepting work and wait for in-flight turns.
+  // Resume durable accepted work after a gateway restart.
+  catchUp(): Promise<void>;
+  // Stop accepting work without aborting durable accepted turns.
   close(): Promise<void>;
 }
 

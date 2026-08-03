@@ -43,6 +43,7 @@ function makeDeps(over: Partial<DispatchDeps> = {}): DispatchDeps {
       resetSession: vi.fn(async () => {}),
       abortTurn: vi.fn(async () => false),
       status: vi.fn(() => ({ busy: false })),
+      catchUp: vi.fn(async () => {}),
       close: vi.fn(async () => {}),
     },
     notify: createNotifyOnce(),

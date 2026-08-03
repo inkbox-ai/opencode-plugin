@@ -67,6 +67,27 @@ afterEach(() => {
 });
 
 describe("hosted SMS durable guard", () => {
+  it("preserves the active guard across journal state updates", () => {
+    saveHostedCall({
+      identityId: "ident-1",
+      callId: "call-1",
+      eventId: "evt-1",
+      state: "failed",
+      outcome: "initial_deferred_for_shutdown",
+      retryable: true,
+      event: event(),
+    });
+
+    expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("session-1");
+    expect(
+      beginHostedSmsAttempt({
+        sessionID: "session-1",
+        target: "+14155550123",
+        hasConversationId: false,
+      }),
+    ).toBeDefined();
+  });
+
   it("fails closed on corrupt or non-object journal contents", () => {
     const file = path.join(dir, "hosted-call-completions.json");
     fs.writeFileSync(file, "{not-json", { mode: 0o600 });

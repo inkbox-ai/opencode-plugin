@@ -10,11 +10,11 @@
 import { createServer } from "node:http";
 
 const PORT = Number(process.argv[2] ?? 8088);
-const NONCE = /smoke-[0-9a-f]{6,}/;
+const NONCE = /smoke-[0-9a-f]{6,}/g;
 
 function replyText(req) {
-  const m = JSON.stringify(req).match(NONCE);
-  return `REPLY_OK ${m ? m[0] : "no-nonce"} — automated reachability reply from the agent.`;
+  const nonce = JSON.stringify(req).match(NONCE)?.at(-1);
+  return `REPLY_OK ${nonce ?? "no-nonce"} — automated reachability reply from the agent.`;
 }
 
 function sendJson(res, code, obj) {

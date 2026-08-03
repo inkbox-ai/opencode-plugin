@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
@@ -14,7 +15,7 @@ import {
 } from "./hosted-call-registry.js";
 import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
 import { deliverReply } from "./reply.js";
-import type { StateStore } from "./state.js";
+import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
 import type {
   GatewayLogger,
   InboundMessage,
@@ -24,37 +25,18 @@ import type {
 } from "./types.js";
 import { HostedCaptureDeferredError } from "./types.js";
 
-interface QueuedTurn {
-  kind: TurnKind;
-  text: string;
-  deliver: boolean;
-  // Per-contact/per-channel opencode agent override for this turn.
-  agent?: string;
-  replyTarget?: ReplyTarget;
-  a2aContext?: ActiveA2ATurn;
-  hostedCapture?: {
-    identityId: string;
-    callId: string;
-    phase: "initial" | "correction";
-    expectedTarget: string;
-  };
+interface TurnWaiter {
+  resolve: (out: string | undefined) => void;
+  reject: (err: unknown) => void;
   hostedResolve?: (result: {
     output?: string;
     attempt?: import("./hosted-call-registry.js").HostedSmsAttempt;
   }) => void;
-  resolve: (out: string | undefined) => void;
-  reject: (err: unknown) => void;
 }
 
 interface PerKey {
-  queue: QueuedTurn[];
-  running: boolean;
-  // Kind of the turn currently executing, or undefined when idle. Only a
-  // "normal" turn may be interrupted; captures always run to completion.
-  runningKind?: TurnKind;
-  // Set to interrupt the in-flight normal turn so its partial output is dropped.
-  interruptNormal: boolean;
-  runningA2ATaskId?: string;
+  queue: string[];
+  runningId?: string;
 }
 
 export interface SessionManagerDeps {
@@ -66,15 +48,28 @@ export interface SessionManagerDeps {
   directory: string;
 }
 
-// One serialized turn queue per human (chatKey). A new inbound message while
-// a normal turn is in flight interrupts it (the partial is dropped) and
-// prompts fresh; capture turns always run to completion.
+const TERMINAL = new Set(["delivered", "failed", "interrupted"]);
+const ACTIVE = new Set(["queued", "submitting", "submitted", "delivery_started"]);
+const INTERRUPTIBLE = ["queued", "submitting", "submitted"] as const;
+const POLL_MS = 250;
+const LEASE_MS = 60_000;
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let lastMessageSequence = 0n;
+
+function createMessageID(): string {
+  const current = BigInt(Date.now()) * 0x1000n + 1n;
+  lastMessageSequence = current > lastMessageSequence ? current : lastMessageSequence + 1n;
+  const timestamp = (lastMessageSequence & 0xffffffffffffn).toString(16).padStart(12, "0");
+  const random = [...randomBytes(14)].map((byte) => BASE62[byte % BASE62.length]).join("");
+  return `msg_${timestamp}${random}`;
+}
+
 export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const keys = new Map<string, PerKey>();
+  const waiters = new Map<string, TurnWaiter[]>();
+  const ownerId = randomUUID();
   let closing = false;
 
-  // The agent's own-identity system message, resolved once (lazily) and
-  // attached to every turn so the model always knows its own addresses.
   let identitySystemCache: string | undefined;
   let identityResolved = false;
   async function identitySystem(): Promise<string | undefined> {
@@ -89,7 +84,6 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         imessageEnabled: (id as { imessageEnabled?: boolean }).imessageEnabled,
       });
     } catch (err) {
-      // A resolution failure must not block turns; retry on the next turn.
       identityResolved = false;
       deps.logger.warn("gateway.identity_unresolved", { error: String(err) });
     }
@@ -99,15 +93,33 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   function per(chatKey: string): PerKey {
     let entry = keys.get(chatKey);
     if (!entry) {
-      entry = { queue: [], running: false, interruptNormal: false };
+      entry = { queue: [] };
       keys.set(chatKey, entry);
     }
     return entry;
   }
 
-  // A persisted session can rot: deleted server-side, or created against a
-  // different (possibly deleted) project directory in an earlier deployment.
-  // Prompting such a session 500s, so validate before reuse.
+  function addWaiter(id: string, waiter: TurnWaiter): void {
+    waiters.set(id, [...(waiters.get(id) ?? []), waiter]);
+  }
+
+  function settle(id: string, output: string | undefined, error?: unknown): void {
+    const pending = waiters.get(id) ?? [];
+    waiters.delete(id);
+    for (const waiter of pending) {
+      if (error) waiter.reject(error);
+      else if (waiter.hostedResolve) {
+        const turn = deps.state.getTurn(id);
+        const capture = turn?.hostedCapture;
+        const entry = capture ? getHostedCall(capture.identityId, capture.callId) : undefined;
+        waiter.hostedResolve({
+          output,
+          attempt: entry?.smsAttempts.find((attempt) => attempt.phase === capture?.phase),
+        });
+      } else waiter.resolve(output);
+    }
+  }
+
   async function sessionUsable(id: string): Promise<boolean> {
     try {
       const res = await deps.opencode.session.get({
@@ -145,352 +157,566 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return id;
   }
 
-  async function runPrompt(
-    sessionID: string,
-    text: string,
-    agentOverride?: string,
-    hostedPhase?: "initial" | "correction",
-  ): Promise<string | undefined> {
+  async function promptBody(turn: DurableTurn): Promise<Record<string, unknown>> {
     const g = deps.config.gateway;
-    const agent = agentOverride ?? g.agent;
+    const agent = turn.agent ?? g.agent;
     const system = await identitySystem();
-    let hostedTools: Record<string, boolean> | undefined;
-    if (hostedPhase === "initial") {
-      // A delegated task runs under another session id and would escape the
-      // durable SMS guard. Keep the initial turn otherwise fully capable of
-      // completing its non-SMS commitments.
-      hostedTools = { task: false, inkbox_a2a_call: false };
-    } else if (hostedPhase === "correction") {
+    let tools: Record<string, boolean> | undefined;
+    if (turn.hostedCapture?.phase === "initial") {
+      tools = { task: false, inkbox_a2a_call: false };
+    } else if (turn.hostedCapture?.phase === "correction") {
       const listed = await deps.opencode.tool.ids({ query: { directory: deps.directory } });
       const ids = (listed as any)?.data ?? listed;
-      if (!Array.isArray(ids)) {
-        throw new Error("Could not restrict the hosted correction turn to the SMS tool.");
-      }
-      hostedTools = Object.fromEntries(ids.map((id) => [String(id), false]));
-      hostedTools.inkbox_send_sms = true;
+      if (!Array.isArray(ids)) throw new Error("Could not restrict the hosted correction turn.");
+      tools = Object.fromEntries(ids.map((id) => [String(id), false]));
+      tools.inkbox_send_sms = true;
     }
-    const res = await deps.opencode.session.prompt({
+    return {
+      messageID: turn.messageID,
+      ...(agent ? { agent } : {}),
+      ...(system ? { system } : {}),
+      ...(tools ? { tools } : {}),
+      ...(g.model?.includes("/")
+        ? {
+            model: {
+              providerID: g.model.split("/")[0],
+              modelID: g.model.split("/").slice(1).join("/"),
+            },
+          }
+        : {}),
+      parts: [{ type: "text", text: turn.text }],
+    };
+  }
+
+  async function listMessages(sessionID: string): Promise<any[]> {
+    const res = await deps.opencode.session.messages({
       path: { id: sessionID },
       query: { directory: deps.directory },
-      body: {
-        ...(agent ? { agent } : {}),
-        ...(system ? { system } : {}),
-        ...(hostedTools ? { tools: hostedTools } : {}),
-        ...(g.model?.includes("/")
-          ? {
-              model: {
-                providerID: g.model.split("/")[0],
-                modelID: g.model.split("/").slice(1).join("/"),
-              },
-            }
-          : {}),
-        parts: [{ type: "text", text }],
-      },
     });
-    // The generated client reports failures via res.error instead of throwing;
-    // treating that as an empty reply would silently swallow the turn.
     const err = (res as any)?.error;
-    if (err) throw new Error(`session.prompt failed: ${JSON.stringify(err).slice(0, 300)}`);
-    return extractText(res);
+    if (err) throw new Error(`session.messages failed: ${JSON.stringify(err).slice(0, 300)}`);
+    const messages = (res as any)?.data ?? res;
+    return Array.isArray(messages) ? messages : [];
+  }
+
+  async function wasAccepted(turn: DurableTurn): Promise<boolean> {
+    if (!turn.sessionID) return false;
+    return (await listMessages(turn.sessionID)).some(
+      (message) => message?.info?.id === turn.messageID,
+    );
+  }
+
+  async function submit(turn: DurableTurn): Promise<DurableTurn> {
+    const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey));
+    const next = deps.state.transitionTurn(turn.id, ["queued"], {
+      state: "submitting",
+      sessionID,
+    });
+    if (!next) {
+      const current = deps.state.getTurn(turn.id);
+      if (current?.state === "interrupted") return current;
+      throw new Error("Durable turn changed before submission.");
+    }
+    if (next.a2aContext) setActiveA2ATurn(sessionID, next.a2aContext);
+    if (next.hostedCapture) {
+      activateHostedSmsCapture({ ...next.hostedCapture, sessionID, ownerId });
+    }
+    try {
+      const res = await deps.opencode.session.promptAsync({
+        path: { id: sessionID },
+        query: { directory: deps.directory },
+        body: (await promptBody(next)) as never,
+      });
+      const err = (res as any)?.error;
+      if (err) throw new Error(`session.promptAsync failed: ${JSON.stringify(err).slice(0, 300)}`);
+      const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
+        state: "submitted",
+      });
+      if (submitted) return submitted;
+      const current = deps.state.getTurn(turn.id);
+      if (current?.state === "interrupted") return current;
+      throw new Error("Durable turn changed during submission.");
+    } catch (err) {
+      if (await wasAccepted(next).catch(() => false)) {
+        deps.logger.warn("turn.submit_outcome_reconciled", { chatKey: next.chatKey });
+        const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
+          state: "submitted",
+        });
+        if (submitted) return submitted;
+        const current = deps.state.getTurn(turn.id);
+        if (current?.state === "interrupted") return current;
+        throw new Error("Durable turn changed during submission reconciliation.");
+      }
+      deps.state.transitionTurn(turn.id, ["submitting"], {
+        state: "failed",
+        error: String(err),
+      });
+      throw err;
+    }
+  }
+
+  async function completion(turn: DurableTurn): Promise<string | undefined> {
+    if (!turn.sessionID) throw new Error("Submitted turn has no session id.");
+    while (!closing) {
+      if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS)) {
+        throw new Error("Durable turn lease was lost.");
+      }
+      if (deps.state.getTurn(turn.id)?.state === "interrupted") return undefined;
+      const messages = await listMessages(turn.sessionID);
+      const userIndex = messages.findIndex((message) => message?.info?.id === turn.messageID);
+      if (userIndex < 0) {
+        if (turn.state === "submitting") throw new Error("Prompt acceptance is ambiguous.");
+        await delay(POLL_MS);
+        continue;
+      }
+      const statusRes = await deps.opencode.session.status({
+        query: { directory: deps.directory },
+      });
+      const statuses = (statusRes as any)?.data ?? statusRes;
+      if (statuses?.[turn.sessionID]?.type === "busy") {
+        await delay(POLL_MS);
+        continue;
+      }
+      const assistants = messages
+        .slice(userIndex + 1)
+        .filter(
+          (message) =>
+            message?.info?.role === "assistant" && message.info.parentID === turn.messageID,
+        );
+      const last = assistants.at(-1);
+      if (last?.info?.error) {
+        throw new Error(`OpenCode turn failed: ${JSON.stringify(last.info.error).slice(0, 300)}`);
+      }
+      if (last?.info?.time?.completed || last?.info?.finish) return extractText(last);
+      await delay(POLL_MS);
+    }
+    throw new HostedCaptureDeferredError();
+  }
+
+  async function finish(turn: DurableTurn, output: string | undefined): Promise<void> {
+    if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS)) {
+      throw new Error("Durable turn lease was lost.");
+    }
+    if (deps.state.getTurn(turn.id)?.state === "interrupted") {
+      settle(turn.id, undefined);
+      return;
+    }
+    let current = turn;
+    if (turn.state !== "completed") {
+      const completed = deps.state.transitionTurn(turn.id, ["submitted"], {
+        state: "completed",
+        output,
+      });
+      if (!completed) {
+        const latest = deps.state.getTurn(turn.id);
+        if (latest?.state === "interrupted") {
+          settle(turn.id, undefined);
+          return;
+        }
+        throw new Error("Durable turn changed before completion.");
+      }
+      current = completed;
+    }
+    if (current.deliver && current.replyTarget && output !== undefined) {
+      deps.state.updateTurn(current.id, { state: "delivery_started" });
+      try {
+        const sent = await deliverReply(deps.inkbox, current.replyTarget, output, deps.logger);
+        deps.state.updateTurn(current.id, {
+          state: "delivered",
+          deliveryMessageId: sent.messageId,
+        });
+      } catch (err) {
+        deps.state.updateTurn(current.id, { state: "failed", error: String(err) });
+        deps.logger.error("reply.failed", { chatKey: current.chatKey, error: String(err) });
+        const recovery = deliveryFailureRecovery({
+          key: deliveryFailureKey(
+            current.replyTarget.channel,
+            current.replyTarget.to,
+            current.replyTarget.conversationId,
+          ),
+          channel: current.replyTarget.channel,
+          target: current.replyTarget.to,
+          failure: err,
+          failedBody: output,
+        });
+        if (recovery.prompt)
+          enqueue(makeTurn(current.chatKey, "normal", recovery.prompt, true, current.replyTarget));
+      }
+    }
+    settle(current.id, output);
+  }
+
+  async function process(id: string): Promise<void> {
+    let turn = deps.state.claimTurn(id, ownerId, LEASE_MS);
+    if (!turn) {
+      const current = deps.state.getTurn(id);
+      if (current && ACTIVE.has(current.state) && !closing) {
+        const wait = Math.max(POLL_MS, (current.leaseUntil ?? Date.now()) - Date.now() + POLL_MS);
+        const timer = setTimeout(() => enqueue(current), wait);
+        timer.unref?.();
+      }
+      return;
+    }
+    if (TERMINAL.has(turn.state)) return;
+    try {
+      if (turn.state === "queued") turn = await submit(turn);
+      else if (turn.state === "submitting") {
+        if (!(await wasAccepted(turn))) throw new Error("Prompt submission outcome is ambiguous.");
+        turn =
+          deps.state.transitionTurn(id, ["submitting"], { state: "submitted" }) ??
+          deps.state.getTurn(id) ??
+          turn;
+      }
+      if (turn.state === "submitted" && turn.sessionID) {
+        if (turn.a2aContext) setActiveA2ATurn(turn.sessionID, turn.a2aContext);
+        if (turn.hostedCapture) {
+          activateHostedSmsCapture({
+            ...turn.hostedCapture,
+            sessionID: turn.sessionID,
+            ownerId,
+          });
+        }
+      }
+      if (turn.state === "interrupted") {
+        settle(id, undefined);
+        return;
+      }
+      if (turn.state === "submitted") await finish(turn, await completion(turn));
+      else if (turn.state === "completed") await finish(turn, turn.output);
+      else if (turn.state === "delivery_started") {
+        deps.state.updateTurn(id, {
+          state: "failed",
+          error: "Reply delivery outcome is ambiguous after restart.",
+        });
+      }
+    } catch (err) {
+      const latest = deps.state.getTurn(id);
+      const leaseLost = String(err).includes("Durable turn lease was lost");
+      if (!closing && !leaseLost && latest && !TERMINAL.has(latest.state)) {
+        deps.state.updateTurn(id, { state: "failed", error: String(err) });
+      }
+      deps.logger.error("turn.failed", { chatKey: turn.chatKey, error: String(err) });
+      if (!(leaseLost && turn.hostedCapture)) settle(id, undefined, err);
+    } finally {
+      if (turn.hostedCapture) {
+        try {
+          const latest = deps.state.getTurn(turn.id);
+          if (!(closing && latest && ACTIVE.has(latest.state))) {
+            clearHostedSmsCapture(
+              turn.hostedCapture.identityId,
+              turn.hostedCapture.callId,
+              ownerId,
+            );
+          }
+        } catch (err) {
+          deps.logger.warn("hosted_call.capture_cleanup_failed", {
+            callId: turn.hostedCapture.callId,
+            error: String(err),
+          });
+        }
+      }
+      if (turn.sessionID && turn.a2aContext) clearActiveA2ATurn(turn.sessionID, turn.a2aContext);
+    }
   }
 
   async function drain(chatKey: string): Promise<void> {
     const entry = per(chatKey);
-    if (entry.running) return;
-    entry.running = true;
-    try {
-      for (let turn = entry.queue.shift(); turn; turn = entry.queue.shift()) {
-        entry.runningKind = turn.kind;
-        if (turn.kind === "normal") entry.interruptNormal = false;
-        try {
-          const sessionID = await ensureSession(chatKey);
-          if (turn.a2aContext) {
-            entry.runningA2ATaskId = turn.a2aContext.taskId;
-            setActiveA2ATurn(sessionID, turn.a2aContext);
-          }
-          let out: string | undefined;
-          try {
-            if (turn.hostedCapture) {
-              activateHostedSmsCapture({
-                ...turn.hostedCapture,
-                sessionID,
-              });
-            }
-            out = await runPrompt(sessionID, turn.text, turn.agent, turn.hostedCapture?.phase);
-          } catch (err) {
-            if (turn.hostedCapture) throw err;
-            // A session that passed validation can still fail server-side
-            // (stale project state); one retry on a brand-new session keeps
-            // the contact reachable instead of failing the turn.
-            deps.logger.warn("turn.retry_fresh_session", { chatKey, error: String(err) });
-            deps.state.clearSession(chatKey);
-            out = await runPrompt(await ensureSession(chatKey), turn.text, turn.agent);
-          }
-          // If a newer message interrupted this normal turn, drop its output.
-          if (turn.kind === "normal" && entry.interruptNormal) {
-            deps.logger.info("turn.interrupted", { chatKey });
-            turn.resolve(undefined);
-            continue;
-          }
-          if (turn.deliver && turn.replyTarget && out !== undefined) {
-            try {
-              await deliverReply(deps.inkbox, turn.replyTarget, out, deps.logger);
-            } catch (err) {
-              deps.logger.error("reply.failed", { chatKey, error: String(err) });
-              if (turn.replyTarget) {
-                const recovery = deliveryFailureRecovery({
-                  key: deliveryFailureKey(
-                    turn.replyTarget.channel,
-                    turn.replyTarget.to,
-                    turn.replyTarget.conversationId,
-                  ),
-                  channel: turn.replyTarget.channel,
-                  target: turn.replyTarget.to,
-                  failure: err,
-                  failedBody: out,
-                });
-                if (recovery.prompt) {
-                  entry.queue.push({
-                    kind: "normal",
-                    text: recovery.prompt,
-                    deliver: true,
-                    replyTarget: turn.replyTarget,
-                    resolve: () => {},
-                    reject: () => {},
-                  });
-                }
-              }
-            }
-          }
-          if (turn.hostedCapture && turn.hostedResolve) {
-            const entry = getHostedCall(turn.hostedCapture.identityId, turn.hostedCapture.callId);
-            turn.hostedResolve({
-              output: out,
-              attempt: entry?.smsAttempts.find(
-                (attempt) => attempt.phase === turn.hostedCapture?.phase,
-              ),
-            });
-            clearHostedSmsCapture(turn.hostedCapture.identityId, turn.hostedCapture.callId);
-          }
-          turn.resolve(out);
-        } catch (err) {
-          deps.logger.error("turn.failed", { chatKey, error: String(err) });
-          turn.reject(err);
-        } finally {
-          if (turn.hostedCapture) {
-            try {
-              clearHostedSmsCapture(turn.hostedCapture.identityId, turn.hostedCapture.callId);
-            } catch (err) {
-              // The turn has already settled. Contention must not reject the
-              // entire drain and strand later turns; capture ownership is
-              // bounded and a replay or later cleanup can remove it.
-              deps.logger.warn("hosted_call.capture_cleanup_failed", {
-                callId: turn.hostedCapture.callId,
-                error: String(err),
-              });
-            }
-          }
-          const sessionID = deps.state.getSession(chatKey);
-          if (sessionID && turn.a2aContext) {
-            clearActiveA2ATurn(sessionID, turn.a2aContext);
-          }
-          entry.runningA2ATaskId = undefined;
+    if (entry.runningId) return;
+    for (let id = entry.queue.shift(); id; id = entry.queue.shift()) {
+      const turn = deps.state.getTurn(id);
+      if (!turn || TERMINAL.has(turn.state)) continue;
+      entry.runningId = id;
+      let retry = false;
+      try {
+        await process(id);
+      } catch (error) {
+        const current = deps.state.getTurn(id);
+        deps.logger.error("turn.drain_failed", { chatKey, error: String(error) });
+        if (!closing && current && ACTIVE.has(current.state)) {
+          entry.queue.unshift(id);
+          retry = true;
+        } else {
+          settle(
+            id,
+            undefined,
+            closing && current?.hostedCapture ? new HostedCaptureDeferredError() : error,
+          );
         }
+      } finally {
+        entry.runningId = undefined;
       }
-    } finally {
-      entry.running = false;
-      entry.runningKind = undefined;
+      if (retry) {
+        const timer = setTimeout(() => void drain(chatKey), POLL_MS);
+        timer.unref?.();
+        break;
+      }
     }
   }
 
-  // Interrupt the in-flight turn ONLY when it is a normal turn; capture turns
-  // (voice, delivery failures, external events) always run to completion.
-  async function interruptInFlightNormal(chatKey: string, sessionID: string): Promise<void> {
-    const entry = per(chatKey);
-    if (!entry.running || entry.runningKind !== "normal") return;
-    entry.interruptNormal = true;
-    try {
-      await deps.opencode.session.abort({
-        path: { id: sessionID },
-        query: { directory: deps.directory },
-      });
-    } catch (err) {
-      // Abort racing normal completion is fine: the completed turn delivers,
-      // and the queued message runs next as an ordinary turn.
-      deps.logger.warn("session.abort.race", { chatKey, error: String(err) });
-    }
+  function enqueue(turn: DurableTurn): void {
+    if (!deps.state.getTurn(turn.id)) deps.state.saveTurn(turn);
+    const entry = per(turn.chatKey);
+    if (entry.runningId !== turn.id && !entry.queue.includes(turn.id)) entry.queue.push(turn.id);
+    void drain(turn.chatKey);
+  }
+
+  function makeTurn(
+    chatKey: string,
+    kind: TurnKind,
+    text: string,
+    deliver: boolean,
+    replyTarget?: ReplyTarget,
+    extra: Partial<DurableTurn> = {},
+  ): DurableTurn {
+    const id = createMessageID();
+    const now = Date.now();
+    return {
+      id,
+      messageID: id,
+      chatKey,
+      state: "queued",
+      kind,
+      text,
+      deliver,
+      replyTarget,
+      createdAt: now,
+      updatedAt: now,
+      ...extra,
+    };
+  }
+
+  function promiseFor(turn: DurableTurn, hosted = false): Promise<any> {
+    return new Promise((resolve, reject) => {
+      addWaiter(
+        turn.id,
+        hosted ? { resolve: () => {}, reject, hostedResolve: resolve } : { resolve, reject },
+      );
+      enqueue(turn);
+    });
+  }
+
+  function hostedMatch(capture: DurableHostedCapture): DurableTurn | undefined {
+    return deps.state
+      .listTurns()
+      .filter(
+        (turn) =>
+          turn.hostedCapture?.identityId === capture.identityId &&
+          turn.hostedCapture.callId === capture.callId &&
+          turn.hostedCapture.phase === capture.phase &&
+          turn.state !== "failed" &&
+          turn.state !== "interrupted",
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+
+  function a2aMatch(context: ActiveA2ATurn): DurableTurn | undefined {
+    return deps.state
+      .listTurns()
+      .filter(
+        (turn) =>
+          turn.a2aContext?.taskId === context.taskId &&
+          turn.a2aContext.messageId === context.messageId &&
+          turn.state !== "failed" &&
+          turn.state !== "interrupted",
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
   }
 
   return {
     async handleInbound(msg: InboundMessage) {
       if (closing) return;
-      const replyTarget: ReplyTarget = {
+      const target: ReplyTarget = {
         channel: msg.channel,
         to: msg.from,
         conversationId: msg.conversationId,
         subject: msg.subject,
         rfcMessageId: msg.rfcMessageId,
       };
+      deps.state.setReplyTarget(msg.chatKey, target);
       clearDeliveryFailures(deliveryFailureKey(msg.channel, msg.from, msg.conversationId));
-      const entry = per(msg.chatKey);
-      // A new inbound while a NORMAL turn runs interrupts it. Await the abort
-      // before enqueuing so it can't outlive its turn and truncate the next.
-      if (entry.running && entry.runningKind === "normal") {
-        const sessionID = deps.state.getSession(msg.chatKey);
-        if (sessionID) await interruptInFlightNormal(msg.chatKey, sessionID);
-      }
-      // Operator overrides, keyed by contact id first, then channel.
       const g = deps.config.gateway;
       const overrideFor = (map: Record<string, string>): string | undefined =>
         (msg.contactId ? map[msg.contactId] : undefined) ?? map[msg.channel];
-      await new Promise<string | undefined>((resolve, reject) => {
-        entry.queue.push({
-          kind: "normal",
-          text: frameInbound(msg, overrideFor(g.channelPrompts)),
-          deliver: true,
+      const turn = makeTurn(
+        msg.chatKey,
+        "normal",
+        frameInbound(msg, overrideFor(g.channelPrompts)),
+        true,
+        target,
+        {
           agent: overrideFor(g.channelAgents),
-          replyTarget,
-          resolve,
-          reject,
+        },
+      );
+      const interrupted = deps.state
+        .listTurns()
+        .filter(
+          (candidate) =>
+            candidate.chatKey === msg.chatKey &&
+            candidate.kind === "normal" &&
+            Boolean(candidate.ownerId) &&
+            INTERRUPTIBLE.includes(candidate.state as (typeof INTERRUPTIBLE)[number]),
+        )
+        .flatMap((candidate) => {
+          const updated = deps.state.transitionTurn(candidate.id, [...INTERRUPTIBLE], {
+            state: "interrupted",
+          });
+          return updated ? [updated] : [];
         });
-        void drain(msg.chatKey);
-      });
+      deps.state.saveTurn(turn);
+      const sessionIDs = new Set(
+        interrupted
+          .map((candidate) => candidate.sessionID ?? deps.state.getSession(candidate.chatKey))
+          .filter((sessionID): sessionID is string => Boolean(sessionID)),
+      );
+      for (const sessionID of sessionIDs) {
+        await deps.opencode.session
+          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
+      }
+      return promiseFor(turn);
     },
 
     async runCapture(chatKey, text) {
       return this.runText(chatKey, frameCapture("event", text));
     },
 
-    async runText(chatKey, framedText) {
+    async runText(chatKey, text) {
       if (closing) return undefined;
-      const entry = per(chatKey);
-      return new Promise<string | undefined>((resolve, reject) => {
-        entry.queue.push({
-          kind: "capture",
-          text: framedText,
-          deliver: false,
-          resolve,
-          reject,
-        });
-        void drain(chatKey);
-      });
+      return promiseFor(makeTurn(chatKey, "capture", text, false));
     },
 
-    async runHostedCapture(chatKey, framedText, capture) {
+    async runHostedCapture(chatKey, text, capture) {
       if (closing) throw new HostedCaptureDeferredError();
-      const entry = per(chatKey);
-      return new Promise((resolve, reject) => {
-        entry.queue.push({
-          kind: "capture",
-          text: framedText,
-          deliver: false,
-          hostedCapture: capture,
-          hostedResolve: resolve,
-          resolve: () => {},
-          reject,
-        });
-        void drain(chatKey);
-      });
+      const existing = hostedMatch(capture);
+      if (existing?.state === "completed") {
+        const entry = getHostedCall(capture.identityId, capture.callId);
+        return {
+          output: existing.output,
+          attempt: entry?.smsAttempts.find((attempt) => attempt.phase === capture.phase),
+        };
+      }
+      const turn =
+        existing ??
+        makeTurn(chatKey, "capture", text, false, undefined, { hostedCapture: capture });
+      return promiseFor(turn, true);
     },
 
-    async runA2A(chatKey, framedText, context) {
+    hostedCaptureState(identityId, callId, phase) {
+      const turn = deps.state
+        .listTurns()
+        .filter(
+          (candidate) =>
+            candidate.hostedCapture?.identityId === identityId &&
+            candidate.hostedCapture.callId === callId &&
+            candidate.hostedCapture.phase === phase &&
+            candidate.state !== "failed" &&
+            candidate.state !== "interrupted",
+        )
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (!turn) return undefined;
+      return turn.state === "completed" ? "completed" : "pending";
+    },
+
+    async runA2A(chatKey, text, context) {
       if (closing) return undefined;
-      const entry = per(chatKey);
-      return new Promise<string | undefined>((resolve, reject) => {
-        entry.queue.push({
-          kind: "capture",
-          text: framedText,
-          deliver: false,
-          a2aContext: context,
-          resolve,
-          reject,
-        });
-        void drain(chatKey);
-      });
+      const existing = a2aMatch(context);
+      if (existing?.state === "completed") return existing.output;
+      return promiseFor(
+        existing ?? makeTurn(chatKey, "capture", text, false, undefined, { a2aContext: context }),
+      );
     },
 
     async abortA2A(chatKey, taskId) {
-      const entry = keys.get(chatKey);
-      if (!entry) return false;
-      const kept: QueuedTurn[] = [];
-      let removed = false;
-      for (const turn of entry.queue) {
-        if (turn.a2aContext?.taskId === taskId) {
-          turn.resolve(undefined);
-          removed = true;
-        } else {
-          kept.push(turn);
-        }
+      const turns = deps.state
+        .listTurns()
+        .filter(
+          (turn) =>
+            turn.chatKey === chatKey &&
+            turn.a2aContext?.taskId === taskId &&
+            ACTIVE.has(turn.state),
+        );
+      for (const turn of turns) {
+        deps.state.transitionTurn(turn.id, [...INTERRUPTIBLE, "delivery_started"], {
+          state: "interrupted",
+        });
       }
-      entry.queue = kept;
-      if (entry.runningA2ATaskId !== taskId) return removed;
+      for (const turn of turns) settle(turn.id, undefined);
       const sessionID = deps.state.getSession(chatKey);
-      if (!sessionID) return removed;
-      await deps.opencode.session
-        .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
-        .catch(() => {});
-      return true;
+      if (sessionID && turns.length) {
+        await deps.opencode.session
+          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
+      }
+      return turns.length > 0;
     },
 
     async resetSession(chatKey) {
-      // Abort any in-flight turn first so a pending escalation on the old
-      // session doesn't get orphaned by the mapping being cleared.
       await this.abortTurn(chatKey);
       deps.state.clearSession(chatKey);
       deps.logger.info("session.reset", { chatKey });
     },
 
     async abortTurn(chatKey) {
+      const turns = deps.state
+        .listTurns()
+        .filter((turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state));
+      for (const turn of turns) {
+        deps.state.transitionTurn(turn.id, [...INTERRUPTIBLE, "delivery_started"], {
+          state: "interrupted",
+        });
+        settle(turn.id, undefined);
+      }
       const sessionID = deps.state.getSession(chatKey);
-      const entry = keys.get(chatKey);
-      if (!sessionID || !entry?.running) return false;
-      // Only a normal turn is interruptible; a running capture finishes.
-      if (entry.runningKind === "normal") entry.interruptNormal = true;
-      // Settle every dropped queued turn so no caller (and no held-open
-      // webhook response) hangs forever.
-      const dropped = entry.queue;
-      entry.queue = [];
-      for (const turn of dropped) turn.resolve(undefined);
-      await deps.opencode.session
-        .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
-        .catch(() => {});
-      return true;
+      if (sessionID && turns.length) {
+        await deps.opencode.session
+          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
+      }
+      return turns.length > 0;
     },
 
     status(chatKey) {
-      const entry = keys.get(chatKey);
-      return { busy: Boolean(entry?.running), sessionID: deps.state.getSession(chatKey) };
+      const busy = deps.state
+        .listTurns()
+        .some((turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state));
+      return { busy, sessionID: deps.state.getSession(chatKey) };
+    },
+
+    async catchUp() {
+      const recoverable = deps.state
+        .listTurns()
+        .filter((turn) => !TERMINAL.has(turn.state) && !turn.hostedCapture && !turn.a2aContext)
+        .sort((a, b) => a.createdAt - b.createdAt);
+      for (const turn of recoverable) {
+        if (turn.state === "delivery_started") {
+          deps.state.updateTurn(turn.id, {
+            state: "failed",
+            error: "Reply delivery outcome is ambiguous after restart.",
+          });
+        } else enqueue(turn);
+      }
     },
 
     async close() {
       closing = true;
-      const pending = [...keys.values()].map(
-        (entry) =>
-          new Promise<void>((resolve) => {
-            if (!entry.running && entry.queue.length === 0) return resolve();
-            const check = setInterval(() => {
-              if (!entry.running && entry.queue.length === 0) {
-                clearInterval(check);
-                resolve();
-              }
-            }, 25);
-            check.unref?.();
-          }),
-      );
-      await Promise.all(pending);
     },
   };
 }
 
-// Pull assistant text from a prompt response. The pinned prompt route
-// returns { info, parts }; concatenate text parts.
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 export function extractText(res: unknown): string | undefined {
   const data = (res as any)?.data ?? res;
   const parts = data?.parts;
   if (!Array.isArray(parts)) return undefined;
   const text = parts
-    .filter((p: any) => p?.type === "text" && typeof p.text === "string")
-    .map((p: any) => p.text)
+    .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .map((part: any) => part.text)
     .join("")
     .trim();
   return text.length > 0 ? text : undefined;

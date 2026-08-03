@@ -53,6 +53,7 @@ async function waitForState(state: string): Promise<void> {
 
 function deps(attempts: Array<HostedSmsAttempt | undefined>) {
   const runHostedCapture = vi.fn(async () => ({ attempt: attempts.shift() }));
+  const hostedCaptureState = vi.fn(() => undefined as "pending" | "completed" | undefined);
   const callsGet = vi.fn(async () => authoritativeCall);
   const authoritativeCall = {
     id: "call-1",
@@ -86,10 +87,15 @@ function deps(attempts: Array<HostedSmsAttempt | undefined>) {
         (input: { contactId?: string; from: string }) => input.contactId ?? input.from,
       ),
     },
-    sessions: { runHostedCapture, runText: vi.fn(async () => undefined) },
+    sessions: {
+      runHostedCapture,
+      hostedCaptureState,
+      runText: vi.fn(async () => undefined),
+    },
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     sleep: vi.fn(async () => {}),
     runHostedCapture,
+    hostedCaptureState,
     callsGet,
     authoritativeCall,
   } as any;
@@ -439,6 +445,34 @@ describe("hosted call completion", () => {
       retryable: false,
     });
     expect(d.runHostedCapture).not.toHaveBeenCalled();
+  });
+
+  it("reattaches to a durable initial turn after restart", async () => {
+    saveHostedCall({
+      identityId: "ident-1",
+      callId: "call-1",
+      eventId: "evt-1",
+      state: "running",
+      outcome: "initial_dispatch_started",
+      retryable: false,
+      event: event(),
+    });
+    const d = deps([
+      {
+        phase: "initial",
+        id: "attempt-1",
+        target: "+14155550123",
+        targetMatches: true,
+        state: "success",
+      },
+    ]);
+    d.hostedCaptureState.mockReturnValue("pending");
+
+    await createHostedCallCompletion(d).catchUp();
+    await waitForState("completed");
+
+    expect(d.runHostedCapture).toHaveBeenCalledOnce();
+    expect(d.runHostedCapture.mock.calls[0][2].phase).toBe("initial");
   });
 
   it.each([
