@@ -210,6 +210,7 @@ export function saveHostedCall(
     const replayable = entry.state === "queued" || entry.state === "running" || entry.retryable;
     registry[key] = {
       ...entry,
+      active: entry.active ?? existing?.active,
       event: replayable ? replayEvent(entry.event) : receiptEvent(entry.event),
       smsAttempts: entry.smsAttempts ?? existing?.smsAttempts ?? [],
       updatedAt: Date.now(),
@@ -264,10 +265,7 @@ function phoneDigits(value: string): string {
 
 function activeHostedEntry(registry: Registry, sessionID: string): HostedCallEntry | undefined {
   const matches = Object.values(registry).filter(
-    (entry) =>
-      entry.state === "running" &&
-      entry.active?.sessionID === sessionID &&
-      !activeCaptureIsExpired(entry),
+    (entry) => entry.active?.sessionID === sessionID && !activeCaptureIsExpired(entry),
   );
   if (matches.length > 1) {
     throw new Error("Blocked side effect because the hosted-call capture is ambiguous.");
@@ -312,10 +310,7 @@ export function assertHostedCallTarget(sessionID: string, target: string): boole
 export function assertHostedToolAllowed(sessionID: string, toolName: string): void {
   const registry = read();
   const matches = Object.values(registry).filter(
-    (entry) =>
-      entry.state === "running" &&
-      entry.active?.sessionID === sessionID &&
-      !activeCaptureIsExpired(entry),
+    (entry) => entry.active?.sessionID === sessionID && !activeCaptureIsExpired(entry),
   );
   if (matches.length > 1) {
     throw new Error("Blocked tool call because the hosted-call capture is ambiguous.");

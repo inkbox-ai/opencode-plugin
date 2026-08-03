@@ -37,8 +37,6 @@ interface TurnWaiter {
 interface PerKey {
   queue: string[];
   runningId?: string;
-  runningKind?: TurnKind;
-  runningA2ATaskId?: string;
 }
 
 export interface SessionManagerDeps {
@@ -52,6 +50,7 @@ export interface SessionManagerDeps {
 
 const TERMINAL = new Set(["delivered", "failed", "interrupted"]);
 const ACTIVE = new Set(["queued", "submitting", "submitted", "delivery_started"]);
+const INTERRUPTIBLE = ["queued", "submitting", "submitted"] as const;
 const POLL_MS = 250;
 const LEASE_MS = 60_000;
 
@@ -199,8 +198,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   async function submit(turn: DurableTurn): Promise<DurableTurn> {
     const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey));
-    const next = deps.state.updateTurn(turn.id, { state: "submitting", sessionID });
-    if (!next) throw new Error("Durable turn disappeared before submission.");
+    const next = deps.state.transitionTurn(turn.id, ["queued"], {
+      state: "submitting",
+      sessionID,
+    });
+    if (!next) {
+      const current = deps.state.getTurn(turn.id);
+      if (current?.state === "interrupted") return current;
+      throw new Error("Durable turn changed before submission.");
+    }
     if (next.a2aContext) setActiveA2ATurn(sessionID, next.a2aContext);
     if (next.hostedCapture) {
       activateHostedSmsCapture({ ...next.hostedCapture, sessionID, ownerId });
@@ -213,17 +219,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       });
       const err = (res as any)?.error;
       if (err) throw new Error(`session.promptAsync failed: ${JSON.stringify(err).slice(0, 300)}`);
+      const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
+        state: "submitted",
+      });
+      if (submitted) return submitted;
       const current = deps.state.getTurn(turn.id);
       if (current?.state === "interrupted") return current;
-      return deps.state.updateTurn(turn.id, { state: "submitted" }) ?? next;
+      throw new Error("Durable turn changed during submission.");
     } catch (err) {
       if (await wasAccepted(next).catch(() => false)) {
         deps.logger.warn("turn.submit_outcome_reconciled", { chatKey: next.chatKey });
+        const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
+          state: "submitted",
+        });
+        if (submitted) return submitted;
         const current = deps.state.getTurn(turn.id);
         if (current?.state === "interrupted") return current;
-        return deps.state.updateTurn(turn.id, { state: "submitted" }) ?? next;
+        throw new Error("Durable turn changed during submission reconciliation.");
       }
-      deps.state.updateTurn(turn.id, { state: "failed", error: String(err) });
+      deps.state.transitionTurn(turn.id, ["submitting"], {
+        state: "failed",
+        error: String(err),
+      });
       throw err;
     }
   }
@@ -274,8 +291,22 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       settle(turn.id, undefined);
       return;
     }
-    const current = deps.state.updateTurn(turn.id, { state: "completed", output });
-    if (!current) return;
+    let current = turn;
+    if (turn.state !== "completed") {
+      const completed = deps.state.transitionTurn(turn.id, ["submitted"], {
+        state: "completed",
+        output,
+      });
+      if (!completed) {
+        const latest = deps.state.getTurn(turn.id);
+        if (latest?.state === "interrupted") {
+          settle(turn.id, undefined);
+          return;
+        }
+        throw new Error("Durable turn changed before completion.");
+      }
+      current = completed;
+    }
     if (current.deliver && current.replyTarget && output !== undefined) {
       deps.state.updateTurn(current.id, { state: "delivery_started" });
       try {
@@ -321,7 +352,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (turn.state === "queued") turn = await submit(turn);
       else if (turn.state === "submitting") {
         if (!(await wasAccepted(turn))) throw new Error("Prompt submission outcome is ambiguous.");
-        turn = deps.state.updateTurn(id, { state: "submitted" }) ?? turn;
+        turn =
+          deps.state.transitionTurn(id, ["submitting"], { state: "submitted" }) ??
+          deps.state.getTurn(id) ??
+          turn;
       }
       if (turn.state === "submitted" && turn.sessionID) {
         if (turn.a2aContext) setActiveA2ATurn(turn.sessionID, turn.a2aContext);
@@ -356,7 +390,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     } finally {
       if (turn.hostedCapture) {
         try {
-          clearHostedSmsCapture(turn.hostedCapture.identityId, turn.hostedCapture.callId, ownerId);
+          const latest = deps.state.getTurn(turn.id);
+          if (!(closing && latest && ACTIVE.has(latest.state))) {
+            clearHostedSmsCapture(
+              turn.hostedCapture.identityId,
+              turn.hostedCapture.callId,
+              ownerId,
+            );
+          }
         } catch (err) {
           deps.logger.warn("hosted_call.capture_cleanup_failed", {
             callId: turn.hostedCapture.callId,
@@ -375,12 +416,30 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const turn = deps.state.getTurn(id);
       if (!turn || TERMINAL.has(turn.state)) continue;
       entry.runningId = id;
-      entry.runningKind = turn.kind;
-      entry.runningA2ATaskId = turn.a2aContext?.taskId;
-      await process(id);
-      entry.runningId = undefined;
-      entry.runningKind = undefined;
-      entry.runningA2ATaskId = undefined;
+      let retry = false;
+      try {
+        await process(id);
+      } catch (error) {
+        const current = deps.state.getTurn(id);
+        deps.logger.error("turn.drain_failed", { chatKey, error: String(error) });
+        if (!closing && current && ACTIVE.has(current.state)) {
+          entry.queue.unshift(id);
+          retry = true;
+        } else {
+          settle(
+            id,
+            undefined,
+            closing && current?.hostedCapture ? new HostedCaptureDeferredError() : error,
+          );
+        }
+      } finally {
+        entry.runningId = undefined;
+      }
+      if (retry) {
+        const timer = setTimeout(() => void drain(chatKey), POLL_MS);
+        timer.unref?.();
+        break;
+      }
     }
   }
 
@@ -478,17 +537,31 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           agent: overrideFor(g.channelAgents),
         },
       );
+      const interrupted = deps.state
+        .listTurns()
+        .filter(
+          (candidate) =>
+            candidate.chatKey === msg.chatKey &&
+            candidate.kind === "normal" &&
+            Boolean(candidate.ownerId) &&
+            INTERRUPTIBLE.includes(candidate.state as (typeof INTERRUPTIBLE)[number]),
+        )
+        .flatMap((candidate) => {
+          const updated = deps.state.transitionTurn(candidate.id, [...INTERRUPTIBLE], {
+            state: "interrupted",
+          });
+          return updated ? [updated] : [];
+        });
       deps.state.saveTurn(turn);
-      const entry = per(msg.chatKey);
-      const running = entry.runningId ? deps.state.getTurn(entry.runningId) : undefined;
-      if (running && ACTIVE.has(running.state) && entry.runningKind === "normal") {
-        deps.state.updateTurn(running.id, { state: "interrupted" });
-        const sessionID = deps.state.getSession(msg.chatKey);
-        if (sessionID) {
-          await deps.opencode.session
-            .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
-            .catch(() => {});
-        }
+      const sessionIDs = new Set(
+        interrupted
+          .map((candidate) => candidate.sessionID ?? deps.state.getSession(candidate.chatKey))
+          .filter((sessionID): sessionID is string => Boolean(sessionID)),
+      );
+      for (const sessionID of sessionIDs) {
+        await deps.opencode.session
+          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
       }
       return promiseFor(turn);
     },
@@ -552,7 +625,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             turn.a2aContext?.taskId === taskId &&
             ACTIVE.has(turn.state),
         );
-      for (const turn of turns) deps.state.updateTurn(turn.id, { state: "interrupted" });
+      for (const turn of turns) {
+        deps.state.transitionTurn(turn.id, [...INTERRUPTIBLE, "delivery_started"], {
+          state: "interrupted",
+        });
+      }
       for (const turn of turns) settle(turn.id, undefined);
       const sessionID = deps.state.getSession(chatKey);
       if (sessionID && turns.length) {
@@ -574,7 +651,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         .listTurns()
         .filter((turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state));
       for (const turn of turns) {
-        deps.state.updateTurn(turn.id, { state: "interrupted" });
+        deps.state.transitionTurn(turn.id, [...INTERRUPTIBLE, "delivery_started"], {
+          state: "interrupted",
+        });
         settle(turn.id, undefined);
       }
       const sessionID = deps.state.getSession(chatKey);

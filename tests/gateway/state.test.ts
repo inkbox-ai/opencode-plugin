@@ -100,4 +100,28 @@ describe("gateway state", () => {
     state.updateTurn("msg_1", { state: "completed" });
     expect(state.claimTurn("msg_2", "owner-b", 10_000)).toBeDefined();
   });
+
+  it("does not overwrite a turn after its expected state changes", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    const now = Date.now();
+    state.saveTurn({
+      id: "msg_1",
+      messageID: "msg_1",
+      chatKey: "ck",
+      state: "queued",
+      kind: "normal",
+      text: "hello",
+      deliver: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(state.transitionTurn("msg_1", ["queued"], { state: "interrupted" })?.state).toBe(
+      "interrupted",
+    );
+    expect(state.transitionTurn("msg_1", ["queued"], { state: "submitting" })).toBeUndefined();
+    expect(state.getTurn("msg_1")?.state).toBe("interrupted");
+  });
 });

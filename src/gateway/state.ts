@@ -78,6 +78,11 @@ export interface StateStore {
   getReplyTarget(chatKey: string): ReplyTarget | undefined;
   saveTurn(turn: DurableTurn): void;
   updateTurn(id: string, patch: Partial<DurableTurn>): DurableTurn | undefined;
+  transitionTurn(
+    id: string,
+    expected: DurableTurnState[],
+    patch: Partial<DurableTurn>,
+  ): DurableTurn | undefined;
   getTurn(id: string): DurableTurn | undefined;
   listTurns(): DurableTurn[];
   claimTurn(id: string, ownerId: string, leaseMs: number): DurableTurn | undefined;
@@ -210,6 +215,14 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
       return mutate((state) => {
         const current = state.turns[id];
         if (!current) return [state, undefined];
+        const turn = { ...current, ...patch, updatedAt: Date.now() };
+        return [{ ...state, turns: { ...state.turns, [id]: turn } }, turn];
+      });
+    },
+    transitionTurn(id, expected, patch) {
+      return mutate((state) => {
+        const current = state.turns[id];
+        if (!current || !expected.includes(current.state)) return [state, undefined];
         const turn = { ...current, ...patch, updatedAt: Date.now() };
         return [{ ...state, turns: { ...state.turns, [id]: turn } }, turn];
       });

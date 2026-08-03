@@ -319,6 +319,61 @@ describe("durable async turns", () => {
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
     expect(d.identity.sendText).toHaveBeenCalledOnce();
   });
+
+  it("does not submit a turn interrupted during session validation", async () => {
+    const d = makeManager();
+    d.state.setSession("ck", "sess-existing");
+    let release: (value: { data: { id: string; directory: string } }) => void = () => {};
+    d.opencode.session.get.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const first = d.mgr.handleInbound(sms("first"));
+    await vi.waitFor(() => expect(d.opencode.session.get).toHaveBeenCalledOnce());
+
+    const second = d.mgr.handleInbound(sms("second"));
+    release({ data: { id: "sess-existing", directory: "/proj" } });
+
+    await expect(first).resolves.toBeUndefined();
+    await second;
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(d.identity.sendText).toHaveBeenCalledOnce();
+  });
+
+  it("interrupts a normal turn owned by another gateway", async () => {
+    const firstGateway = makeManager();
+    firstGateway.setAutoComplete(false);
+    const first = firstGateway.mgr.handleInbound(sms("first"));
+    await vi.waitFor(() =>
+      expect(firstGateway.opencode.session.promptAsync).toHaveBeenCalledOnce(),
+    );
+
+    const secondGateway = makeManager(firstGateway.dir);
+    const second = secondGateway.mgr.handleInbound(sms("second"));
+
+    await expect(first).resolves.toBeUndefined();
+    await second;
+    expect(firstGateway.identity.sendText).not.toHaveBeenCalled();
+    expect(secondGateway.identity.sendText).toHaveBeenCalledOnce();
+    expect(firstGateway.state.listTurns().find((turn) => turn.text.includes("first"))?.state).toBe(
+      "interrupted",
+    );
+  });
+
+  it("retries after a transient state lock failure without wedging the queue", async () => {
+    const d = makeManager();
+    const claimTurn = d.state.claimTurn.bind(d.state);
+    vi.spyOn(d.state, "claimTurn")
+      .mockImplementationOnce(() => {
+        throw new Error("Gateway state is busy; retry this operation.");
+      })
+      .mockImplementation(claimTurn);
+
+    await d.mgr.handleInbound(sms("first"));
+    await d.mgr.handleInbound(sms("second"));
+
+    expect(d.identity.sendText).toHaveBeenCalledTimes(2);
+    expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true);
+  });
 });
 
 describe("capture turns", () => {
@@ -392,6 +447,7 @@ describe("capture turns", () => {
     );
     await d.mgr.close();
     await expect(pending).rejects.toThrow("deferred");
+    expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-old");
   });
 
   it("reattaches A2A recovery to its durable turn", async () => {
