@@ -58,7 +58,7 @@ describe("live harness readiness bounds", () => {
 
   it("requires the hosted caller to persist and read back the exact SMS body", () => {
     expect(liveVoice).toContain(
-      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create the post-call action now with this exact SMS body: $HOSTED_MARKER. Read those five words back to me after the action is saved. Do not send it during the call."',
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create one post-call action now with the title Send SMS and put this exact five-word SMS body in the action details: $HOSTED_MARKER. Wait for the action tool to succeed, then read all five words back to me. Do not paraphrase, omit a word, or send the SMS during the call."',
     );
   });
 
