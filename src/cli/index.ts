@@ -6,6 +6,7 @@ import {
   installAutostart,
   uninstallAutostart,
 } from "./autostart.js";
+import { bootstrap, readInstructionsFile } from "./bootstrap.js";
 import { daemonStatus, restartDaemon, runUninstall, startDaemon, stopDaemon } from "./daemon.js";
 import { runDoctor } from "./doctor.js";
 import { loadEnvFile } from "./env-file.js";
@@ -40,6 +41,7 @@ Commands:
   doctor      Diagnose configuration and connectivity.
   whoami      Print the resolved Inkbox agent identity.
   setup       Interactive setup wizard (--print for the static checklist).
+  bootstrap   Configure an existing identity without interactive prompts.
   uninstall   Stop the daemon, remove the boot service and local state.
 
 The gateway attaches to an opencode server at OPENCODE_SERVER_URL (or
@@ -51,6 +53,12 @@ file (INKBOX_OPENCODE_ENV_FILE, ./.env, ~/.inkbox-opencode/.env), then
 
 function isHelp(arg: string | undefined): boolean {
   return arg === undefined || arg === "help" || arg === "--help" || arg === "-h";
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8").trim();
 }
 
 export async function runCli(argv: string[]): Promise<number> {
@@ -91,6 +99,33 @@ export async function runCli(argv: string[]): Promise<number> {
       const interactive = argv[1] !== "--print" && process.stdin.isTTY === true;
       const config = resolveConfig(undefined);
       return interactive ? runWizard(config, { envSources }) : runSetup(config);
+    }
+    case "bootstrap": {
+      const values = new Map<string, string>();
+      const flags = new Set<string>();
+      for (let i = 1; i < argv.length; i += 1) {
+        const token = argv[i];
+        if (token.startsWith("--") && argv[i + 1] && !argv[i + 1].startsWith("--")) {
+          values.set(token, argv[i + 1]);
+          i += 1;
+        } else {
+          flags.add(token);
+        }
+      }
+      const result = await bootstrap({
+        identity: values.get("--identity") ?? "",
+        apiKey: flags.has("--api-key-stdin")
+          ? await readStdin()
+          : (process.env.INKBOX_API_KEY?.trim() ?? ""),
+        baseUrl: values.get("--base-url"),
+        projectDir: values.get("--project-dir"),
+        voiceAi: flags.has("--voice-ai"),
+        voiceAiInstructions: readInstructionsFile(values.get("--voice-ai-instructions-file")),
+        rotateSigningKey: flags.has("--rotate-signing-key"),
+        startGateway: flags.has("--start-gateway"),
+      });
+      console.log(JSON.stringify(result, null, 2));
+      return result.status === "configured" ? 0 : 2;
     }
     case "uninstall": {
       if (!uninstallAutostart()) console.log("No boot service installed.");

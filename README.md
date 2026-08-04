@@ -55,6 +55,20 @@ run `./install.sh` instead; it uses the checkout in place. Rerun the wizard
 anytime with `inkbox-opencode setup` (`setup --print` for the static
 checklist), and check the wiring with `inkbox-opencode doctor`.
 
+### Bootstrap an existing identity without prompts
+
+For unattended agent setup, install without opening the wizard and pass the API key through the environment:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh | bash -s -- --no-setup
+export INKBOX_API_KEY="ApiKey_..."
+inkbox-opencode bootstrap --identity my-agent --project-dir "$PWD" \
+  --voice-ai --rotate-signing-key --start-gateway
+unset INKBOX_API_KEY
+```
+
+`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, and starts or restarts the detached gateway. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+
 ### Manual install (per-project, or no installer)
 
 The plugin is distributed as source — clone and build it, then load it from a
