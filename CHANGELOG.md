@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.8 (unreleased)
+## 0.2.9 (unreleased)
 
 - Adds a resumable, non-interactive `inkbox-opencode bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and background gateway startup.
 - Adds explicit Inkbox Voice AI, OpenAI Realtime API, and Inkbox TTS/STT phone-call stacks to setup.
