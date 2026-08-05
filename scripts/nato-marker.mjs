@@ -1,32 +1,26 @@
 import { pathToFileURL } from "node:url";
 
-const RADIO_WORDS = [
-  "alpha",
-  "bravo",
-  "charlie",
-  "delta",
-  "echo",
-  "foxtrot",
-  "golf",
-  "hotel",
-  "india",
-  "juliet",
-  "kilo",
-  "lima",
-  "mike",
-  "november",
-  "oscar",
-  "papa",
-  "quebec",
-  "romeo",
-  "sierra",
-  "tango",
-  "uniform",
-  "victor",
-  "whiskey",
-  "xray",
-  "yankee",
-  "zulu",
+const SPEECH_WORDS = [
+  "banana",
+  "elephant",
+  "pineapple",
+  "alligator",
+  "motorcycle",
+  "umbrella",
+  "dinosaur",
+  "potato",
+  "computer",
+  "volcano",
+  "airplane",
+  "butterfly",
+  "kangaroo",
+  "octopus",
+  "calendar",
+  "chocolate",
+  "hospital",
+  "library",
+  "sandwich",
+  "telescope",
 ];
 
 export function natoMarker(runId, runAttempt) {
@@ -34,11 +28,11 @@ export function natoMarker(runId, runAttempt) {
   const used = new Set();
   const marker = [];
   for (let count = 0; count < 5; count += 1) {
-    let index = Number(value % BigInt(RADIO_WORDS.length));
-    value /= BigInt(RADIO_WORDS.length);
-    while (used.has(index)) index = (index + 1) % RADIO_WORDS.length;
+    let index = Number(value % BigInt(SPEECH_WORDS.length));
+    value /= BigInt(SPEECH_WORDS.length);
+    while (used.has(index)) index = (index + 1) % SPEECH_WORDS.length;
     used.add(index);
-    marker.push(RADIO_WORDS[index]);
+    marker.push(SPEECH_WORDS[index]);
   }
   return marker.join(" ");
 }
