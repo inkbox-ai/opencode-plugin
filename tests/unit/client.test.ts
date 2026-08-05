@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InkboxCredentials } from "../../src/client.js";
-import { createInkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../../src/client.js";
+import {
+  createInkboxRuntime,
+  NOT_CONFIGURED_MESSAGE,
+  resolveIdentityWithRetry,
+} from "../../src/client.js";
 
 // Only the unconfigured paths are covered here: a configured runtime performs
 // a whoami() round-trip against the live API on first resolve, so the happy
@@ -38,5 +42,40 @@ describe("createInkboxRuntime", () => {
     expect(NOT_CONFIGURED_MESSAGE).toContain("INKBOX_API_KEY");
     expect(NOT_CONFIGURED_MESSAGE).toContain("INKBOX_IDENTITY");
     expect(NOT_CONFIGURED_MESSAGE).toContain("opencode.json");
+  });
+
+  it("retries a transient identity connection reset", async () => {
+    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const resolveIdentity = vi
+      .fn<() => Promise<{ id: string }>>()
+      .mockRejectedValueOnce(reset)
+      .mockResolvedValue({ id: "identity-1" });
+    const wait = vi.fn(async () => undefined);
+
+    await expect(resolveIdentityWithRetry(resolveIdentity, wait)).resolves.toEqual({
+      id: "identity-1",
+    });
+    expect(resolveIdentity).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(250);
+  });
+
+  it("does not retry a terminal identity response", async () => {
+    const notFound = Object.assign(new Error("Identity not found"), { status: 404 });
+    const resolveIdentity = vi.fn<() => Promise<never>>().mockRejectedValue(notFound);
+    const wait = vi.fn(async () => undefined);
+
+    await expect(resolveIdentityWithRetry(resolveIdentity, wait)).rejects.toBe(notFound);
+    expect(resolveIdentity).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("bounds repeated transient identity retries", async () => {
+    const reset = new Error("Request failed: socket hang up");
+    const resolveIdentity = vi.fn<() => Promise<never>>().mockRejectedValue(reset);
+    const wait = vi.fn(async () => undefined);
+
+    await expect(resolveIdentityWithRetry(resolveIdentity, wait)).rejects.toBe(reset);
+    expect(resolveIdentity).toHaveBeenCalledTimes(3);
+    expect(wait.mock.calls).toEqual([[250], [750]]);
   });
 });

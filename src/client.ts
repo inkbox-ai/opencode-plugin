@@ -7,6 +7,15 @@ import {
 } from "@inkbox/sdk";
 
 const USER_AGENT_NAME = "inkbox-opencode";
+const IDENTITY_RETRY_DELAYS_MS = [250, 750] as const;
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENETDOWN",
+  "ENETUNREACH",
+]);
 
 // Read at runtime rather than hardcoded so the token can't drift from the
 // package version. `tsc` emits to dist/, so ../package.json resolves from
@@ -68,6 +77,50 @@ function runtimeCacheKey(cfg: InkboxCredentials): string {
   });
 }
 
+function isTransientIdentityError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const value = current as {
+      code?: unknown;
+      status?: unknown;
+      statusCode?: unknown;
+      cause?: unknown;
+      message?: unknown;
+    };
+    const code = typeof value.code === "string" ? value.code.toUpperCase() : "";
+    if (TRANSIENT_NETWORK_CODES.has(code)) return true;
+
+    const status = Number(value.status ?? value.statusCode);
+    if (status === 408 || status === 425 || status === 429 || status >= 500) return true;
+
+    const message = typeof value.message === "string" ? value.message : String(current);
+    if (
+      /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETDOWN|ENETUNREACH)\b/i.test(message) ||
+      /(?:socket hang up|network connection was lost|fetch failed)/i.test(message)
+    ) {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+}
+
+export async function resolveIdentityWithRetry<T>(
+  resolveIdentity: () => Promise<T>,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)),
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await resolveIdentity();
+    } catch (error) {
+      const delayMs = IDENTITY_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined || !isTransientIdentityError(error)) throw error;
+      await wait(delayMs);
+    }
+  }
+}
+
 // Build a lazy-cached runtime. The Inkbox SDK client and the identity
 // resolution happen on first tool call, not at plugin load. This keeps
 // startup cheap when a session never invokes an Inkbox tool.
@@ -118,7 +171,7 @@ export function createInkboxRuntime(source: ConfigSource, logger?: PluginLogger)
             `Inkbox plugin: whoami() failed during init: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
-        const identity = await inkbox.getIdentity(identityHandle);
+        const identity = await resolveIdentityWithRetry(() => inkbox.getIdentity(identityHandle));
         return { inkbox, identity };
       })();
       const entry = {
