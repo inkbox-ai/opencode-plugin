@@ -32,7 +32,7 @@ const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
 // then give the agent a turn and hang up (a dropped WS does NOT end the call — an
 // explicit stop is required or the leg lingers to the server max-duration cap).
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
-const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
+const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "30") * 1000;
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
 
 if (!API_KEY) {

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const liveAut = readFileSync("scripts/live-aut.sh", "utf8");
 const liveChannels = readFileSync(".github/workflows/live-channels.yml", "utf8");
 const liveVoice = readFileSync(".github/workflows/live-voice.yml", "utf8");
+const voiceDriver = readFileSync("tests/live/voice-driver.mjs", "utf8");
 
 function shellCommands(source: string): string[] {
   return source.replace(/\\\n\s*/g, " ").split("\n");
@@ -18,6 +19,10 @@ function yamlJob(source: string, name: string): string {
 }
 
 describe("live harness readiness bounds", () => {
+  it("allows the realtime model to answer before the media peer hangs up", () => {
+    expect(voiceDriver).toContain('VOICE_DRIVER_LISTEN || "30"');
+  });
+
   it("bounds both opencode /config readiness probes", () => {
     const configProbes = shellCommands(liveAut).filter(
       (command) => /\bcurl\b/.test(command) && command.includes("/config"),
