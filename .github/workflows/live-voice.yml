@@ -5,8 +5,8 @@ name: Live — voice calls (Voice AI + Realtime + Inkbox TTS/STT)
 #   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
 #   outbound_realtime — driver texts "call me"; agent calls back on Realtime.
 #   outbound_hosted   — driver requests a Voice AI call and one exact post-call SMS.
-# Each leg verifies the stored call transcript shows the agent spoke to the
-# caller. Real model + real calls — the priciest suite — so it runs only on
+# Each leg verifies driver-local speech and a two-way paired AUT transcript.
+# Real model + real calls — the priciest suite — so it runs only on
 # ready (non-draft) PRs + manual dispatch, and shares the AUT tunnel lock.
 on:
   workflow_call:

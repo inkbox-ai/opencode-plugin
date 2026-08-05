@@ -3,7 +3,7 @@
 // Opens the driver identity's Inkbox tunnel, serves the call-media WebSocket
 // behind it in Inkbox STT/TTS mode (text frames only — no local model), speaks
 // one scripted line so the agent-under-test gets a turn, then hangs up. The
-// stored call transcript (read by the test) proves the agent replied out loud.
+// driver transcript proves this local line; the paired AUT transcript proves the reply.
 //
 // Two directions share one bridge: the test places a call to the agent and
 // passes this driver's WS URL, or the agent calls the driver's number, which is

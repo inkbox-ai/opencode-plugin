@@ -123,26 +123,23 @@ export async function inboundTextsFrom(
   return out;
 }
 
-// A call's transcript split by who spoke. Read from the DRIVER's client, so
-// "remote" segments are the AGENT's speech and "local" are the driver's.
+// A call's transcript split by its owning identity's local and remote parties.
 export async function callSegments(
   c: Inkbox,
   callId: string,
-): Promise<{ agent: string[]; driver: string[] }> {
+): Promise<{ remote: string[]; local: string[] }> {
   const segs = (await c.calls.transcripts(callId)) as Array<{ party?: string; text?: string }>;
   const pick = (party: string) =>
     segs
       .filter((s) => (s.party ?? "").toLowerCase() === party && (s.text ?? "").trim() !== "")
       .map((s) => (s.text ?? "").trim());
-  return { agent: pick("remote"), driver: pick("local") };
+  return { remote: pick("remote"), local: pick("local") };
 }
 
-// Block until the transcript shows BOTH parties spoke, then return the agent's
-// speech — proof the agent reached the caller out loud on a two-way call.
-export async function waitTwoWayCall(
-  driver: Inkbox,
+async function waitForCallSpeech(
+  owner: Inkbox,
   callId: string,
-  timeoutMs = TIMEOUT_MS,
+  options: { requireRemote: boolean; label: string; timeoutMs: number },
 ): Promise<string> {
   const terminalFailureStatuses = new Set(["canceled", "failed"]);
   // A call can end normally and still never carry a conversation — detection
@@ -153,15 +150,17 @@ export async function waitTwoWayCall(
   const endedGraceMs = Number(process.env.LIVE_VOICE_ENDED_GRACE_S || "15") * 1000;
   let endedAt: number | undefined;
   return pollUntil(
-    "two-way call transcript",
+    `${options.label} transcript`,
     async () => {
-      const { agent, driver: drv } = await callSegments(driver, callId).catch(() => ({
-        agent: [],
-        driver: [],
+      const { remote, local } = await callSegments(owner, callId).catch(() => ({
+        remote: [],
+        local: [],
       }));
-      if (agent.length > 0 && drv.length > 0) return agent.join(" | ");
+      if (local.length > 0 && (!options.requireRemote || remote.length > 0)) {
+        return local.join(" | ");
+      }
 
-      const call = await driver.calls.get(callId).catch(() => undefined);
+      const call = await owner.calls.get(callId).catch(() => undefined);
       const status = (call?.status ?? "").toLowerCase();
       const detail = () =>
         JSON.stringify({
@@ -171,28 +170,50 @@ export async function waitTwoWayCall(
           endedAt: call?.endedAt,
         });
       if (terminalFailureStatuses.has(status)) {
-        throw new Error(`two-way call ended before both parties spoke: ${detail()}`);
+        throw new Error(`${options.label} ended before transcript proof: ${detail()}`);
       }
       if (endedStatuses.has(status)) {
         if (endedAt === undefined) endedAt = Date.now();
         else if (Date.now() - endedAt > endedGraceMs) {
-          throw new Error(`two-way call ended without both parties speaking: ${detail()}`);
+          throw new Error(`${options.label} ended without transcript proof: ${detail()}`);
         }
       }
       return undefined;
     },
-    timeoutMs,
+    options.timeoutMs,
   );
 }
 
-// (useInkboxTts, useInkboxStt) of the AUT's most recent ANSWERED call in
-// `direction` with the driver: (true,true) is Inkbox STT/TTS, (false,false) is
-// the realtime path — so each leg can prove the speech path it claims.
+// The driver-owned leg only has to preserve the driver's scripted local speech.
+export async function waitDriverLocalSpeech(
+  driver: Inkbox,
+  callId: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<string> {
+  return waitForCallSpeech(driver, callId, {
+    requireRemote: false,
+    label: "driver leg",
+    timeoutMs,
+  });
+}
+
+// The AUT-owned leg must show both participants; local speech belongs to the agent.
+export async function waitAgentTwoWayCall(
+  aut: Inkbox,
+  callId: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<string> {
+  return waitForCallSpeech(aut, callId, {
+    requireRemote: true,
+    label: "AUT leg",
+    timeoutMs,
+  });
+}
+
+// Speech mode from the exact AUT-owned call leg.
 export async function autSpeechMode(
   aut: Inkbox,
-  direction: "inbound" | "outbound",
-  driverNumber: string,
-  excludedCallIds: Set<string> = new Set(),
+  callId: string,
 ): Promise<
   | {
       id: string;
@@ -202,30 +223,20 @@ export async function autSpeechMode(
     }
   | undefined
 > {
-  const tail = driverNumber.replace(/\D/g, "").slice(-10);
-  const calls = (await aut.calls.list({ limit: 10 })) as Array<{
+  const c = (await aut.calls.get(callId)) as {
     id: string;
     direction?: string;
     remotePhoneNumber?: string;
     useInkboxTts: boolean | null;
     useInkboxStt: boolean | null;
     voicemailDetection?: string | null;
-  }>;
-  const c = calls.find(
-    (x) =>
-      (x.direction ?? "").toLowerCase() === direction &&
-      !excludedCallIds.has(x.id) &&
-      (x.remotePhoneNumber ?? "").replace(/\D/g, "").slice(-10) === tail &&
-      x.useInkboxTts !== null,
-  );
-  return c
-    ? {
-        id: c.id,
-        tts: c.useInkboxTts,
-        stt: c.useInkboxStt,
-        voicemailDetection: c.voicemailDetection,
-      }
-    : undefined;
+  };
+  return {
+    id: c.id,
+    tts: c.useInkboxTts,
+    stt: c.useInkboxStt,
+    voicemailDetection: c.voicemailDetection,
+  };
 }
 
 // Settle, send an SMS to the AUT, and return the first NEW inbound reply.

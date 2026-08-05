@@ -4,6 +4,62 @@ export interface PairableCall {
   remotePhoneNumber?: string | null;
   createdAt?: Date | string | null;
   created_at?: Date | string | null;
+  pairedCallId?: string | null;
+  paired_call_id?: string | null;
+}
+
+type CallsClient = {
+  calls: {
+    list(options: { limit: number }): Promise<unknown[]>;
+  };
+};
+
+function statusCode(error: unknown): number | undefined {
+  const candidate = error as {
+    status?: number;
+    statusCode?: number;
+    response?: { status?: number };
+  };
+  return candidate?.status ?? candidate?.statusCode ?? candidate?.response?.status;
+}
+
+/** Query one paired leg through the identity that owns it. */
+export async function agentLegForPair<TAut extends PairableCall>(
+  driverCall: PairableCall,
+  aut: CallsClient,
+  fallbackAutCalls: TAut[],
+  options: {
+    direction: "inbound" | "outbound";
+    scenarioStartedAt: number;
+    maxCreationSkewMs: number;
+  },
+): Promise<TAut> {
+  const pairId = driverCall.pairedCallId ?? driverCall.paired_call_id;
+  if (pairId) {
+    try {
+      const list = aut.calls.list as unknown as (options: {
+        limit: number;
+        pairedCallId: string;
+      }) => Promise<TAut[]>;
+      const paired = await list.call(aut.calls, { limit: 2, pairedCallId: pairId });
+      if (paired.length !== 1) {
+        throw new Error(
+          `pairedCallId returned ${paired.length} AUT legs; ids=${JSON.stringify(paired.map((c) => c.id))}`,
+        );
+      }
+      const direction = String(paired[0].direction ?? "").toLowerCase();
+      if (direction !== options.direction) {
+        throw new Error(
+          `paired AUT leg has direction=${JSON.stringify(direction)}; expected=${options.direction}`,
+        );
+      }
+      return paired[0];
+    } catch (error) {
+      if (!(error instanceof TypeError) && statusCode(error) !== 422) throw error;
+    }
+  }
+
+  return requireExactCallPair([driverCall], fallbackAutCalls, options).aut;
 }
 
 function createdAt(call: PairableCall): number | undefined {

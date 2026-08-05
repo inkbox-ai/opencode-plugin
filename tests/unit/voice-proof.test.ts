@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { waitAgentTwoWayCall, waitDriverLocalSpeech } from "../live/helpers.js";
 import {
   containsVoiceMarker,
   hasAfterCallSmsIntent,
@@ -27,5 +28,32 @@ describe("hosted live voice proof normalization", () => {
   it("recognizes open-action SMS wording independently of timing", () => {
     expect(hasSmsIntent("Send a text message containing the marker after the call.")).toBe(true);
     expect(hasSmsIntent("Review the text-message history.")).toBe(false);
+  });
+});
+
+describe("owned-leg transcript proof", () => {
+  it("accepts local-only speech on the driver leg", async () => {
+    const owner = {
+      calls: {
+        transcripts: async () => [{ party: "local", text: "scripted driver line" }],
+        get: async () => ({ status: "answered" }),
+      },
+    };
+    await expect(waitDriverLocalSpeech(owner as never, "driver", 100)).resolves.toBe(
+      "scripted driver line",
+    );
+  });
+
+  it("requires two-way speech on the AUT leg and returns agent-local speech", async () => {
+    const owner = {
+      calls: {
+        transcripts: async () => [
+          { party: "remote", text: "caller line" },
+          { party: "local", text: "agent reply" },
+        ],
+        get: async () => ({ status: "answered" }),
+      },
+    };
+    await expect(waitAgentTwoWayCall(owner as never, "aut", 100)).resolves.toBe("agent reply");
   });
 });

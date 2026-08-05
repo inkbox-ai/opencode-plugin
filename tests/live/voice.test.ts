@@ -1,8 +1,8 @@
 // Live voice-call suite — real phone calls, real model, transcript-verified.
 //
 // A companion driver process (voice-driver.mjs) bridges the driver's side of a
-// real call over its own Inkbox tunnel and speaks one line; we read the stored
-// call transcript and assert both parties spoke. Three scenarios, each run
+// real call over its own Inkbox tunnel and speaks one line. The driver-owned leg
+// proves that local line; the paired AUT-owned leg must prove both parties. Three scenarios, each run
 // against a gateway booted in the matching speech mode and selected by
 // VOICE_SCENARIO:
 //   inbound_inkbox    — driver calls the agent; agent answers Inkbox STT/TTS.
@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { PhoneRuleAction, PhoneRuleMatchType, VoicemailDetection } from "@inkbox/sdk";
 import { describe, expect, it } from "vitest";
-import { requireExactCallPair } from "./call-pairing.js";
+import { agentLegForPair, requireExactCallPair } from "./call-pairing.js";
 import {
   AUT_KEY,
   autSpeechMode,
@@ -20,9 +20,11 @@ import {
   inboundTextsFrom,
   LIVE,
   phoneOf,
+  pollUntil,
   REAL_MODEL,
   REMOTE_KEY,
-  waitTwoWayCall,
+  waitAgentTwoWayCall,
+  waitDriverLocalSpeech,
 } from "./helpers.js";
 import { containsVoiceMarker, hasAfterCallSmsIntent, hasSmsIntent } from "./voice-proof.js";
 
@@ -147,6 +149,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const aut = client(AUT_KEY as string);
       const autPhone = await phoneOf(aut);
       const beforeAutCalls = new Set((await aut.calls.list({ limit: 30 })).map((item) => item.id));
+      const scenarioStartedAt = Date.now() - 5_000;
 
       // Server-side contact rules run before the plugin or its local allow-all
       // setting. Whitelisted smoke identities therefore need the driver allowed
@@ -164,7 +167,40 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       try {
         let agentSaid: string;
         try {
-          agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
+          const driverSaid = await waitDriverLocalSpeech(remote, call.id, VOICE_TIMEOUT_MS);
+          expect(driverSaid.length).toBeGreaterThan(0);
+          const persistedDriverCall = await remote.calls.get(call.id);
+          const agentCall = await pollUntil(
+            "paired AUT leg",
+            async () => {
+              const candidates = (await aut.calls.list({ limit: 30 })).filter(
+                (candidate) =>
+                  !beforeAutCalls.has(candidate.id) &&
+                  String(candidate.direction ?? "").toLowerCase() === "inbound" &&
+                  tail(candidate.remotePhoneNumber ?? "") === tail(st.number),
+              );
+              try {
+                return await agentLegForPair(persistedDriverCall, aut, candidates, {
+                  direction: "inbound",
+                  scenarioStartedAt,
+                  maxCreationSkewMs: 60_000,
+                });
+              } catch (error) {
+                if (candidates.length === 0 || String(error).includes("returned 0 AUT legs")) {
+                  return undefined;
+                }
+                throw error;
+              }
+            },
+            VOICE_TIMEOUT_MS,
+          );
+          agentSaid = await waitAgentTwoWayCall(aut, agentCall.id, VOICE_TIMEOUT_MS);
+          const mode = await autSpeechMode(aut, agentCall.id);
+          expect(mode, "no paired inbound AUT call with the driver").toBeDefined();
+          expect(
+            mode?.tts && mode?.stt,
+            `inbound should be Inkbox STT/TTS, got ${JSON.stringify(mode)}`,
+          ).toBe(true);
         } catch (error) {
           const [driverCall, autCalls, incomingAction, rules] = await Promise.all([
             remote.calls.get(call.id).catch((cause) => ({ error: String(cause) })),
@@ -187,13 +223,6 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         expect(agentSaid.length).toBeGreaterThan(0);
         const persistedDriverCall = await remote.calls.get(call.id);
         expect(String(persistedDriverCall.voicemailDetection).toLowerCase()).toBe("disabled");
-
-        const mode = await autSpeechMode(aut, "inbound", st.number, beforeAutCalls);
-        expect(mode, "no answered inbound AUT call with the driver").toBeDefined();
-        expect(
-          mode?.tts && mode?.stt,
-          `inbound should be Inkbox STT/TTS, got ${JSON.stringify(mode)}`,
-        ).toBe(true);
         // Voicemail detection applies to the driver's outbound dial and is
         // proven on persistedDriverCall above. The mirrored AUT row is an
         // inbound carrier record and does not carry that outbound setting.
@@ -269,23 +298,25 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           );
           throw new Error(`${String(error)}; AUT SMS replies=${JSON.stringify(replies)}`);
         }
-        const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
-        expect(agentSaid.length).toBeGreaterThan(0);
         const persistedDriverCall = await remote.calls.get(call.id);
-
         const freshAutCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
-        const pair = requireExactCallPair([persistedDriverCall], freshAutCalls, {
+        const agentCall = await agentLegForPair(persistedDriverCall, aut, freshAutCalls, {
+          direction: "outbound",
           scenarioStartedAt,
           maxCreationSkewMs: 60_000,
         });
-        const mode: any = await aut.calls.get(pair.aut.id);
+        const driverSaid = await waitDriverLocalSpeech(remote, call.id, VOICE_TIMEOUT_MS);
+        const agentSaid = await waitAgentTwoWayCall(aut, agentCall.id, VOICE_TIMEOUT_MS);
+        expect(driverSaid.length).toBeGreaterThan(0);
+        expect(agentSaid.length).toBeGreaterThan(0);
+        const mode = await autSpeechMode(aut, agentCall.id);
         expect(
-          mode.useInkboxTts === false && mode.useInkboxStt === false,
+          mode?.tts === false && mode?.stt === false,
           `outbound should be Realtime, got ${JSON.stringify(mode)}`,
         ).toBe(true);
         // Voicemail detection belongs to the AUT's call-capable outbound request.
         // The driver's mirrored inbound leg can report its unrelated provider default.
-        expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
+        expect(String(mode?.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {
         await hangupCall(remote, call?.id);
       }
@@ -374,6 +405,21 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         }
         expect(driverCallId && autCallId, JSON.stringify(progress)).toBeTruthy();
         if (!driverCallId || !autCallId) throw new Error(JSON.stringify(progress));
+        const persistedDriverCall = await remote.calls.get(driverCallId);
+        const fallbackAutCalls = (await autLegs()).filter(
+          (candidate) => !beforeAutCalls.has(candidate.id),
+        );
+        const agentCall = await agentLegForPair(persistedDriverCall, aut, fallbackAutCalls, {
+          direction: "outbound",
+          scenarioStartedAt,
+          maxCreationSkewMs: 60_000,
+        });
+        autCallId = agentCall.id;
+        const remainingMs = Math.max(1_000, deadline - Date.now());
+        const driverSaid = await waitDriverLocalSpeech(remote, driverCallId, remainingMs);
+        const agentSaid = await waitAgentTwoWayCall(aut, autCallId, remainingMs);
+        expect(driverSaid.length).toBeGreaterThan(0);
+        expect(agentSaid.length).toBeGreaterThan(0);
         const call: any = await aut.calls.get(autCallId);
         expect(String(call.mode?.value ?? call.mode).toLowerCase()).toBe("hosted_agent");
         expect(
@@ -387,10 +433,10 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         while (Date.now() < deadline) {
           progress.phase = "pre-hangup caller and open-action readiness";
           const [segments, currentAutCall] = await Promise.all([
-            callSegments(remote, driverCallId).catch(() => ({ agent: [], driver: [] })),
+            callSegments(aut, autCallId).catch(() => ({ remote: [], local: [] })),
             aut.calls.get(autCallId),
           ]);
-          const caller = segments.driver
+          const caller = segments.remote
             .join(" ")
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, " ");
@@ -401,9 +447,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             [item.action, item.details].filter(Boolean).join(" "),
           );
           const callerReady =
-            segments.agent.length > 0 &&
-            hasAfterCallSmsIntent(caller) &&
-            containsVoiceMarker(caller, HOSTED_MARKER);
+            hasAfterCallSmsIntent(caller) && containsVoiceMarker(caller, HOSTED_MARKER);
           const actionReady = actionEvidence.some(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
@@ -414,7 +458,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             containsVoiceMarker(value, HOSTED_MARKER),
           ).length;
           progress.last =
-            `agent_segments=${segments.agent.length} caller_ready=${callerReady} ` +
+            `agent_segments=${segments.local.length} caller_ready=${callerReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
             `sms_actions=${smsActionCount} marker_actions=${markerActionCount}`;
           if (callerReady && actionReady) break;
