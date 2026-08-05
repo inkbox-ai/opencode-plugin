@@ -74,6 +74,12 @@ export function activeA2ATurn(sessionID: string): ActiveA2ATurn | undefined {
   return turns.get(sessionID) ?? readTurn(sessionID);
 }
 
+export function a2aReplyIntentCommitted(sessionID: string, turn: ActiveA2ATurn): boolean {
+  if (turn.replyIntentCommitted) return true;
+  const persisted = readTurn(sessionID);
+  return Boolean(persisted && sameTurn(persisted, turn) && persisted.replyIntentCommitted);
+}
+
 export function commitActiveA2ATurn(sessionID: string, turn: ActiveA2ATurn): void {
   turn.replyIntentCommitted = true;
   writeTurn(sessionID, turn);

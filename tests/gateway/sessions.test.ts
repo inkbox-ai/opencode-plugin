@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { a2aTurnContextPath } from "../../src/a2a-context.js";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { getHostedCall, saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
@@ -466,6 +467,32 @@ describe("capture turns", () => {
     await d.mgr.runA2A("a2a:context-1", "task", context);
 
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
+  });
+
+  it("releases an A2A session after a tool commits the remote reply", async () => {
+    const d = makeManager();
+    process.env.INKBOX_OPENCODE_HOME = d.dir;
+    d.setAutoComplete(false);
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+
+    const pending = d.mgr.runA2A("a2a:context-1", "task", context);
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    fs.writeFileSync(
+      a2aTurnContextPath("sess-1"),
+      `${JSON.stringify({ ...context, replyIntentCommitted: true })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(d.opencode.session.abort).toHaveBeenCalledWith({
+      path: { id: "sess-1" },
+      query: { directory: "/proj" },
+    });
   });
 });
 
