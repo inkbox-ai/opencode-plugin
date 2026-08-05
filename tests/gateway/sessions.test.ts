@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { a2aTurnContextPath } from "../../src/a2a-context.js";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
-import { getHostedCall, saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
+import {
+  beginHostedSmsAttempt,
+  getHostedCall,
+  saveHostedCall,
+  settleHostedSmsAttempt,
+} from "../../src/gateway/hosted-call-registry.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
@@ -415,6 +420,36 @@ describe("capture turns", () => {
     const submitted = d.opencode.session.promptAsync.mock.calls.length;
     await d.mgr.runHostedCapture?.("ck", "call", capture);
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
+  });
+
+  it("releases a hosted session after its SMS attempt is durably settled", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    d.setAutoComplete(false);
+    const capture = {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "initial" as const,
+      expectedTarget: "+14155550123",
+    };
+
+    const pending = d.mgr.runHostedCapture?.("ck", "call", capture);
+    await vi.waitFor(() =>
+      expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-1"),
+    );
+    const guard = beginHostedSmsAttempt({
+      sessionID: "sess-1",
+      target: "+14155550123",
+      hasConversationId: false,
+    });
+    if (!guard) throw new Error("Expected the hosted SMS attempt to start.");
+    settleHostedSmsAttempt(guard, "success");
+
+    await expect(pending).resolves.toMatchObject({ attempt: { state: "success" } });
+    expect(d.opencode.session.abort).toHaveBeenCalledWith({
+      path: { id: "sess-1" },
+      query: { directory: "/proj" },
+    });
   });
 
   it("restores the hosted SMS guard before monitoring a submitted turn", async () => {

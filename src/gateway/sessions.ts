@@ -211,6 +211,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     );
   }
 
+  async function stopToolCompletedSession(sessionID: string): Promise<void> {
+    const aborted = await deps.opencode.session.abort({
+      path: { id: sessionID },
+      query: { directory: deps.directory },
+    });
+    const error = (aborted as any)?.error;
+    if (error) throw new Error(`session.abort failed: ${JSON.stringify(error).slice(0, 300)}`);
+  }
+
   async function submit(turn: DurableTurn): Promise<DurableTurn> {
     const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey));
     const next = deps.state.transitionTurn(turn.id, ["queued"], {
@@ -267,15 +276,22 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         throw new Error("Durable turn lease was lost.");
       }
       if (deps.state.getTurn(turn.id)?.state === "interrupted") return undefined;
-      if (turn.a2aContext && a2aReplyIntentCommitted(turn.sessionID, turn.a2aContext)) {
-        const aborted = await deps.opencode.session.abort({
-          path: { id: turn.sessionID },
-          query: { directory: deps.directory },
-        });
-        const error = (aborted as any)?.error;
-        if (error) {
-          throw new Error(`session.abort failed: ${JSON.stringify(error).slice(0, 300)}`);
+      if (turn.hostedCapture) {
+        const entry = getHostedCall(turn.hostedCapture.identityId, turn.hostedCapture.callId);
+        const attempt = entry?.smsAttempts.find(
+          (candidate) => candidate.phase === turn.hostedCapture?.phase,
+        );
+        if (attempt && attempt.state !== "pending") {
+          await stopToolCompletedSession(turn.sessionID);
+          deps.logger.info("hosted_call.turn_stopped_after_sms_attempt", {
+            callId: turn.hostedCapture.callId,
+            state: attempt.state,
+          });
+          return undefined;
         }
+      }
+      if (turn.a2aContext && a2aReplyIntentCommitted(turn.sessionID, turn.a2aContext)) {
+        await stopToolCompletedSession(turn.sessionID);
         deps.logger.info("a2a.turn_stopped_after_reply", {
           taskId: turn.a2aContext.taskId,
         });
