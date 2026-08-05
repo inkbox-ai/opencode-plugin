@@ -11,7 +11,9 @@
 // file (ws url + phone-number id) the test reads.
 //
 // Env: REMOTE_INKBOX_API_KEY, INKBOX_BASE_URL, VOICE_DRIVER_STATE,
-//      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s), VOICE_DRIVER_LISTEN (s),
+//      VOICE_DRIVER_LINE, VOICE_DRIVER_FOLLOWUP_LINE,
+//      VOICE_DRIVER_FOLLOWUP_AFTER (s), VOICE_DRIVER_SPEAK_AFTER (s),
+//      VOICE_DRIVER_LISTEN (s),
 //      VOICE_DRIVER_AUTO_STOP (false lets the test own hangup timing)
 import { writeFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
@@ -23,6 +25,8 @@ const STATE_FILE = process.env.VOICE_DRIVER_STATE || "/tmp/voice_driver_state.js
 const LINE =
   process.env.VOICE_DRIVER_LINE ||
   "Hi, this is a quick test call. Please reply out loud with one short sentence, then say goodbye.";
+const FOLLOWUP_LINE = (process.env.VOICE_DRIVER_FOLLOWUP_LINE || "").trim();
+const FOLLOWUP_AFTER_MS = Number(process.env.VOICE_DRIVER_FOLLOWUP_AFTER || "45") * 1000;
 // Answering-machine detection scores whoever answers: a greeting longer than the
 // carrier's `greeting_duration_millis` (3.5s) reads as a voicemail announcement
 // and the call is hung up before the agent ever speaks. Answer the way a person
@@ -72,7 +76,13 @@ async function callWsHandler(ws) {
     await say(GREETING);
     await sleep(SPEAK_AFTER_MS);
     await speak(LINE);
-    await sleep(LISTEN_MS);
+    if (FOLLOWUP_LINE) {
+      await sleep(Math.min(FOLLOWUP_AFTER_MS, LISTEN_MS));
+      await say(FOLLOWUP_LINE);
+      await sleep(Math.max(0, LISTEN_MS - FOLLOWUP_AFTER_MS));
+    } else {
+      await sleep(LISTEN_MS);
+    }
     if (!AUTO_STOP) return;
     try {
       await ws.send(JSON.stringify({ event: "stop" }));
