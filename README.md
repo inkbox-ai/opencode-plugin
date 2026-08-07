@@ -55,19 +55,50 @@ run `./install.sh` instead; it uses the checkout in place. Rerun the wizard
 anytime with `inkbox-opencode setup` (`setup --print` for the static
 checklist), and check the wiring with `inkbox-opencode doctor`.
 
-### Bootstrap an existing identity without prompts
+### Bootstrap an assigned identity without prompts
 
-For unattended agent setup, install without opening the wizard and pass the API key through the environment:
+An agent that has been given an identity handle, API base URL, and credential can
+complete setup without using the signup wizard. First inspect this repository and
+`install.sh`, then run the reviewed installer without opening interactive setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh | bash -s -- --no-setup
-export INKBOX_API_KEY="ApiKey_..."
-inkbox-opencode bootstrap --identity my-agent --project-dir "$PWD" \
+installer="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh -o "$installer"
+cat "$installer"
+bash "$installer" --no-setup
+rm -f "$installer"
+```
+
+Have the human provide the assigned credential through a private secret-input
+mechanism that exposes `INKBOX_API_KEY` only to the bootstrap process; do not ask
+them to paste it into chat. Do not put it in a command argument, source control,
+project instructions, or a checked-in environment file. Replace `<handle>` and
+`<url>` with the assigned values, preserving the assigned identity rather than
+creating another one:
+
+```bash
+inkbox-opencode bootstrap --identity "<handle>" --base-url "<url>" --project-dir "$PWD" \
   --voice-ai --rotate-signing-key --start-gateway
 unset INKBOX_API_KEY
 ```
 
-`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, and starts or restarts the detached gateway. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+`bootstrap` is non-interactive and resumable. It validates the exact identity,
+scopes down an admin key before saving it in the plugin's private local
+configuration, preserves existing Voice AI settings, and starts or restarts the
+detached gateway. Signing-key replacement is explicit because it transfers
+verified webhook delivery away from gateways using the previous key.
+
+The command prints a secret-redacted JSON result. Handle it by `status`:
+
+- `configured`: run `inkbox-opencode doctor` to verify the installation,
+  credentials, identity, connectivity, and gateway.
+- `requires_human`: show the human every entry in `humanActions`, wait for them
+  to complete the requested action, then resume by running the same bootstrap
+  command with the same assigned identity.
+- `error`: inspect the redacted `error` and completed `actions`, run
+  `inkbox-opencode doctor` for diagnostics when configuration was saved, correct
+  the cause, and retry the same bootstrap command. Do not switch to signup or
+  create a replacement identity.
 
 ### Manual install (per-project, or no installer)
 
