@@ -19,15 +19,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: python3 -m unittest tests/live/test_a2a_preflight.py
       - run: npm run build
 
   # Same contract suite canary runs on a schedule, but here it gates PRs so a
@@ -46,13 +50,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: |
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
@@ -72,10 +76,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm install -g opencode-ai@latest
+      - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - run: INKBOX_SDK_PATH="$PWD/.ci/inkbox/sdk/typescript" bash scripts/smoke-loader.sh

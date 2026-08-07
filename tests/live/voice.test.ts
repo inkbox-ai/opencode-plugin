@@ -14,14 +14,14 @@ import { describe, expect, it } from "vitest";
 import { requireExactCallPair } from "./call-pairing.js";
 import {
   AUT_KEY,
-  autSpeechMode,
   callSegments,
   client,
-  inboundTextsFrom,
   LIVE,
+  listCalls,
   phoneOf,
   REAL_MODEL,
   REMOTE_KEY,
+  waitDriverLocalSpeech,
   waitTwoWayCall,
 } from "./helpers.js";
 import { containsVoiceMarker, hasAfterCallSmsIntent, hasSmsIntent } from "./voice-proof.js";
@@ -39,23 +39,15 @@ interface DriverState {
 }
 
 const callSummary = (call: {
-  id: string;
   direction: string;
   status: string;
-  localPhoneNumber: string | null;
-  remotePhoneNumber: string;
-  clientWebsocketUrl: string | null;
   useInkboxTts: boolean | null;
   useInkboxStt: boolean | null;
   hangupReason: string | null;
   isBlocked: boolean;
 }) => ({
-  id: call.id,
   direction: call.direction,
   status: call.status,
-  localPhoneNumber: call.localPhoneNumber,
-  remotePhoneNumber: call.remotePhoneNumber,
-  clientWebsocketUrl: call.clientWebsocketUrl,
   useInkboxTts: call.useInkboxTts,
   useInkboxStt: call.useInkboxStt,
   hangupReason: call.hangupReason,
@@ -120,7 +112,7 @@ async function hangupCall(
   try {
     await inkbox.calls.hangup(callId);
     return;
-  } catch (hangupError) {
+  } catch {
     let status = "unknown";
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
@@ -131,10 +123,89 @@ async function hangupCall(
       if (["completed", "canceled", "failed"].includes(status)) return;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    throw new Error(
-      `failed to hang up live test call ${callId}; status=${JSON.stringify(status)}; error=${String(hangupError)}`,
-    );
+    throw new Error(`failed to hang up live test call; final status=${JSON.stringify(status)}`);
   }
+}
+
+const terminalStatuses = new Set(["completed", "canceled", "failed"]);
+
+async function sweepActiveCalls(
+  inkbox: ReturnType<typeof client>,
+  matching: () => Promise<any[]>,
+): Promise<void> {
+  const active = (await matching()).filter(
+    (call) => !terminalStatuses.has(String(call.status ?? "").toLowerCase()),
+  );
+  await Promise.allSettled(active.map((call) => hangupCall(inkbox, call.id)));
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const remaining = (await matching()).filter(
+      (call) => !terminalStatuses.has(String(call.status ?? "").toLowerCase()),
+    );
+    if (remaining.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error("matching active calls did not settle before the live scenario");
+}
+
+async function cleanupFreshCalls(
+  inkbox: ReturnType<typeof client>,
+  matching: () => Promise<any[]>,
+  before: Set<string>,
+): Promise<void> {
+  const fresh = (await matching()).filter((call) => !before.has(call.id));
+  const results = await Promise.allSettled(fresh.map((call) => hangupCall(inkbox, call.id)));
+  if (results.some((result) => result.status === "rejected")) {
+    throw new Error("one or more fresh live-test calls could not be cleaned up");
+  }
+}
+
+async function waitForStableCallPair(
+  driverLegs: () => Promise<any[]>,
+  autLegs: () => Promise<any[]>,
+  beforeDriver: Set<string>,
+  beforeAut: Set<string>,
+  scenarioStartedAt: number,
+  deadline: number,
+): Promise<{ driver: any; aut: any }> {
+  let stableKey: string | undefined;
+  let stableSince = 0;
+  let lastCounts = { driver: 0, aut: 0 };
+  while (Date.now() < deadline) {
+    const freshDriver = (await driverLegs()).filter(
+      (call) => !beforeDriver.has(call.id) && (recordCreatedAt(call) ?? -1) >= scenarioStartedAt,
+    );
+    const freshAut = (await autLegs()).filter(
+      (call) => !beforeAut.has(call.id) && (recordCreatedAt(call) ?? -1) >= scenarioStartedAt,
+    );
+    lastCounts = { driver: freshDriver.length, aut: freshAut.length };
+    if (freshDriver.length > 1 || freshAut.length > 1) {
+      return requireExactCallPair(freshDriver, freshAut, {
+        scenarioStartedAt,
+        maxCreationSkewMs: 60_000,
+      });
+    }
+    if (freshDriver.length === 1 && freshAut.length === 1) {
+      const pair = requireExactCallPair(freshDriver, freshAut, {
+        scenarioStartedAt,
+        maxCreationSkewMs: 60_000,
+      });
+      const key = `${pair.driver.id}:${pair.aut.id}`;
+      if (key !== stableKey) {
+        stableKey = key;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= 6_000) {
+        return pair;
+      }
+    } else {
+      stableKey = undefined;
+      stableSince = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error(
+    `timed out waiting for one stable call record per owner; driver_records=${lastCounts.driver} aut_records=${lastCounts.aut}`,
+  );
 }
 
 describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
@@ -146,14 +217,32 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const remote = client(REMOTE_KEY as string);
       const aut = client(AUT_KEY as string);
       const autPhone = await phoneOf(aut);
-      const beforeAutCalls = new Set((await aut.calls.list({ limit: 30 })).map((item) => item.id));
+      const autTail = tail(autPhone.number);
+      const driverTail = tail(st.number);
+      const driverLegs = async () =>
+        (await listCalls(remote)).filter(
+          (call) =>
+            String(call.direction ?? "").toLowerCase() === "outbound" &&
+            tail(call.remotePhoneNumber ?? "") === autTail,
+        );
+      const autLegs = async () =>
+        (await listCalls(aut)).filter(
+          (call) =>
+            String(call.direction ?? "").toLowerCase() === "inbound" &&
+            tail(call.remotePhoneNumber ?? "") === driverTail,
+        );
 
       // Server-side contact rules run before the plugin or its local allow-all
       // setting. Whitelisted smoke identities therefore need the driver allowed
       // explicitly or the call is rejected before either media WS connects.
       await ensureDriverAllowed(aut, st.number);
+      await sweepActiveCalls(remote, driverLegs);
+      await sweepActiveCalls(aut, autLegs);
+      const beforeDriver = new Set((await driverLegs()).map((call) => call.id));
+      const beforeAut = new Set((await autLegs()).map((call) => call.id));
 
       // Place the call to the agent, handing Inkbox the driver's own media WS.
+      const scenarioStartedAt = Date.now() - 5_000;
       const call = await remote.calls.place({
         toNumber: autPhone.number,
         fromNumber: st.number,
@@ -162,43 +251,35 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       });
       console.info(`inbound call placed: ${JSON.stringify(callSummary(call))}`);
       try {
-        let agentSaid: string;
-        try {
-          agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
-        } catch (error) {
-          const [driverCall, autCalls, incomingAction, rules] = await Promise.all([
-            remote.calls.get(call.id).catch((cause) => ({ error: String(cause) })),
-            aut.calls.list({ limit: 10 }).catch((cause) => [{ error: String(cause) }]),
-            aut.incomingCallAction.get().catch((cause) => ({ error: String(cause) })),
-            aut.phoneIdentityContactRules
-              .list((await aut.mailboxes.list())[0]?.emailAddress.split("@", 1)[0] ?? "")
-              .catch((cause) => [{ error: String(cause) }]),
-          ]);
-          throw new Error(
-            `${String(error)}; inbound diagnostics=${JSON.stringify({
-              placedCall: callSummary(call),
-              driverCall,
-              autCalls,
-              incomingAction,
-              rules,
-            })}`,
-          );
-        }
+        const pair = await waitForStableCallPair(
+          driverLegs,
+          autLegs,
+          beforeDriver,
+          beforeAut,
+          scenarioStartedAt,
+          Date.now() + VOICE_TIMEOUT_MS,
+        );
+        expect(pair.driver.id === call.id).toBe(true);
+        const [driverSaid, agentSaid] = await Promise.all([
+          waitDriverLocalSpeech(remote, pair.driver.id, VOICE_TIMEOUT_MS),
+          waitTwoWayCall(aut, pair.aut.id, VOICE_TIMEOUT_MS),
+        ]);
+        expect(driverSaid.length).toBeGreaterThan(0);
         expect(agentSaid.length).toBeGreaterThan(0);
-        const persistedDriverCall = await remote.calls.get(call.id);
+        const persistedDriverCall = await remote.calls.get(pair.driver.id);
         expect(String(persistedDriverCall.voicemailDetection).toLowerCase()).toBe("disabled");
 
-        const mode = await autSpeechMode(aut, "inbound", st.number, beforeAutCalls);
-        expect(mode, "no answered inbound AUT call with the driver").toBeDefined();
+        const mode = await aut.calls.get(pair.aut.id);
         expect(
-          mode?.tts && mode?.stt,
-          `inbound should be Inkbox STT/TTS, got ${JSON.stringify(mode)}`,
+          mode.useInkboxTts && mode.useInkboxStt,
+          `inbound should use managed STT/TTS; ${JSON.stringify(callSummary(mode))}`,
         ).toBe(true);
         // Voicemail detection applies to the driver's outbound dial and is
         // proven on persistedDriverCall above. The mirrored AUT row is an
         // inbound carrier record and does not carry that outbound setting.
       } finally {
-        await hangupCall(remote, call.id);
+        await cleanupFreshCalls(remote, driverLegs, beforeDriver);
+        await cleanupFreshCalls(aut, autLegs, beforeAut);
       }
     },
   );
@@ -215,25 +296,22 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const driverTail = tail(st.number);
 
       const inboundFromAut = async () =>
-        (await remote.calls.list({ limit: 30 })).filter(
+        (await listCalls(remote)).filter(
           (c) =>
             (c.direction ?? "").toLowerCase() === "inbound" &&
             tail(c.remotePhoneNumber ?? "") === autTail,
         );
 
-      const before = new Set((await inboundFromAut()).map((c) => c.id));
       const outboundFromAut = async () =>
-        (await aut.calls.list({ limit: 30 })).filter(
+        (await listCalls(aut)).filter(
           (c) =>
             (c.direction ?? "").toLowerCase() === "outbound" &&
             tail(c.remotePhoneNumber ?? "") === driverTail,
         );
+      await sweepActiveCalls(remote, inboundFromAut);
+      await sweepActiveCalls(aut, outboundFromAut);
+      const before = new Set((await inboundFromAut()).map((c) => c.id));
       const beforeAut = new Set((await outboundFromAut()).map((c) => c.id));
-      const beforeTexts = new Set(
-        (await inboundTextsFrom(remote, st.number_id, autPhone.number)).map(
-          (message) => message.id,
-        ),
-      );
       const scenarioStartedAt = Date.now() - 5_000;
       const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
@@ -241,53 +319,32 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         text: "Please call me right now by phone and set voicemailDetection to disabled.",
       });
 
-      let call: Awaited<ReturnType<typeof inboundFromAut>>[number] | undefined;
       try {
-        try {
-          const duplicateGraceMs = 10_000;
-          let firstPairAt: number | undefined;
-          while (Date.now() < deadline) {
-            const driverCalls = (await inboundFromAut()).filter((c) => !before.has(c.id));
-            const autCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
-            if (driverCalls.length > 0 && autCalls.length > 0) {
-              firstPairAt ??= Date.now();
-              if (Date.now() - firstPairAt >= duplicateGraceMs) {
-                const pair = requireExactCallPair(driverCalls, autCalls, {
-                  scenarioStartedAt,
-                  maxCreationSkewMs: 60_000,
-                });
-                call = pair.driver;
-                break;
-              }
-            }
-            await new Promise((resolve) => setTimeout(resolve, 2_000));
-          }
-          if (!call) throw new Error("Timed out waiting for one unambiguous Realtime call pair.");
-        } catch (error) {
-          const replies = (await inboundTextsFrom(remote, st.number_id, autPhone.number)).filter(
-            (message) => !beforeTexts.has(message.id),
-          );
-          throw new Error(`${String(error)}; AUT SMS replies=${JSON.stringify(replies)}`);
-        }
-        const agentSaid = await waitTwoWayCall(remote, call.id, VOICE_TIMEOUT_MS);
-        expect(agentSaid.length).toBeGreaterThan(0);
-        const persistedDriverCall = await remote.calls.get(call.id);
-
-        const freshAutCalls = (await outboundFromAut()).filter((c) => !beforeAut.has(c.id));
-        const pair = requireExactCallPair([persistedDriverCall], freshAutCalls, {
+        const pair = await waitForStableCallPair(
+          inboundFromAut,
+          outboundFromAut,
+          before,
+          beforeAut,
           scenarioStartedAt,
-          maxCreationSkewMs: 60_000,
-        });
+          deadline,
+        );
+        const [driverSaid, agentSaid] = await Promise.all([
+          waitDriverLocalSpeech(remote, pair.driver.id, VOICE_TIMEOUT_MS),
+          waitTwoWayCall(aut, pair.aut.id, VOICE_TIMEOUT_MS),
+        ]);
+        expect(driverSaid.length).toBeGreaterThan(0);
+        expect(agentSaid.length).toBeGreaterThan(0);
         const mode: any = await aut.calls.get(pair.aut.id);
         expect(
           mode.useInkboxTts === false && mode.useInkboxStt === false,
-          `outbound should be Realtime, got ${JSON.stringify(mode)}`,
+          `outbound should use Realtime speech; ${JSON.stringify(callSummary(mode))}`,
         ).toBe(true);
         // Voicemail detection belongs to the AUT's call-capable outbound request.
         // The driver's mirrored inbound leg can report its unrelated provider default.
         expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {
-        await hangupCall(remote, call?.id);
+        await cleanupFreshCalls(remote, inboundFromAut, before);
+        await cleanupFreshCalls(aut, outboundFromAut, beforeAut);
       }
     },
   );
@@ -309,34 +366,31 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const autIdentity = await aut.getIdentity(autHandle);
       const savedAuthority = (await autIdentity.getHostedAgentConfig()).authorityMode;
       const expectedAuthority = String((savedAuthority as any)?.value ?? savedAuthority);
-      const deadline = Date.now() + VOICE_TIMEOUT_MS;
       const progress = { phase: "baseline", last: "" };
 
       const driverLegs = async () =>
-        (await remote.calls.list({ limit: 30 })).filter(
+        (await listCalls(remote)).filter(
           (call) =>
             String(call.direction ?? "").toLowerCase() === "inbound" &&
             tail(call.remotePhoneNumber ?? "") === autTail,
         );
       const autLegs = async () =>
-        (await aut.calls.list({ limit: 30 })).filter(
+        (await listCalls(aut)).filter(
           (call) =>
             String(call.direction ?? "").toLowerCase() === "outbound" &&
             tail(call.remotePhoneNumber ?? "") === driverTail,
         );
 
+      await sweepActiveCalls(remote, driverLegs);
+      await sweepActiveCalls(aut, autLegs);
       const baselineDriverCalls = await driverLegs();
       const baselineAutCalls = await autLegs();
       const beforeDriverCalls = new Set(baselineDriverCalls.map((call) => call.id));
       const beforeAutCalls = new Set(baselineAutCalls.map((call) => call.id));
       const baseline = await outboundTextsTo(aut, autPhone.id, st.number);
       const beforeSmsIds = new Set(baseline.map((message: any) => message.id));
-      const watermark = Math.max(
-        0,
-        ...baseline.map(recordCreatedAt).filter((value): value is number => value !== undefined),
-      );
-
       const scenarioStartedAt = Date.now() - 5_000;
+      const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
         text:
@@ -346,35 +400,21 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           `Do not text before calling. Request ref ${Date.now().toString(36)}.`,
       });
 
-      let driverCallId: string | undefined;
       let autCallId: string | undefined;
       try {
-        const duplicateGraceMs = 10_000;
-        let firstPairAt: number | undefined;
-        while (Date.now() < deadline) {
-          progress.phase = "hosted call placement";
-          const freshDriver = (await driverLegs()).filter(
-            (call) => !beforeDriverCalls.has(call.id),
-          );
-          const freshAut = (await autLegs()).filter((call) => !beforeAutCalls.has(call.id));
-          progress.last = `driver_records=${freshDriver.length} aut_records=${freshAut.length}`;
-          if (freshDriver.length > 0 && freshAut.length > 0) {
-            firstPairAt ??= Date.now();
-            if (Date.now() - firstPairAt >= duplicateGraceMs) {
-              const pair = requireExactCallPair(freshDriver, freshAut, {
-                scenarioStartedAt,
-                maxCreationSkewMs: 60_000,
-              });
-              driverCallId = pair.driver.id;
-              autCallId = pair.aut.id;
-              break;
-            }
-          }
-          await new Promise((resolve) => setTimeout(resolve, 5_000));
-        }
-        expect(driverCallId && autCallId, JSON.stringify(progress)).toBeTruthy();
-        if (!driverCallId || !autCallId) throw new Error(JSON.stringify(progress));
-        const call: any = await aut.calls.get(autCallId);
+        progress.phase = "hosted call placement";
+        const pair = await waitForStableCallPair(
+          driverLegs,
+          autLegs,
+          beforeDriverCalls,
+          beforeAutCalls,
+          scenarioStartedAt,
+          deadline,
+        );
+        const currentDriverCallId = pair.driver.id;
+        const currentAutCallId = pair.aut.id;
+        autCallId = currentAutCallId;
+        const call: any = await aut.calls.get(currentAutCallId);
         expect(String(call.mode?.value ?? call.mode).toLowerCase()).toBe("hosted_agent");
         expect(
           String(call.voicemailDetection?.value ?? call.voicemailDetection).toLowerCase(),
@@ -383,14 +423,17 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         expect(String(call.hostedAgentAuthorityMode?.value ?? call.hostedAgentAuthorityMode)).toBe(
           expectedAuthority,
         );
+        const agentSaid = await waitTwoWayCall(aut, currentAutCallId, VOICE_TIMEOUT_MS);
+        expect(agentSaid.length).toBeGreaterThan(0);
 
         while (Date.now() < deadline) {
           progress.phase = "pre-hangup caller and open-action readiness";
-          const [segments, currentAutCall] = await Promise.all([
-            callSegments(remote, driverCallId).catch(() => ({ agent: [], driver: [] })),
-            aut.calls.get(autCallId),
+          const [driverSegments, autSegments, currentAutCall] = await Promise.all([
+            callSegments(remote, currentDriverCallId).catch(() => ({ remote: [], local: [] })),
+            callSegments(aut, currentAutCallId).catch(() => ({ remote: [], local: [] })),
+            aut.calls.get(currentAutCallId),
           ]);
-          const caller = segments.driver
+          const caller = driverSegments.local
             .join(" ")
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, " ");
@@ -401,10 +444,8 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             [item.action, item.details].filter(Boolean).join(" "),
           );
           const callerReady =
-            segments.agent.length > 0 &&
-            hasAfterCallSmsIntent(caller) &&
-            containsVoiceMarker(caller, HOSTED_MARKER);
-          const actionReady = actionEvidence.some(
+            hasAfterCallSmsIntent(caller) && containsVoiceMarker(caller, HOSTED_MARKER);
+          const matchingActions = actionEvidence.filter(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
           const smsActionCount = actionEvidence.filter((value: string) =>
@@ -413,18 +454,27 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           const markerActionCount = actionEvidence.filter((value: string) =>
             containsVoiceMarker(value, HOSTED_MARKER),
           ).length;
+          const twoWayReady = autSegments.remote.length > 0 && autSegments.local.length > 0;
+          const actionReady =
+            openActions.length === 1 &&
+            matchingActions.length === 1 &&
+            smsActionCount === 1 &&
+            markerActionCount === 1;
           progress.last =
-            `agent_segments=${segments.agent.length} caller_ready=${callerReady} ` +
+            `agent_segments=${autSegments.local.length} two_way_ready=${twoWayReady} ` +
+            `caller_ready=${callerReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
             `sms_actions=${smsActionCount} marker_actions=${markerActionCount}`;
-          if (callerReady && actionReady) break;
+          if (twoWayReady && callerReady && actionReady) break;
           await new Promise((resolve) => setTimeout(resolve, 5_000));
         }
         expect(progress.phase).toBe("pre-hangup caller and open-action readiness");
+        expect(progress.last).toContain("two_way_ready=true");
         expect(progress.last).toContain("caller_ready=true");
         expect(progress.last).toContain("action_ready=true");
       } finally {
-        await hangupCall(remote, driverCallId);
+        await cleanupFreshCalls(remote, driverLegs, beforeDriverCalls);
+        await cleanupFreshCalls(aut, autLegs, beforeAutCalls);
       }
 
       const duplicateGraceMs = 10_000;
@@ -435,7 +485,9 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         const fresh = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
           (message: any) => {
             const created = recordCreatedAt(message);
-            return !beforeSmsIds.has(message.id) && created !== undefined && created >= watermark;
+            return (
+              !beforeSmsIds.has(message.id) && created !== undefined && created >= scenarioStartedAt
+            );
           },
         );
         matched = fresh.filter((message: any) =>
@@ -458,14 +510,13 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
             (message: any) =>
               !beforeSmsIds.has(message.id) &&
-              (recordCreatedAt(message) ?? -1) >= watermark &&
+              (recordCreatedAt(message) ?? -1) >= scenarioStartedAt &&
               containsVoiceMarker(String(message.text ?? ""), HOSTED_MARKER),
           );
-          expect(afterGrace).toHaveLength(1);
+          expect(afterGrace.length).toBe(1);
           return;
         }
-        if (registryEntry?.state === "failed")
-          throw new Error(`hosted settlement failed: ${JSON.stringify(registryEntry)}`);
+        if (registryEntry?.state === "failed") throw new Error("hosted settlement failed");
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
       throw new Error(`hosted SMS settlement timed out: ${JSON.stringify(progress)}`);

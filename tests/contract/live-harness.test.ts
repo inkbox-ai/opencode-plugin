@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const liveAut = readFileSync("scripts/live-aut.sh", "utf8");
 const liveChannels = readFileSync(".github/workflows/live-channels.yml", "utf8");
 const liveVoice = readFileSync(".github/workflows/live-voice.yml", "utf8");
+const liveStack = readFileSync(".github/workflows/live-stack.yml", "utf8");
 
 function shellCommands(source: string): string[] {
   return source.replace(/\\\n\s*/g, " ").split("\n");
@@ -58,15 +59,29 @@ describe("live harness readiness bounds", () => {
 
   it("requires the hosted caller to persist and read back the exact SMS body", () => {
     expect(liveVoice).toContain(
-      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create one post-call action now with the title Send SMS and put this exact five-word SMS body in the action details: $HOSTED_MARKER. Wait for the action tool to succeed, then read all five words back to me. Do not paraphrase, omit a word, or send the SMS during the call."',
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS with this exact three-word body: $HOSTED_MARKER. Record one post-call SMS action now. Once the action tool succeeds, read the exact three words back to me. Do not send the SMS during the call."',
     );
   });
 
-  it("preserves diagnostics when the voice job is cancelled by its timeout", () => {
-    expect(liveVoice.match(/if: failure\(\) \|\| cancelled\(\)/g)).toHaveLength(2);
+  it("keeps failure diagnostics content-free and out of public artifacts", () => {
+    for (const workflow of [liveChannels, liveVoice]) {
+      expect(workflow).toContain("Report content-free failure state");
+      expect(workflow).not.toContain("actions/upload-artifact");
+      expect(workflow).not.toMatch(/cat .*\.log/);
+      expect(workflow).not.toMatch(/tail .*\.log/);
+    }
   });
 
-  it("preserves diagnostics when the live-channel job is cancelled by its timeout", () => {
-    expect(liveChannels.match(/if: failure\(\) \|\| cancelled\(\)/g)).toHaveLength(2);
+  it("runs the complete live matrix on PRs without canceling active cycles", () => {
+    expect(liveStack).toContain("pull_request:");
+    expect(liveStack).toContain("github.event_name == 'pull_request'");
+    expect(liveStack).toContain("cancel-in-progress: false");
+  });
+
+  it("uses bounded retries only for npm setup", () => {
+    for (const workflow of [liveChannels, liveVoice]) {
+      expect(workflow).toContain('tests/ci/npm_with_retry.sh" ci');
+      expect(workflow).toContain('tests/ci/npm_with_retry.sh" install');
+    }
   });
 });

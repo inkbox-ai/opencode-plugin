@@ -30,6 +30,27 @@ export function client(apiKey: string): Inkbox {
   return new Inkbox({ apiKey, baseUrl: BASE_URL });
 }
 
+export async function retrySafeRead<T>(
+  read: () => Promise<T>,
+  options: { attempts?: number; delayMs?: number } = {},
+): Promise<T> {
+  const attempts = options.attempts ?? 4;
+  const delayMs = options.delayMs ?? 1_000;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await read();
+    } catch {
+      if (attempt === attempts) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt * delayMs));
+    }
+  }
+  throw new Error(`idempotent live API read failed after ${attempts} attempts`);
+}
+
+export async function listCalls(c: Inkbox, limit = 30) {
+  return retrySafeRead(() => c.calls.list({ limit }));
+}
+
 export function nonce(): string {
   return `smoke-${randomBytes(4).toString("hex")}`;
 }
@@ -65,9 +86,7 @@ export function assertNotErrorReply(body: string, label: string): void {
   const lower = body.toLowerCase();
   const bad = ERROR_MARKERS.filter((m) => lower.includes(m));
   if (bad.length > 0) {
-    throw new Error(
-      `${label}: reply is an error, not an answer (${bad.join(", ")}): ${body.slice(0, 200)}`,
-    );
+    throw new Error(`${label}: reply is an error, not an answer (${bad.join(", ")})`);
   }
 }
 
@@ -123,24 +142,22 @@ export async function inboundTextsFrom(
   return out;
 }
 
-// A call's transcript split by who spoke. Read from the DRIVER's client, so
-// "remote" segments are the AGENT's speech and "local" are the driver's.
+// A call's transcript split by ownership-relative party.
 export async function callSegments(
   c: Inkbox,
   callId: string,
-): Promise<{ agent: string[]; driver: string[] }> {
+): Promise<{ remote: string[]; local: string[] }> {
   const segs = (await c.calls.transcripts(callId)) as Array<{ party?: string; text?: string }>;
   const pick = (party: string) =>
     segs
       .filter((s) => (s.party ?? "").toLowerCase() === party && (s.text ?? "").trim() !== "")
       .map((s) => (s.text ?? "").trim());
-  return { agent: pick("remote"), driver: pick("local") };
+  return { remote: pick("remote"), local: pick("local") };
 }
 
-// Block until the transcript shows BOTH parties spoke, then return the agent's
-// speech — proof the agent reached the caller out loud on a two-way call.
+// Read from the AUT owner: remote is the caller and local is the agent.
 export async function waitTwoWayCall(
-  driver: Inkbox,
+  aut: Inkbox,
   callId: string,
   timeoutMs = TIMEOUT_MS,
 ): Promise<string> {
@@ -155,13 +172,13 @@ export async function waitTwoWayCall(
   return pollUntil(
     "two-way call transcript",
     async () => {
-      const { agent, driver: drv } = await callSegments(driver, callId).catch(() => ({
-        agent: [],
-        driver: [],
+      const { remote, local } = await callSegments(aut, callId).catch(() => ({
+        remote: [],
+        local: [],
       }));
-      if (agent.length > 0 && drv.length > 0) return agent.join(" | ");
+      if (remote.length > 0 && local.length > 0) return local.join(" | ");
 
-      const call = await driver.calls.get(callId).catch(() => undefined);
+      const call = await aut.calls.get(callId).catch(() => undefined);
       const status = (call?.status ?? "").toLowerCase();
       const detail = () =>
         JSON.stringify({
@@ -185,50 +202,40 @@ export async function waitTwoWayCall(
   );
 }
 
-// (useInkboxTts, useInkboxStt) of the AUT's most recent ANSWERED call in
-// `direction` with the driver: (true,true) is Inkbox STT/TTS, (false,false) is
-// the realtime path — so each leg can prove the speech path it claims.
-export async function autSpeechMode(
-  aut: Inkbox,
-  direction: "inbound" | "outbound",
-  driverNumber: string,
-  excludedCallIds: Set<string> = new Set(),
-): Promise<
-  | {
-      id: string;
-      tts: boolean | null;
-      stt: boolean | null;
-      voicemailDetection?: string | null;
-    }
-  | undefined
-> {
-  const tail = driverNumber.replace(/\D/g, "").slice(-10);
-  const calls = (await aut.calls.list({ limit: 10 })) as Array<{
-    id: string;
-    direction?: string;
-    remotePhoneNumber?: string;
-    useInkboxTts: boolean | null;
-    useInkboxStt: boolean | null;
-    voicemailDetection?: string | null;
-  }>;
-  const c = calls.find(
-    (x) =>
-      (x.direction ?? "").toLowerCase() === direction &&
-      !excludedCallIds.has(x.id) &&
-      (x.remotePhoneNumber ?? "").replace(/\D/g, "").slice(-10) === tail &&
-      x.useInkboxTts !== null,
-  );
-  return c
-    ? {
-        id: c.id,
-        tts: c.useInkboxTts,
-        stt: c.useInkboxStt,
-        voicemailDetection: c.voicemailDetection,
+// Read from the driver owner: local is the scripted driver speech.
+export async function waitDriverLocalSpeech(
+  driver: Inkbox,
+  callId: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<string> {
+  let completedAt: number | undefined;
+  const completedGraceMs = 15_000;
+  return pollUntil(
+    "driver-local call transcript",
+    async () => {
+      const { local } = await callSegments(driver, callId).catch(() => ({
+        remote: [],
+        local: [],
+      }));
+      if (local.length > 0) return local.join(" | ");
+      const call = await driver.calls.get(callId).catch(() => undefined);
+      const status = String(call?.status ?? "").toLowerCase();
+      if (["canceled", "failed"].includes(status)) {
+        throw new Error("driver call ended before local speech was persisted");
       }
-    : undefined;
+      if (status === "completed") {
+        completedAt ??= Date.now();
+        if (Date.now() - completedAt > completedGraceMs) {
+          throw new Error("driver call completed without persisted local speech");
+        }
+      }
+      return undefined;
+    },
+    timeoutMs,
+  );
 }
 
-// Settle, send an SMS to the AUT, and return the first NEW inbound reply.
+// Settle, send an SMS to the AUT, and return the first new matching reply.
 // Settling first folds any trailing reply to a previous question into
 // `before`, so it can't be mis-matched as this question's answer.
 export async function askOverSms(
@@ -236,6 +243,7 @@ export async function askOverSms(
   remotePhoneId: string,
   autNumber: string,
   text: string,
+  accept: (body: string) => boolean,
 ): Promise<string> {
   let before = new Set((await inboundTextsFrom(remote, remotePhoneId, autNumber)).map((m) => m.id));
   const quietDeadline = Date.now() + 2 * POLL_MS;
@@ -250,9 +258,9 @@ export async function askOverSms(
 
   await remote.texts.send(remotePhoneId, { to: autNumber, text });
 
-  const reply = await pollUntil(`SMS reply to ${JSON.stringify(text)}`, async () => {
+  const reply = await pollUntil("current correlated SMS reply", async () => {
     const inbound = await inboundTextsFrom(remote, remotePhoneId, autNumber);
-    return inbound.find((m) => !before.has(m.id));
+    return inbound.find((m) => !before.has(m.id) && accept(m.text));
   });
   assertNotErrorReply(reply.text, "sms");
   return reply.text;

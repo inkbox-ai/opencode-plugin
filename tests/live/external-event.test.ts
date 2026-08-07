@@ -58,7 +58,7 @@ describe.skipIf(!LIVE || !REAL_MODEL || !SECRET || !GATEWAY_LOG)("live external 
     const forged = await post(forgedBody, "sha256=deadbeef", forgedRequestId);
     expect(forged.status).toBe(401);
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    expect(await gatewayLog()).not.toContain(forgedMarker);
+    expect((await gatewayLog()).includes(forgedMarker)).toBe(false);
 
     const validRequestId = randomBytes(12).toString("hex");
     const validBody = workflowRunBody(randomBytes(8).toString("hex"));
@@ -67,12 +67,12 @@ describe.skipIf(!LIVE || !REAL_MODEL || !SECRET || !GATEWAY_LOG)("live external 
       .digest("hex")}`;
     const valid = await post(validBody, signature, validRequestId);
     expect(valid.status).toBeLessThan(300);
-    expect(JSON.parse(await valid.text())).toMatchObject({ ok: true });
+    expect(JSON.parse(await valid.text()).ok).toBe(true);
 
     const marker = `external.turn_completed:github:${validRequestId}`;
     await pollUntil("external event model turn", async () =>
       (await gatewayLog()).includes(marker) ? true : undefined,
     );
-    expect(await gatewayLog()).toContain(marker);
+    expect((await gatewayLog()).includes(marker)).toBe(true);
   });
 });
