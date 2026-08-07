@@ -57,17 +57,63 @@ checklist), and check the wiring with `inkbox-opencode doctor`.
 
 ### Bootstrap an existing identity without prompts
 
-For unattended agent setup, install without opening the wizard and pass the API key through the environment:
+An agent can complete setup non-interactively after a human assigns it an
+existing identity handle, API base URL, and credential.
+
+First, download the installer once, inspect that exact file, and then run the
+same file without opening the setup wizard. The trap removes the temporary
+copy whether inspection or installation succeeds or fails:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh | bash -s -- --no-setup
-export INKBOX_API_KEY="ApiKey_..."
-inkbox-opencode bootstrap --identity my-agent --project-dir "$PWD" \
-  --voice-ai --rotate-signing-key --start-gateway
-unset INKBOX_API_KEY
+installer="$(mktemp)"
+cleanup() { rm -f "$installer"; }
+trap cleanup EXIT
+curl -fsSL https://raw.githubusercontent.com/inkbox-ai/opencode-plugin/main/install.sh -o "$installer" &&
+  cat "$installer" &&
+  bash "$installer" --no-setup
+install_status=$?
+cleanup
+trap - EXIT
+test "$install_status" -eq 0
 ```
 
-`bootstrap` validates the exact identity, scopes down an admin key before saving it, preserves existing Voice AI settings, and starts or restarts the detached gateway. Signing-key replacement is explicit because it transfers verified webhook delivery away from gateways using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
+Keep the credential out of command history, source control, and project
+instructions. Read it without echoing, expose it only to the bootstrap process,
+and remove the transient shell value immediately afterward:
+
+```bash
+read -rsp 'Inkbox API key: ' INKBOX_API_KEY && printf '\n'
+export INKBOX_API_KEY
+inkbox-opencode bootstrap --identity '<handle>' --base-url '<url>' --project-dir "$PWD" \
+  --voice-ai --rotate-signing-key --start-gateway || bootstrap_status=$?
+unset INKBOX_API_KEY
+printf 'Bootstrap exit status: %s\n' "${bootstrap_status:-0}"
+```
+
+Replace the quoted placeholders with the assigned values. `bootstrap` validates
+the exact identity rather than creating another one, scopes down an admin key
+before saving it, preserves existing Voice AI settings, and starts or restarts
+the detached gateway. Signing-key replacement is explicit because it transfers
+verified webhook delivery away from gateways using the previous key. The command
+prints a secret-redacted JSON result and is safe to resume.
+By default, the resulting agent-scoped credential is stored in the plugin's
+local `~/.inkbox-opencode/.env` profile with owner-only permissions, not in the
+project.
+
+- On `"status": "requires_human"`, show the human each entry in
+  `humanActions`. After they complete the requested action, rerun the same
+  bootstrap command with the same identity; do not create or select a different
+  identity.
+- On `"status": "error"`, report the redacted `error`, run
+  `inkbox-opencode doctor`, correct the reported configuration, credential, or
+  connectivity problem, and retry the same bootstrap command. If the credential
+  was not saved before the failure, supply it again through the same private
+  mechanism.
+- On `"status": "configured"`, verify the completed installation with:
+
+  ```bash
+  inkbox-opencode doctor
+  ```
 
 ### Manual install (per-project, or no installer)
 
