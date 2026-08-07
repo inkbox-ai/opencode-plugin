@@ -108,6 +108,14 @@ export async function reconcileSubscriptions(
 ): Promise<ReconcileResult> {
   const base = normalizePublicUrl(publicUrl);
   const webhookUrl = `${base}${WEBHOOK_PATH}`;
+
+  // Deployments that provision subscriptions ahead of time have a fixed
+  // destination, and an API key that may not be allowed to change it.
+  if (deps.config.gateway.skipWebhookReconcile) {
+    deps.logger.info("subscriptions.skipped", { expectedUrl: webhookUrl });
+    return { created: 0, updated: 0, unchanged: 0 };
+  }
+
   const identity = await deps.inkbox.getIdentity();
   const client = await deps.inkbox.getClient();
 

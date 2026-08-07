@@ -64,6 +64,8 @@ export interface GatewayOptions {
   allowedInboundContactIds?: string[];
   // Verify webhook signatures (default true). Disable only for local dev.
   requireSignature?: boolean;
+  /** Leave webhook subscriptions untouched at boot; they must already point here. */
+  skipWebhookReconcile?: boolean;
   // Deliver verified non-Inkbox webhooks (and unverified ones) to the agent.
   externalEvents?: boolean;
   // Outbound sends from gateway sessions never prompt interactively:
@@ -121,6 +123,7 @@ export interface ResolvedGatewayConfig {
   allowAllUsers: boolean;
   allowedInboundContactIds: string[];
   requireSignature: boolean;
+  skipWebhookReconcile: boolean;
   externalEvents: boolean;
   outboundApproval: "allowlist" | "auto";
   permissionTimeoutS: number;
@@ -400,6 +403,8 @@ function resolveGatewayConfig(
     allowAllUsers: opts.allowAllUsers ?? boolEnv(env.INKBOX_ALLOW_ALL_USERS) ?? false,
     allowedInboundContactIds: stringArray(opts.allowedInboundContactIds),
     requireSignature: opts.requireSignature ?? boolEnv(env.INKBOX_REQUIRE_SIGNATURE) ?? true,
+    skipWebhookReconcile:
+      opts.skipWebhookReconcile ?? boolEnv(env.INKBOX_SKIP_WEBHOOK_RECONCILE) ?? false,
     externalEvents: opts.externalEvents ?? boolEnv(env.INKBOX_EXTERNAL_EVENTS_ENABLED) ?? false,
     outboundApproval: opts.outboundApproval === "auto" ? "auto" : "allowlist",
     permissionTimeoutS:

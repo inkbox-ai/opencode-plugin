@@ -77,6 +77,7 @@ function makeDeps(
   options: {
     voiceEnabled?: boolean;
     phoneVoiceStack?: "inkbox_voice_ai" | "openai_realtime" | "inkbox_tts_stt";
+    skipWebhookReconcile?: boolean;
   } = {},
 ): GatewayDeps & { logger: { [K in keyof GatewayLogger]: ReturnType<typeof vi.fn> } } {
   const client = { webhooks: { subscriptions } };
@@ -94,6 +95,7 @@ function makeDeps(
       allowAllUsers: false,
       allowedInboundContactIds: [],
       requireSignature: true,
+      skipWebhookReconcile: options.skipWebhookReconcile ?? false,
       externalEvents: false,
       outboundApproval: "allowlist",
       permissionTimeoutS: 600,
@@ -446,5 +448,47 @@ describe("reconcileSubscriptions", () => {
         `ftp://user:${secret}@example.com/path?key=${secret}`,
       ),
     ).rejects.not.toThrow(secret);
+  });
+});
+
+describe("skipWebhookReconcile", () => {
+  // Deployments that provision subscriptions ahead of time have a fixed
+  // destination and a key that may not be allowed to change it, so writing on
+  // every boot is redundant at best and fatal to startup at worst.
+  const identity = {
+    id: "identity-1",
+    mailbox: { id: "mailbox-1" },
+    phoneNumber: { id: "phone-1" },
+    imessageEnabled: true,
+  };
+
+  it("touches no subscriptions when enabled", async () => {
+    const subscriptions = makeSubscriptions();
+    const deps = makeDeps(identity, subscriptions, { skipWebhookReconcile: true });
+
+    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
+
+    expect(result).toEqual({ created: 0, updated: 0, unchanged: 0 });
+    expect(subscriptions.list).not.toHaveBeenCalled();
+    expect(subscriptions.create).not.toHaveBeenCalled();
+  });
+
+  it("names the URL it expects deliveries to reach", async () => {
+    const deps = makeDeps(identity, makeSubscriptions(), { skipWebhookReconcile: true });
+
+    await reconcileSubscriptions(deps, PUBLIC_URL);
+
+    expect(deps.logger.info).toHaveBeenCalledWith("subscriptions.skipped", {
+      expectedUrl: WEBHOOK_URL,
+    });
+  });
+
+  it("still reconciles when left at the default", async () => {
+    const subscriptions = makeSubscriptions();
+    const deps = makeDeps(identity, subscriptions);
+
+    await reconcileSubscriptions(deps, PUBLIC_URL);
+
+    expect(subscriptions.create).toHaveBeenCalled();
   });
 });
