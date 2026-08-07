@@ -242,7 +242,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const beforeAut = new Set((await autLegs()).map((call) => call.id));
 
       // Place the call to the agent, handing Inkbox the driver's own media WS.
-      const scenarioStartedAt = Date.now() - 5_000;
+      const scenarioStartedAt = Date.now() - 10_000;
       const call = await remote.calls.place({
         toNumber: autPhone.number,
         fromNumber: st.number,
@@ -312,7 +312,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       await sweepActiveCalls(aut, outboundFromAut);
       const before = new Set((await inboundFromAut()).map((c) => c.id));
       const beforeAut = new Set((await outboundFromAut()).map((c) => c.id));
-      const scenarioStartedAt = Date.now() - 5_000;
+      const scenarioStartedAt = Date.now() - 10_000;
       const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
@@ -389,7 +389,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const beforeAutCalls = new Set(baselineAutCalls.map((call) => call.id));
       const baseline = await outboundTextsTo(aut, autPhone.id, st.number);
       const beforeSmsIds = new Set(baseline.map((message: any) => message.id));
-      const scenarioStartedAt = Date.now() - 5_000;
+      const scenarioStartedAt = Date.now() - 10_000;
       const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,

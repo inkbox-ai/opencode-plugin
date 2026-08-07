@@ -162,14 +162,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const agent = turn.agent ?? g.agent;
     const system = await identitySystem();
     let tools: Record<string, boolean> | undefined;
-    if (turn.hostedCapture?.phase === "initial") {
-      tools = { task: false, inkbox_a2a_call: false };
-    } else if (turn.hostedCapture?.phase === "correction") {
+    if (turn.hostedCapture) {
+      // Hosted post-call turns expose only the tools required to complete
+      // communication commitments from the finished call.
       const listed = await deps.opencode.tool.ids({ query: { directory: deps.directory } });
       const ids = (listed as any)?.data ?? listed;
-      if (!Array.isArray(ids)) throw new Error("Could not restrict the hosted correction turn.");
+      if (!Array.isArray(ids)) throw new Error("Could not restrict the hosted post-call turn.");
       tools = Object.fromEntries(ids.map((id) => [String(id), false]));
-      tools.inkbox_send_sms = true;
+      if (turn.hostedCapture.phase === "correction") {
+        tools.inkbox_send_sms = true;
+      } else {
+        for (const id of ids.map(String)) {
+          if (id.startsWith("inkbox_") && !id.includes("_a2a_")) tools[id] = true;
+        }
+      }
     }
     return {
       messageID: turn.messageID,
