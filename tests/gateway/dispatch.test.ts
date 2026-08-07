@@ -435,8 +435,14 @@ describe("dispatchEvent sender agent identity", () => {
 });
 
 describe("dispatchEvent external providers", () => {
-  it("hands a non-inkbox event to onExternal and acks", async () => {
-    const onExternal = vi.fn(async () => {});
+  it("hands a non-inkbox event to onExternal and acks without waiting for the turn", async () => {
+    let finish: () => void = () => {};
+    const onExternal = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
     const deps = makeDeps({ onExternal });
     const external: VerifiedEvent = {
       provider: "github",
@@ -451,6 +457,28 @@ describe("dispatchEvent external providers", () => {
     expect(ok).toBe(true);
     expect(onExternal).toHaveBeenCalledWith(external);
     expect(deps.sessions.handleInbound).not.toHaveBeenCalled();
+    finish();
+  });
+
+  it("logs an external turn rejected after acknowledgement", async () => {
+    const onExternal = vi.fn(async () => {
+      throw new Error("capture failed");
+    });
+    const deps = makeDeps({ onExternal });
+    const external: VerifiedEvent = {
+      provider: "github",
+      verified: true,
+      eventType: "push",
+      body: { ref: "refs/heads/main" },
+      headers: {},
+    };
+
+    await expect(dispatchEvent(deps, external)).resolves.toBe(true);
+    await vi.waitFor(() =>
+      expect(deps.logger.error).toHaveBeenCalledWith("external.dispatch_failed", {
+        error: "Error: capture failed",
+      }),
+    );
   });
 });
 

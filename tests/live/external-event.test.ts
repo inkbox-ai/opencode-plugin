@@ -25,7 +25,7 @@ function workflowRunBody(runId: string): string {
       name: "CI",
       event: "pull_request",
       status: "completed",
-      conclusion: "failure",
+      conclusion: "success",
       head_branch: "main",
       html_url: `https://github.com/${repository}/actions/runs/${runId}`,
     },

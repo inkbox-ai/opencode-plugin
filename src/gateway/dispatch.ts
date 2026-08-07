@@ -50,7 +50,11 @@ export interface DispatchDeps {
 // may retry); filtered/ignored events return true (ack, no retry).
 export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (event.provider !== "inkbox") {
-    if (deps.onExternal) await deps.onExternal(event);
+    if (deps.onExternal) {
+      void deps
+        .onExternal(event)
+        .catch((error) => deps.logger.error("external.dispatch_failed", { error: String(error) }));
+    }
     return true;
   }
   const type = event.eventType ?? inferType(event.body);
