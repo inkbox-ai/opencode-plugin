@@ -25,9 +25,14 @@ describe.skipIf(!LIVE)("live sms reply", () => {
     const remotePhone = await phoneOf(remote);
 
     const tag = nonce();
-    const body = await askOverSms(remote, remotePhone.id, autPhone.number, `ping ${tag}`);
-    expect(body).toContain("REPLY_OK");
-    expect(body).toContain(tag);
+    const body = await askOverSms(
+      remote,
+      remotePhone.id,
+      autPhone.number,
+      `ping ${tag}`,
+      (reply) => reply.includes("REPLY_OK") && reply.includes(tag),
+    );
+    expect(body.includes("REPLY_OK") && body.includes(tag)).toBe(true);
   });
 
   it("real model: reports its own identity when asked", {
@@ -39,13 +44,15 @@ describe.skipIf(!LIVE)("live sms reply", () => {
     const autPhone = await phoneOf(aut);
     const remotePhone = await phoneOf(remote);
     const autEmail = await mailboxOf(aut);
+    const tag = nonce();
 
     const body = await askOverSms(
       remote,
       remotePhone.id,
       autPhone.number,
-      "Reply with just your Inkbox email address — short.",
+      `Reply with your Inkbox email address and this exact reference: ${tag}`,
+      (reply) => reply.toLowerCase().includes(autEmail.toLowerCase()) && reply.includes(tag),
     );
-    expect(body.toLowerCase()).toContain(autEmail.toLowerCase());
+    expect(body.toLowerCase().includes(autEmail.toLowerCase()) && body.includes(tag)).toBe(true);
   });
 });

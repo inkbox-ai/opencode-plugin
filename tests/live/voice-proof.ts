@@ -26,3 +26,11 @@ export function hasSmsIntent(value: string): boolean {
     /\b(?:text|sms) (?:me|the caller|the user|them|him|her)\b/.test(normalized)
   );
 }
+
+export function wasAcceptedForDelivery(message: {
+  deliveryStatus?: unknown;
+  delivery_status?: unknown;
+}): boolean {
+  const status = String(message.deliveryStatus ?? message.delivery_status ?? "").toLowerCase();
+  return status !== "blocked_spam_filter";
+}

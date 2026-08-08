@@ -43,8 +43,7 @@ describe.skipIf(!LIVE)("live email reply", () => {
     );
     const body = `${reply.subject ?? ""}\n${reply.snippet ?? ""}`;
     assertNotErrorReply(body, "email");
-    expect(body).toContain("REPLY_OK");
-    expect(body).toContain(tag);
+    expect(body.includes("REPLY_OK") && body.includes(tag)).toBe(true);
   });
 
   it("real model: replies with actual content", {
@@ -70,6 +69,6 @@ describe.skipIf(!LIVE)("live email reply", () => {
     );
     const body = `${reply.subject ?? ""}\n${reply.snippet ?? ""}`;
     assertNotErrorReply(body, "email");
-    expect(body.toLowerCase()).toContain("confirmed");
+    expect(body.toLowerCase().includes("confirmed")).toBe(true);
   });
 });

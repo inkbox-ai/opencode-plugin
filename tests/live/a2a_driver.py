@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from inkbox import Inkbox
+from a2a_preflight import enable_and_verify_card
 
 STOPPED_WIRE_STATES = {
     "TASK_STATE_COMPLETED",
@@ -315,11 +316,22 @@ def main() -> None:
     base_url = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai").rstrip("/")
     aut = Inkbox(api_key=_required_env("AUT_INKBOX_API_KEY"), base_url=base_url)
     remote = Inkbox(api_key=_required_env("REMOTE_INKBOX_API_KEY"), base_url=base_url)
-    _, aut_handle = _identity(aut)
+    aut_identity, aut_handle = _identity(aut)
     remote_identity, remote_handle = _identity(remote)
     a2a = remote_identity.a2a_client()
-    target = a2a.fetch_card(f"{base_url}/a2a/{aut_handle}/card")
+    target = enable_and_verify_card(
+        aut_identity,
+        a2a,
+        f"{base_url}/a2a/{aut_handle}/card",
+        aut_handle,
+    )
     remote_card_url = f"{base_url}/a2a/{remote_handle}/card"
+    enable_and_verify_card(
+        remote_identity,
+        a2a,
+        remote_card_url,
+        remote_handle,
+    )
     run = uuid.uuid4().hex[:12]
     try:
         if scenario == "inbound-single":

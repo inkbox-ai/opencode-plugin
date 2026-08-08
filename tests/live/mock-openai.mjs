@@ -7,6 +7,8 @@
 // so a live test can assert the canned content travelled end to end.
 //
 // Run: node mock-openai.mjs [port]   (default 8088; stdlib only)
+
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 const PORT = Number(process.argv[2] ?? 8088);
@@ -23,8 +25,8 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
-const completion = (model, text) => ({
-  id: "chatcmpl-mock",
+const completion = (id, model, text) => ({
+  id,
   object: "chat.completion",
   created: Math.floor(Date.now() / 1000),
   model,
@@ -56,8 +58,9 @@ createServer((req, res) => {
     }
     const model = body.model ?? "mock-model";
     const text = replyText(body);
+    const id = `chatcmpl-${randomUUID()}`;
 
-    if (!body.stream) return sendJson(res, 200, completion(model, text));
+    if (!body.stream) return sendJson(res, 200, completion(id, model, text));
 
     // SSE streaming: one content delta, then the stop chunk, then [DONE].
     res.writeHead(200, {
@@ -67,7 +70,7 @@ createServer((req, res) => {
     });
     const chunk = (delta, finish = null) =>
       `data: ${JSON.stringify({
-        id: "chatcmpl-mock",
+        id,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model,

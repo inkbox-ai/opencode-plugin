@@ -23,9 +23,9 @@ jobs:
           cache: npm
       - name: Install dependencies from the unpublished SDK source
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run lint
@@ -48,12 +48,12 @@ jobs:
           cache: npm
       - name: Install dependencies from the unpublished SDK source
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm install -g opencode-ai@latest
+      - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - run: bash scripts/smoke-loader.sh
 
   notify:

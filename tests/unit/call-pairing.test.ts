@@ -19,7 +19,7 @@ describe("live call ownership pairing", () => {
     ).toMatchObject({ driver: { id: "driver" }, aut: { id: "aut" } });
   });
 
-  it("rejects duplicate driver or AUT legs with identifying diagnostics", () => {
+  it("rejects duplicate driver or AUT legs with sanitized diagnostics", () => {
     let diagnostic = "";
     try {
       requireExactCallPair([call("driver-1"), call("driver-2")], [call("aut")], {
@@ -29,14 +29,16 @@ describe("live call ownership pairing", () => {
     } catch (error) {
       diagnostic = String(error);
     }
-    expect(diagnostic).toMatch(/driver-1.*driver-2.*aut/);
+    expect(diagnostic).toContain('"count":2');
+    expect(diagnostic).not.toContain("driver-1");
+    expect(diagnostic).not.toContain("driver-2");
     expect(diagnostic).not.toContain("14155550123");
     expect(() =>
       requireExactCallPair([call("driver")], [call("aut-1"), call("aut-2")], {
         scenarioStartedAt: started,
         maxCreationSkewMs: 5_000,
       }),
-    ).toThrow(/driver.*aut-1.*aut-2/);
+    ).toThrow(/expected exactly one driver leg and one AUT leg/);
   });
 
   it("rejects stale and creation-skewed pairs", () => {

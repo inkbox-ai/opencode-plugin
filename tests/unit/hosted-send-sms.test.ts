@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateHostedSmsCapture,
   getHostedCall,
+  isSuccessfulHostedSmsMessage,
   saveHostedCall,
 } from "../../src/gateway/hosted-call-registry.js";
 import { sendSmsTools } from "../../src/tools/send-sms.js";
@@ -88,7 +89,12 @@ describe("hosted send SMS boundary", () => {
     } as any;
     await tool.definition.execute({ to: "+14155550123", text: "bravo maple" }, ctx);
     expect(sendText).toHaveBeenCalledOnce();
-    expect(getHostedCall("ident-1", "call-1")?.smsAttempts[0].state).toBe("success");
+    expect(getHostedCall("ident-1", "call-1")?.smsAttempts[0]).toMatchObject({
+      state: "success",
+      providerMessageId: "sms-1",
+    });
+    expect(isSuccessfulHostedSmsMessage("sms-1")).toBe(true);
+    expect(isSuccessfulHostedSmsMessage("sms-other")).toBe(false);
   });
 
   it("does not rewrite a provider-accepted SMS as failed when success journaling fails", async () => {

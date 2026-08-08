@@ -49,12 +49,12 @@ jobs:
           cache: npm
       - name: Install dependencies from the unpublished SDK source
         run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
           npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             ./.ci/inkbox/sdk/typescript \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm install -g opencode-ai@latest
+      - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
 
       - name: Boot the AUT gateway (real model, external events on)
         env:
@@ -79,25 +79,14 @@ jobs:
         run: |
           npx vitest run --config vitest.live.config.ts tests/live/external-event.test.ts
 
-      - name: Dump logs (on failure only)
+      - name: Report content-free failure state
         if: failure()
         run: |
-          echo "=== gateway.log ==="; cat "$AUT_GATEWAY_LOG" || true
-          echo "=== serve.log ===";   tail -n 100 "$AUT_SERVE_LOG" || true
+          test -s "$AUT_GATEWAY_LOG" && echo "gateway_log=present" || echo "gateway_log=empty"
+          test -s "$AUT_SERVE_LOG" && echo "serve_log=present" || echo "serve_log=empty"
 
       - name: Tear down (always)
         if: always()
         run: |
           kill "$AUT_GATEWAY_PID" 2>/dev/null || true
           kill "$AUT_SERVE_PID" 2>/dev/null || true
-
-      - name: Upload artifacts (on failure only)
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: external-events-logs
-          retention-days: 5
-          path: |
-            ${{ env.AUT_GATEWAY_LOG }}
-            ${{ env.AUT_SERVE_LOG }}
-          if-no-files-found: ignore

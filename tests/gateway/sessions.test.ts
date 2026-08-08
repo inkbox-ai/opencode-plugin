@@ -42,7 +42,16 @@ function makeManager(existingDir?: string) {
   const opencode = {
     tool: {
       ids: vi.fn(async () => ({
-        data: ["bash", "edit", "task", "inkbox_send_sms", "inkbox_send_email"],
+        data: [
+          "bash",
+          "edit",
+          "task",
+          "inkbox_send_sms",
+          "inkbox_send_email",
+          "inkbox_a2a_call",
+          "inkbox_list_a2a_tasks",
+          "inkbox_list_a2a_messages",
+        ],
       })),
     },
     session: {
@@ -386,7 +395,7 @@ describe("capture turns", () => {
     expect(d.identity.sendText).not.toHaveBeenCalled();
   });
 
-  it("keeps hosted initial delegation disabled", async () => {
+  it("limits hosted initial work to non-A2A Inkbox tools", async () => {
     const d = makeManager();
     prepareHostedCall(d.dir);
     await d.mgr.runHostedCapture?.("ck", "call", {
@@ -395,9 +404,36 @@ describe("capture turns", () => {
       phase: "initial",
       expectedTarget: "+14155550123",
     });
-    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toMatchObject({
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toEqual({
+      bash: false,
+      edit: false,
       task: false,
+      inkbox_send_sms: true,
+      inkbox_send_email: true,
       inkbox_a2a_call: false,
+      inkbox_list_a2a_tasks: false,
+      inkbox_list_a2a_messages: false,
+    });
+  });
+
+  it("limits a hosted correction to the SMS tool", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    await d.mgr.runHostedCapture?.("ck", "call", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "correction",
+      expectedTarget: "+14155550123",
+    });
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toEqual({
+      bash: false,
+      edit: false,
+      task: false,
+      inkbox_send_sms: true,
+      inkbox_send_email: false,
+      inkbox_a2a_call: false,
+      inkbox_list_a2a_tasks: false,
+      inkbox_list_a2a_messages: false,
     });
   });
 
