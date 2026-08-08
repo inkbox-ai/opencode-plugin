@@ -7,6 +7,7 @@ import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
 import { deliveryFailureKey, deliveryFailureRecovery } from "./delivery-policy.js";
+import { isSuccessfulHostedSmsMessage } from "./hosted-call-registry.js";
 import { downloadMedia, mediaDir } from "./media.js";
 import { SILENT } from "./prompts.js";
 import type {
@@ -425,6 +426,10 @@ async function handleDeliveryFailure(
   const r = resourceOf(event.body, isText ? "text_message" : "message");
   if (str(r?.direction)?.toLowerCase() === "inbound") return true;
   const messageId = str(r?.id);
+  if (isText && messageId && isSuccessfulHostedSmsMessage(messageId)) {
+    deps.logger.info("dispatch.hosted_sms_delivery_failed");
+    return true;
+  }
   const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];
   const failedRecipient = recipientRows
     .map((item) => record(item))

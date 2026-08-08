@@ -166,7 +166,13 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
               };
               const msg = await identity.sendText(payload);
               providerAccepted = true;
-              if (hostedGuard) settleHostedSmsAttempt(hostedGuard, "success");
+              if (hostedGuard) {
+                const providerMessageId = String(msg.id ?? "").trim();
+                if (!providerMessageId) {
+                  throw new Error("SMS provider accepted the message without a message id.");
+                }
+                settleHostedSmsAttempt(hostedGuard, "success", undefined, providerMessageId);
+              }
               const target = formatTargetSummary(msg, args);
               const status = msg.deliveryStatus ?? "unknown";
               return {

@@ -1,12 +1,21 @@
 // Event routing: channel selection, sender filtering (self/control/allowlist),
 // reactions, deduped delivery-failure captures, sender agent identities,
 // external events, and media.
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { createNotifyOnce } from "../../src/gateway/dedup.js";
 import type { DispatchDeps } from "../../src/gateway/dispatch.js";
 import { dispatchEvent } from "../../src/gateway/dispatch.js";
+import {
+  activateHostedSmsCapture,
+  beginHostedSmsAttempt,
+  saveHostedCall,
+  settleHostedSmsAttempt,
+} from "../../src/gateway/hosted-call-registry.js";
 import { downloadMedia, mediaDir } from "../../src/gateway/media.js";
 import { frameInbound } from "../../src/gateway/prompts.js";
 import type { VerifiedEvent } from "../../src/gateway/types.js";
@@ -270,6 +279,73 @@ describe("dispatchEvent reactions", () => {
 });
 
 describe("dispatchEvent delivery failures", () => {
+  it("does not start generic recovery for a settled hosted SMS", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-hosted-delivery-"));
+    process.env.INKBOX_OPENCODE_HOME = dir;
+    try {
+      saveHostedCall({
+        identityId: "ident-1",
+        callId: "call-1",
+        eventId: "event-1",
+        state: "running",
+        event: {
+          id: "event-1",
+          event_type: "call.ended",
+          timestamp: "2026-08-01T00:00:00Z",
+          data: { call: { id: "call-1", mode: "hosted_agent" } },
+        } as never,
+      });
+      activateHostedSmsCapture({
+        identityId: "ident-1",
+        callId: "call-1",
+        sessionID: "session-1",
+        phase: "initial",
+        expectedTarget: "+15551112222",
+      });
+      const guard = beginHostedSmsAttempt({
+        sessionID: "session-1",
+        target: "+15551112222",
+        hasConversationId: false,
+      });
+      if (!guard) throw new Error("expected hosted SMS guard");
+      settleHostedSmsAttempt(guard, "success", undefined, "hosted-message-1");
+      saveHostedCall({
+        identityId: "ident-1",
+        callId: "call-1",
+        eventId: "event-1",
+        state: "completed",
+        outcome: "success",
+        retryable: false,
+        event: {
+          id: "event-1",
+          event_type: "call.ended",
+          timestamp: "2026-08-01T00:00:00Z",
+          data: { call: { id: "call-1", mode: "hosted_agent" } },
+        } as never,
+      });
+
+      const deps = makeDeps();
+      const ok = await dispatchEvent(
+        deps,
+        event("text.delivery_failed", {
+          text_message: {
+            id: "hosted-message-1",
+            remote_phone_number: "+15551112222",
+            error_detail: "handset unreachable",
+            error_code: "undelivered",
+          },
+        }),
+      );
+
+      expect(ok).toBe(true);
+      expect(deps.sessions.runCapture).not.toHaveBeenCalled();
+      expect(deps.contacts.resolve).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.INKBOX_OPENCODE_HOME;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("runs a capture on the first failure and dedupes a repeat with the same id", async () => {
     const deps = makeDeps();
     const failure = event("text.delivery_failed", {

@@ -14,6 +14,7 @@ export interface HostedSmsAttempt {
   phase: "initial" | "correction";
   id: string;
   messageId?: string;
+  providerMessageId?: string;
   target?: string;
   targetMatches: boolean;
   state: "pending" | "success" | "failed";
@@ -386,6 +387,7 @@ export function settleHostedSmsAttempt(
   guard: HostedSmsGuard,
   state: "success" | "failed",
   errorKind?: HostedSmsErrorKind,
+  providerMessageId?: string,
 ): void {
   withRegistryMutation((registry) => {
     const entry = registry[hostedCallKey(guard.identityId, guard.callId)];
@@ -395,8 +397,19 @@ export function settleHostedSmsAttempt(
     }
     attempt.state = state;
     attempt.errorKind = errorKind;
+    if (state === "success") attempt.providerMessageId = bounded(providerMessageId, 256);
     entry.updatedAt = Date.now();
   });
+}
+
+export function isSuccessfulHostedSmsMessage(providerMessageId: string): boolean {
+  const id = providerMessageId.trim();
+  if (!id) return false;
+  return Object.values(read()).some((entry) =>
+    entry.smsAttempts.some(
+      (attempt) => attempt.state === "success" && attempt.providerMessageId === id,
+    ),
+  );
 }
 
 export function classifyHostedSmsError(error: unknown): HostedSmsErrorKind {

@@ -24,7 +24,12 @@ import {
   waitDriverLocalSpeech,
   waitTwoWayCall,
 } from "./helpers.js";
-import { containsVoiceMarker, hasAfterCallSmsIntent, hasSmsIntent } from "./voice-proof.js";
+import {
+  containsVoiceMarker,
+  hasAfterCallSmsIntent,
+  hasSmsIntent,
+  wasAcceptedForDelivery,
+} from "./voice-proof.js";
 
 const SCENARIO = process.env.VOICE_SCENARIO ?? "";
 const STATE_FILE = process.env.VOICE_DRIVER_STATE || "/tmp/voice_driver_state.json";
@@ -490,9 +495,10 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             );
           },
         );
-        matched = fresh.filter((message: any) =>
+        const markerRows = fresh.filter((message: any) =>
           containsVoiceMarker(String(message.text ?? ""), HOSTED_MARKER),
         );
+        matched = markerRows.filter(wasAcceptedForDelivery);
         try {
           const registry = JSON.parse(
             readFileSync(
@@ -504,13 +510,17 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         } catch {
           registryEntry = undefined;
         }
-        progress.last = `marker_rows=${matched.length} registry_state=${registryEntry?.state ?? "missing"}`;
+        progress.last =
+          `accepted_marker_rows=${matched.length} ` +
+          `blocked_marker_rows=${markerRows.length - matched.length} ` +
+          `registry_state=${registryEntry?.state ?? "missing"}`;
         if (matched.length === 1 && registryEntry?.state === "completed") {
           await new Promise((resolve) => setTimeout(resolve, duplicateGraceMs));
           const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
             (message: any) =>
               !beforeSmsIds.has(message.id) &&
               (recordCreatedAt(message) ?? -1) >= scenarioStartedAt &&
+              wasAcceptedForDelivery(message) &&
               containsVoiceMarker(String(message.text ?? ""), HOSTED_MARKER),
           );
           expect(afterGrace.length).toBe(1);
