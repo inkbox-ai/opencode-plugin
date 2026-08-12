@@ -11,6 +11,9 @@ export const HANG_UP_TOOL = "hang_up_call";
 export const CONTACT_LOOKUP_TOOL = "inkbox_lookup_contact";
 export const CONTACT_LIST_TOOL = "inkbox_list_contacts";
 const HANGUP_WINDOW_MS = 10_000;
+const CONTACT_READ_TIMEOUT_MS = 30_000;
+const CONSULT_TIMEOUT_MS = 300_000;
+const RESULT_RESPONSE_TIMEOUT_MS = 30_000;
 
 export interface RealtimeConfig {
   apiKey: string;
@@ -158,6 +161,49 @@ export function openRealtimeBridge(
   );
   const hangup = createHangupArmer(HANGUP_WINDOW_MS, now);
   const consults = new Set<Promise<void>>();
+  const pendingWork = new Set<string>();
+  const responseOwners: Array<string | null> = [];
+  const ownedResponses = new Map<
+    string,
+    { callId: string; done: boolean; audioDone: boolean; transcriptDone: boolean }
+  >();
+  const responseTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  let hangupRequested = false;
+  let hangupDelivered = false;
+  let closed = false;
+
+  const finishWork = (callId: string) => {
+    pendingWork.delete(callId);
+    const timeout = responseTimeouts.get(callId);
+    if (timeout) clearTimeout(timeout);
+    responseTimeouts.delete(callId);
+    maybeHangup();
+  };
+  const maybeFinishResponse = (responseId: string) => {
+    const owned = ownedResponses.get(responseId);
+    if (!owned?.done || !owned.audioDone || !owned.transcriptDone) return;
+    ownedResponses.delete(responseId);
+    finishWork(owned.callId);
+  };
+  const maybeHangup = () => {
+    if (!hangupRequested || hangupDelivered || pendingWork.size > 0) return;
+    hangupDelivered = true;
+    cb.onHangup();
+  };
+  const withTimeout = async <T>(work: Promise<T>, timeoutMs: number): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("realtime tool timed out")), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   // Function calls arrive across three events: output_item.added carries the
   // name + call id, arguments.delta streams the JSON, arguments.done fires the
   // dispatch. Accumulate by item/call id.
@@ -223,14 +269,47 @@ export function openRealtimeBridge(
       return;
     }
     switch (evt.type) {
+      case "response.created": {
+        const owner = responseOwners.shift();
+        const responseId = String(evt.response?.id ?? evt.response_id ?? "");
+        if (owner && responseId) {
+          ownedResponses.set(responseId, {
+            callId: owner,
+            done: false,
+            audioDone: false,
+            transcriptDone: false,
+          });
+        }
+        break;
+      }
       case "response.output_audio.delta":
       case "response.audio.delta":
         if (typeof evt.delta === "string") cb.onAudio(evt.delta);
         break;
       case "response.output_audio.done":
-      case "response.audio.done":
+      case "response.audio.done": {
         cb.onAudioDone?.();
+        const responseId = String(evt.response_id ?? evt.response?.id ?? "");
+        const owned = ownedResponses.get(responseId);
+        if (owned) {
+          owned.audioDone = true;
+          maybeFinishResponse(responseId);
+        }
         break;
+      }
+      case "response.done": {
+        const responseId = String(evt.response?.id ?? evt.response_id ?? "");
+        const owned = ownedResponses.get(responseId);
+        if (owned) {
+          owned.done = true;
+          if (String(evt.response?.status ?? "completed") !== "completed") {
+            owned.audioDone = true;
+            owned.transcriptDone = true;
+          }
+          maybeFinishResponse(responseId);
+        }
+        break;
+      }
       case "conversation.item.input_audio_transcription.completed": {
         const text = String(evt.transcript ?? "").trim();
         if (text) cb.onTranscript?.("caller", text);
@@ -240,6 +319,12 @@ export function openRealtimeBridge(
       case "response.audio_transcript.done": {
         const text = String(evt.transcript ?? "").trim();
         if (text) cb.onTranscript?.("agent", text);
+        const responseId = String(evt.response_id ?? evt.response?.id ?? "");
+        const owned = ownedResponses.get(responseId);
+        if (owned && text) {
+          owned.transcriptDone = true;
+          maybeFinishResponse(responseId);
+        }
         break;
       }
       case "response.output_item.added": {
@@ -317,8 +402,8 @@ export function openRealtimeBridge(
     }
     if (name === HANG_UP_TOOL) {
       if (hangup.press()) {
-        respond(callId, "Ending the call now.");
-        cb.onHangup();
+        hangupRequested = true;
+        maybeHangup();
       } else {
         respond(callId, "Armed. Say goodbye, then call hang_up_call once more to end.");
       }
@@ -337,15 +422,16 @@ export function openRealtimeBridge(
     }
     if (name === CONTACT_LOOKUP_TOOL || name === CONTACT_LIST_TOOL) {
       const kind = name === CONTACT_LOOKUP_TOOL ? "lookup" : "list";
+      pendingWork.add(callId);
       const task = (async () => {
         try {
           const summary = cb.onContactRead
-            ? await cb.onContactRead(kind, args)
+            ? await withTimeout(cb.onContactRead(kind, args), CONTACT_READ_TIMEOUT_MS)
             : "Contact reads are not available on this call.";
-          respond(callId, summary);
+          respond(callId, summary, callId);
         } catch (err) {
           cb.logger.warn("realtime.contact_read_failed", { error: String(err) });
-          respond(callId, "The contact lookup failed.");
+          respond(callId, "The contact lookup failed.", callId);
         }
       })();
       consults.add(task);
@@ -354,13 +440,17 @@ export function openRealtimeBridge(
     }
     if (name === CONSULT_TOOL) {
       // Run the agent turn off the audio pump so speech keeps flowing.
+      pendingWork.add(callId);
       const task = (async () => {
         try {
-          const answer = await cb.onConsult(String(args.query ?? ""));
-          respond(callId, answer || "Done.");
+          const answer = await withTimeout(
+            cb.onConsult(String(args.query ?? "")),
+            CONSULT_TIMEOUT_MS,
+          );
+          respond(callId, answer || "Done.", callId);
         } catch (err) {
           cb.logger.warn("realtime.consult_failed", { error: String(err) });
-          respond(callId, "I hit a problem doing that.");
+          respond(callId, "I hit a problem doing that.", callId);
         }
       })();
       consults.add(task);
@@ -369,24 +459,34 @@ export function openRealtimeBridge(
   }
 
   // Return a function-call result to the model and ask it to speak.
-  function respond(callId: string, output: string): void {
+  function respond(callId: string, output: string, workOwner: string | null = null): void {
+    if (closed || ws.readyState !== WebSocket.OPEN) {
+      if (workOwner) finishWork(workOwner);
+      return;
+    }
     ws.send(
       JSON.stringify({
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: callId, output },
       }),
     );
+    responseOwners.push(workOwner);
     ws.send(JSON.stringify({ type: "response.create" }));
+    if (workOwner) {
+      const timeout = setTimeout(() => finishWork(workOwner), RESULT_RESPONSE_TIMEOUT_MS);
+      timeout.unref?.();
+      responseTimeouts.set(workOwner, timeout);
+    }
   }
 
   return {
     pushAudio(base64Ulaw) {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (!closed && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Ulaw }));
       }
     },
     start(greetingInstructions) {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (!closed && ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
             type: "response.create",
@@ -397,7 +497,13 @@ export function openRealtimeBridge(
     },
     ready,
     async close() {
-      await Promise.allSettled([...consults]);
+      if (closed) return;
+      closed = true;
+      for (const timeout of responseTimeouts.values()) clearTimeout(timeout);
+      responseTimeouts.clear();
+      pendingWork.clear();
+      responseOwners.length = 0;
+      ownedResponses.clear();
       try {
         ws.close();
       } catch {

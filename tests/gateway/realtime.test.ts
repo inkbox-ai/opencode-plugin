@@ -16,7 +16,7 @@ function fakeSocket() {
     send(s: string) {
       sent.push(JSON.parse(s));
     },
-    close() {},
+    close: vi.fn(),
   };
   return { ws, sent, emit: (e: string, a?: unknown) => handlers[e]?.(a), handlers };
 }
@@ -86,6 +86,25 @@ describe("realtime session configuration", () => {
 });
 
 describe("realtime function-call lifecycle", () => {
+  function toolCall(
+    fake: ReturnType<typeof fakeSocket>,
+    itemId: string,
+    callId: string,
+    name: string,
+    args = "{}",
+  ) {
+    emitMessage(fake, {
+      type: "response.output_item.added",
+      item_id: itemId,
+      item: { type: "function_call", call_id: callId, name },
+    });
+    emitMessage(fake, {
+      type: "response.function_call_arguments.done",
+      item_id: itemId,
+      arguments: args,
+    });
+  }
+
   it("captures completed caller and agent transcripts", () => {
     const fake = fakeSocket();
     const onTranscript = vi.fn();
@@ -182,6 +201,98 @@ describe("realtime function-call lifecycle", () => {
     clock = 1000;
     hangup();
     expect(onHangup).toHaveBeenCalledTimes(1); // second press within window ends the call
+  });
+
+  it("defers hangup until a pending contact result response is complete and flushed", async () => {
+    const fake = fakeSocket();
+    const onHangup = vi.fn();
+    let resolveContact!: (value: string) => void;
+    const onContactRead = vi.fn(() => new Promise<string>((resolve) => (resolveContact = resolve)));
+    let clock = 0;
+    const bridge = openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: vi.fn(),
+        onAudioDone: vi.fn(),
+        onConsult: vi.fn(async () => ""),
+        onContactRead,
+        onHangup,
+        logger,
+      },
+      () => clock,
+      () => fake.ws as never,
+    );
+    fake.emit("open");
+    emitMessage(fake, { type: "session.updated" });
+    await bridge.ready;
+
+    toolCall(fake, "contact-item", "contact-call", "inkbox_list_contacts", '{"q":"ada"}');
+    toolCall(fake, "hangup-item-1", "hangup-call-1", "hang_up_call");
+    clock = 1000;
+    toolCall(fake, "hangup-item-2", "hangup-call-2", "hang_up_call");
+    expect(onHangup).not.toHaveBeenCalled();
+
+    // The first response belongs to the armed-goodbye result. The second is
+    // the contact result and is the one that must drain before hangup.
+    emitMessage(fake, { type: "response.created", response: { id: "goodbye-response" } });
+    resolveContact("Ada's email is ada@example.com");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    emitMessage(fake, { type: "response.created", response: { id: "contact-response" } });
+    emitMessage(fake, {
+      type: "response.output_audio_transcript.done",
+      response_id: "contact-response",
+      transcript: "Ada's email is ada@example.com",
+    });
+    emitMessage(fake, {
+      type: "response.output_audio.done",
+      response_id: "contact-response",
+    });
+    expect(onHangup).not.toHaveBeenCalled();
+    emitMessage(fake, {
+      type: "response.done",
+      response: { id: "contact-response", status: "completed" },
+    });
+    expect(onHangup).toHaveBeenCalledTimes(1);
+
+    // Duplicate completion events cannot end the call twice.
+    emitMessage(fake, {
+      type: "response.done",
+      response: { id: "contact-response", status: "completed" },
+    });
+    expect(onHangup).toHaveBeenCalledTimes(1);
+    await bridge.close();
+    expect(fake.ws.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes immediately and idempotently when the call ends during async work", async () => {
+    const fake = fakeSocket();
+    let resolveConsult!: (value: string) => void;
+    const bridge = openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: vi.fn(),
+        onConsult: vi.fn(() => new Promise<string>((resolve) => (resolveConsult = resolve))),
+        onHangup: vi.fn(),
+        logger,
+      },
+      () => 0,
+      () => fake.ws as never,
+    );
+    fake.emit("open");
+    emitMessage(fake, { type: "session.updated" });
+    await bridge.ready;
+    toolCall(fake, "consult-item", "consult-call", "consult_agent", '{"query":"wait"}');
+
+    await bridge.close();
+    await bridge.close();
+    expect(fake.ws.close).toHaveBeenCalledTimes(1);
+
+    const sentBeforeLateResult = fake.sent.length;
+    resolveConsult("late result");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.sent).toHaveLength(sentBeforeLateResult);
   });
 
   it("answers contact-read tools directly via onContactRead", async () => {

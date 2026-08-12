@@ -97,6 +97,33 @@ async function waitForCalls(mock: ReturnType<typeof vi.fn>, count: number): Prom
 }
 
 describe("call bridge signed context", () => {
+  it("lets plugin hangup close the call and realtime bridge exactly once", async () => {
+    const { bridgeDeps, runText } = deps(true);
+    let callbacks: RealtimeCallbacks | undefined;
+    const closeRealtime = vi.fn(async () => {});
+    const openRealtime = vi.fn((_cfg: RealtimeConfig, _registry, cb: RealtimeCallbacks) => {
+      callbacks = cb;
+      return {
+        ready: Promise.resolve(),
+        start: vi.fn(),
+        pushAudio: vi.fn(),
+        close: closeRealtime,
+      };
+    });
+    const closeSpy = vi.spyOn(WebSocket.prototype, "close");
+    process.env.INKBOX_REALTIME_API_KEY = "test-key";
+
+    const ws = await connect(createCallBridge(bridgeDeps, openRealtime as never));
+    callbacks?.onHangup();
+    callbacks?.onHangup();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    await new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    await waitForCalls(runText, 1);
+
+    expect(closeRealtime).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+  });
+
   it("uses top-level call fields and contacts in realtime, consult, and post-call prompts", async () => {
     const { bridgeDeps, runText } = deps(true);
     let callbacks: RealtimeCallbacks | undefined;
