@@ -88,7 +88,7 @@ else
   cat > opencode.json <<'EOF'
 { "$schema": "https://opencode.ai/config.json" }
 EOF
-  GATEWAY_MODEL="openai/gpt-5.4-mini"
+  GATEWAY_MODEL="openai/gpt-5.6-sol"
 fi
 
 SERVE_LOG="$WORKDIR/serve.log"
@@ -140,6 +140,7 @@ echo "==> starting the gateway sidecar ($MODE model: $GATEWAY_MODEL)"
   INKBOX_VOICEMAIL_DETECTION="${INKBOX_VOICEMAIL_DETECTION:-disabled}" \
   INKBOX_REALTIME_ENABLED="${INKBOX_REALTIME_ENABLED:-}" \
   INKBOX_REALTIME_API_KEY="${INKBOX_REALTIME_API_KEY:-}" \
+  INKBOX_REALTIME_MODEL="${INKBOX_REALTIME_MODEL:-}" \
   OPENCODE_SERVER_URL="http://127.0.0.1:$SERVE_PORT" \
   nohup node "$ROOT/bin/inkbox-opencode.js" run > "$GATEWAY_LOG" 2>&1 &
   echo $! > "$WORKDIR/gateway.pid")
