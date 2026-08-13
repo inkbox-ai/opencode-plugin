@@ -88,6 +88,7 @@ jobs:
           INKBOX_VOICEMAIL_DETECTION: "disabled"
           INKBOX_REALTIME_ENABLED: ${{ matrix.scenario == 'outbound_realtime' && 'true' || 'false' }}
           INKBOX_REALTIME_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INKBOX_REALTIME_MODEL: gpt-realtime-2
         run: bash scripts/live-aut.sh
 
       - name: Start the voice driver and wait for its tunnel
