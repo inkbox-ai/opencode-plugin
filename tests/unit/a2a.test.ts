@@ -2,6 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { a2aTurnContextPath, clearActiveA2ATurn, setActiveA2ATurn } from "../../src/a2a-context.js";
+import {
+  clearA2AProgressDrain,
+  listA2AProgressDrains,
+  registerA2AProgressDrain,
+} from "../../src/a2a-progress.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { a2aTools } from "../../src/tools/a2a.js";
 
@@ -211,11 +216,16 @@ describe("a2aTools", () => {
     await expect(tool.definition.execute({ text: "Which region?" }, ctx)).rejects.toThrow(
       /only available/,
     );
+    const unregister = registerA2AProgressDrain("task-1", {
+      drain: vi.fn(async () => {}),
+      resume: vi.fn(),
+    });
     setActiveA2ATurn("session-1", context);
     try {
       const result = await tool.definition.execute({ text: "Which region?" }, ctx);
       expect(result).toContain("ask_caller");
     } finally {
+      unregister();
       clearActiveA2ATurn("session-1", context);
     }
 
@@ -224,6 +234,76 @@ describe("a2aTools", () => {
       text: "Which region?",
     });
     expect(context.replyIntentCommitted).toBe(true);
+  });
+
+  it("drains periodic progress before committing a terminal intent", async () => {
+    const { deps, identity } = makeDeps();
+    const ctx = makeCtx();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    let release = () => {};
+    const drain = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const unregister = registerA2AProgressDrain("task-1", {
+      drain,
+      resume: vi.fn(),
+    });
+    setActiveA2ATurn(ctx.sessionID, context);
+    try {
+      const completion = getTool("inkbox_a2a_complete", deps).definition.execute(
+        { text: "Final answer." },
+        ctx,
+      );
+      await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+      expect(identity.a2aReply).not.toHaveBeenCalled();
+      release();
+      await completion;
+      expect(identity.a2aReply).toHaveBeenCalledWith("task-1", {
+        intent: "complete",
+        text: "Final answer.",
+      });
+    } finally {
+      unregister();
+      clearActiveA2ATurn(ctx.sessionID, context);
+    }
+  });
+
+  it("keeps progress fenced when a terminal reply has an ambiguous failure", async () => {
+    const { deps, identity } = makeDeps();
+    const ctx = makeCtx();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    identity.a2aReply.mockRejectedValueOnce(new Error("temporary failure"));
+    const resume = vi.fn();
+    const unregister = registerA2AProgressDrain("task-1", {
+      drain: vi.fn(async () => {}),
+      resume,
+    });
+    setActiveA2ATurn(ctx.sessionID, context);
+    try {
+      await expect(
+        getTool("inkbox_a2a_fail", deps).definition.execute({ reason: "Cannot continue." }, ctx),
+      ).rejects.toThrow("temporary failure");
+      expect(resume).not.toHaveBeenCalled();
+      expect(listA2AProgressDrains("task-1")).toHaveLength(1);
+      expect(context.replyIntentCommitted).toBe(false);
+    } finally {
+      unregister();
+      clearA2AProgressDrain("task-1");
+      clearActiveA2ATurn(ctx.sessionID, context);
+    }
   });
 
   it("shares inbound turn authorization with the separate host process", async () => {
@@ -238,11 +318,20 @@ describe("a2aTools", () => {
     const target = a2aTurnContextPath(ctx.sessionID);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify(context)}\n`, { mode: 0o600 });
+    const unregister = registerA2AProgressDrain("task-cross-process", {
+      drain: vi.fn(async () => {}),
+      resume: vi.fn(),
+    });
 
-    const result = await getTool("inkbox_a2a_ask_caller", deps).definition.execute(
-      { text: "Which region?" },
-      ctx,
-    );
+    let result: any = "";
+    try {
+      result = await getTool("inkbox_a2a_ask_caller", deps).definition.execute(
+        { text: "Which region?" },
+        ctx,
+      );
+    } finally {
+      unregister();
+    }
 
     expect(result).toContain("ask_caller");
     expect(identity.a2aReply).toHaveBeenCalledWith("task-cross-process", {

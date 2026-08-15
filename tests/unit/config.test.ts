@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS,
   DEFAULT_ASK_TIMEOUT_MS,
   DEFAULT_VAULT_KEY_ENV_VAR,
   resolveConfig,
@@ -303,6 +304,30 @@ describe("resolveConfig", () => {
           { ...FULL_ENV, INKBOX_CONTACT_MEMORIES_ENABLED: "false" },
         ).gateway.contactMemories,
       ).toBe(true);
+    });
+  });
+
+  describe("gateway A2A progress", () => {
+    it("defaults to three minutes", () => {
+      expect(DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS).toBe(180);
+      expect(resolveConfig({}, FULL_ENV).gateway.a2aProgressIntervalSeconds).toBe(180);
+    });
+
+    it("supports option precedence, environment overrides, and disabling", () => {
+      expect(
+        resolveConfig({}, { ...FULL_ENV, INKBOX_A2A_PROGRESS_INTERVAL_SECONDS: "60" }).gateway
+          .a2aProgressIntervalSeconds,
+      ).toBe(60);
+      expect(
+        resolveConfig(
+          { gateway: { a2aProgressIntervalSeconds: 90 } },
+          { ...FULL_ENV, INKBOX_A2A_PROGRESS_INTERVAL_SECONDS: "60" },
+        ).gateway.a2aProgressIntervalSeconds,
+      ).toBe(90);
+      expect(
+        resolveConfig({ gateway: { a2aProgressIntervalSeconds: 0 } }, FULL_ENV).gateway
+          .a2aProgressIntervalSeconds,
+      ).toBe(0);
     });
   });
 

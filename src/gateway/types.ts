@@ -129,6 +129,7 @@ export interface SessionManager {
     phase: "initial" | "correction",
   ): "pending" | "completed" | undefined;
   runA2A(chatKey: string, framedText: string, context: ActiveA2ATurn): Promise<string | undefined>;
+  summarizeA2AProgress?(chatKey: string, taskId: string, previousUpdate: string): Promise<string>;
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
   resetSession(chatKey: string): Promise<void>;
