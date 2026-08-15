@@ -68,13 +68,20 @@ describe("A2A progress summaries", () => {
     expect(long.endsWith("…")).toBe(true);
     for (const terminal of [
       "The final answer is ready.",
-      "The task succeeded.",
-      "Everything is resolved.",
       "I cannot complete the request.",
       "I'm waiting for input.",
     ]) {
       expect(cleanA2AProgress(terminal, ["run_tests"])).toBe("I'm continuing the requested work.");
     }
+  });
+
+  it("allows intermediate readiness without allowing a final result", () => {
+    expect(
+      cleanA2AProgress("The first calculation is ready while I begin the second timed wait.", []),
+    ).toBe("The first calculation is ready while I begin the second timed wait.");
+    expect(cleanA2AProgress("The final result is ready.", [])).toBe(
+      "I'm continuing the requested work.",
+    );
   });
 
   it("passes bounded task context, identifiers, and the prior public update to the side model", () => {
