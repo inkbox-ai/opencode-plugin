@@ -2,9 +2,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import {
-  a2aActivityFromMessages,
   a2aProgressSystemPrompt,
   a2aProgressUserPrompt,
+  a2aToolIdentifiersFromMessages,
   cleanA2AProgress,
   fallbackA2AProgress,
 } from "../a2a-progress.js";
@@ -550,8 +550,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       )
       .sort((left, right) => right.createdAt - left.createdAt)[0];
     const messages = turn?.sessionID ? await listMessages(turn.sessionID).catch(() => []) : [];
-    const activities = a2aActivityFromMessages(messages, turn?.messageID ?? "");
-    const fallback = fallbackA2AProgress(activities);
+    const toolIdentifiers = a2aToolIdentifiersFromMessages(messages, turn?.messageID ?? "");
+    const fallback = fallbackA2AProgress();
     let sessionID: string | undefined;
     try {
       const created = await deps.opencode.session.create({
@@ -582,7 +582,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           parts: [
             {
               type: "text",
-              text: a2aProgressUserPrompt(activities, previousUpdate),
+              text: a2aProgressUserPrompt(turn?.text ?? "", toolIdentifiers, previousUpdate),
             },
           ],
         },
@@ -596,7 +596,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         const response = await Promise.race([request, timeout]);
         const error = (response as any)?.error;
         if (error) throw new Error("Progress summary request failed.");
-        return cleanA2AProgress(extractText(response), activities);
+        return cleanA2AProgress(extractText(response), toolIdentifiers);
       } finally {
         if (timer) clearTimeout(timer);
       }

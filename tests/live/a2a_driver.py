@@ -22,6 +22,7 @@ STOPPED_WIRE_STATES = {
 }
 PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
 PROGRESS_UPDATE_RE = re.compile(r"^(.+) \((\d+)s elapsed\)$")
+GENERIC_PROGRESS_FALLBACK = "I'm continuing the requested work."
 TERMINAL_PROGRESS_RE = re.compile(
     r"\b(?:done|complete|completed|finished|failed|failure|blocked|solved|"
     r"finalized|ready|succeed(?:ed|s|ing)?|successful(?:ly)?|resolved|"
@@ -309,6 +310,10 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             if TERMINAL_PROGRESS_RE.search(match.group(1)):
                 raise AssertionError(
                     "A periodic progress update claimed a terminal state"
+                )
+            if match.group(1) == GENERIC_PROGRESS_FALLBACK:
+                raise AssertionError(
+                    "The auxiliary progress writer used its generic fallback"
                 )
             progress.append((index, int(match.group(2))))
         if len(progress) < 2:

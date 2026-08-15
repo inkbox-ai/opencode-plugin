@@ -540,8 +540,8 @@ describe("capture turns", () => {
     ).resolves.toBe("I'm validating the requested work.");
 
     const sidePrompt = d.opencode.session.prompt.mock.calls[0][0];
-    expect(sidePrompt.body.parts[0].text).toContain("checking the requested data");
-    expect(JSON.stringify(sidePrompt)).not.toContain("private task body");
+    expect(sidePrompt.body.parts[0].text).toContain("run_sql_query");
+    expect(sidePrompt.body.parts[0].text).toContain("private task body");
     expect(JSON.stringify(sidePrompt)).not.toContain("private-value");
     expect(JSON.stringify(sidePrompt)).not.toContain("private-result");
     expect(Object.values(sidePrompt.body.tools).every((enabled) => enabled === false)).toBe(true);
