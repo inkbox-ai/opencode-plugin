@@ -12,7 +12,7 @@ Runs the reusable Actions in sequence for ready same-repository pull requests, m
 
 ## Live — Agent2Agent
 
-Runs all four scenarios serially with both live identity credentials.
+Runs all five scenarios serially with both live identity credentials.
 
 ### `inbound-single`
 
@@ -21,6 +21,10 @@ Runs all four scenarios serially with both live identity credentials.
 ### `inbound-multi`
 
 **Proves:** An inbound task can request and consume follow-up input. **Flow:** 1. Send a tagged task. 2. Wait for `input-required`. 3. Reply in the same task. 4. Require both tags at completion.
+
+### `inbound-progress`
+
+**Proves:** A long-running inbound task acknowledges pickup, publishes ordered nonterminal progress on schedule, and completes with the expected result. **Flow:** 1. Send a two-minute calculation task. 2. Require acknowledgement within 30 seconds. 3. Require two progress messages about one minute apart. 4. Require the tagged final calculation from the worker.
 
 ### `outbound-single`
 

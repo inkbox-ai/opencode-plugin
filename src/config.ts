@@ -83,6 +83,9 @@ export interface GatewayOptions {
   // Batch rapid-fire SMS/iMessage fragments arriving within this quiet
   // window (ms) into one merged turn. 0 (default) disables batching.
   textBatchWindowMs?: number;
+  // Seconds between nonterminal progress updates for active inbound A2A
+  // worker tasks. 0 disables periodic updates.
+  a2aProgressIntervalSeconds?: number;
   // Include matched-contact memories supplied by verified inbound events.
   contactMemories?: boolean;
   // Extra per-turn directive text, keyed by contact id or channel name
@@ -131,6 +134,7 @@ export interface ResolvedGatewayConfig {
   agent?: string;
   model?: string;
   textBatchWindowMs: number;
+  a2aProgressIntervalSeconds: number;
   contactMemories: boolean;
   channelPrompts: Record<string, string>;
   channelAgents: Record<string, string>;
@@ -359,6 +363,7 @@ export const DEFAULT_GATEWAY_PORT = 8767;
 // user-run `opencode serve` for the same bind.
 export const DEFAULT_GATEWAY_SERVE_PORT = 4097;
 export const DEFAULT_PERMISSION_TIMEOUT_S = 600;
+export const DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS = 180;
 export const DEFAULT_REALTIME_MODEL = "gpt-realtime-2";
 export const DEFAULT_REALTIME_VOICE = "cedar";
 
@@ -416,6 +421,10 @@ function resolveGatewayConfig(
     model: nonEmptyString(opts.model) ?? nonEmptyString(env.INKBOX_GATEWAY_MODEL),
     textBatchWindowMs:
       numeric(opts.textBatchWindowMs) ?? numeric(env.INKBOX_TEXT_BATCH_WINDOW_MS) ?? 0,
+    a2aProgressIntervalSeconds:
+      numeric(opts.a2aProgressIntervalSeconds) ??
+      numeric(env.INKBOX_A2A_PROGRESS_INTERVAL_SECONDS) ??
+      DEFAULT_A2A_PROGRESS_INTERVAL_SECONDS,
     contactMemories: opts.contactMemories ?? boolEnv(env.INKBOX_CONTACT_MEMORIES_ENABLED) ?? true,
     channelPrompts: stringRecord(opts.channelPrompts),
     channelAgents: stringRecord(opts.channelAgents),

@@ -81,9 +81,16 @@ function makeManager(existingDir?: string) {
         messages.set(o.path.id, rows);
         return { data: undefined };
       }),
+      prompt: vi.fn(async (_o: any) => ({
+        data: {
+          info: { id: "progress-response", role: "assistant" },
+          parts: [{ type: "text", text: "I'm validating the requested work." }],
+        },
+      })),
       messages: vi.fn(async (o: any) => ({ data: messages.get(o.path.id) ?? [] })),
       status: vi.fn(async () => ({ data: { ...statuses } })),
       abort: vi.fn(async () => ({})),
+      delete: vi.fn(async () => ({ data: true })),
       list: vi.fn(),
     },
   };
@@ -502,6 +509,43 @@ describe("capture turns", () => {
     await d.mgr.runA2A("a2a:context-1", "task", context);
 
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
+  });
+
+  it("builds A2A progress in an isolated tool-free side session", async () => {
+    const d = makeManager();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    await d.mgr.runA2A("a2a:context-1", "private task body", context);
+    const workerTurn = d.state.listTurns().find((turn) => turn.a2aContext?.taskId === "task-1");
+    d.messages.set(workerTurn?.sessionID ?? "", [
+      { info: { id: workerTurn?.messageID, role: "user" }, parts: [] },
+      {
+        info: { id: "assistant", role: "assistant", parentID: workerTurn?.messageID },
+        parts: [
+          {
+            type: "tool",
+            tool: "run_sql_query",
+            state: { input: { query: "private-value" }, output: "private-result" },
+          },
+        ],
+      },
+    ]);
+
+    await expect(
+      d.mgr.summarizeA2AProgress?.("a2a:context-1", "task-1", "previous public update"),
+    ).resolves.toBe("I'm validating the requested work.");
+
+    const sidePrompt = d.opencode.session.prompt.mock.calls[0][0];
+    expect(sidePrompt.body.parts[0].text).toContain("run_sql_query");
+    expect(sidePrompt.body.parts[0].text).toContain("private task body");
+    expect(JSON.stringify(sidePrompt)).not.toContain("private-value");
+    expect(JSON.stringify(sidePrompt)).not.toContain("private-result");
+    expect(Object.values(sidePrompt.body.tools).every((enabled) => enabled === false)).toBe(true);
+    expect(d.opencode.session.delete).toHaveBeenCalledOnce();
   });
 });
 

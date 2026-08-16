@@ -377,6 +377,11 @@ inbound events. What it does:
 - **Permission prompts** raised inside a gateway session are relayed to the
   contact on their channel ("reply 1 to allow once, 2 to always allow, 3 to
   decline") and time out to a decline.
+- **A2A worker tasks** acknowledge pickup immediately and send a short,
+  nonterminal progress update about every three minutes until they settle. Set
+  `gateway.a2aProgressIntervalSeconds` or
+  `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS`; use `0` to disable periodic updates.
+  Progress stays in task history and does not start a separate requester turn.
 - **Control commands** (whole-message): `/clear`, `/stop`, `/status`,
   `/health`, `/resume`, `/usage`.
 - **Voice** (on by default with the gateway): setup offers Inkbox Voice AI,

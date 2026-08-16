@@ -1,6 +1,14 @@
 import { z } from "zod";
-import { activeA2ATurn, commitActiveA2ATurn } from "../a2a-context.js";
+import { activeA2ATurn, commitActiveA2ATurn, fenceActiveA2AReplyIntent } from "../a2a-context.js";
 import { findDelegationByTask, promoteAfterSend, recordBeforeSend } from "../a2a-delegations.js";
+import {
+  acknowledgeA2AProgressDrain,
+  clearA2AProgressDrain,
+  drainA2AProgress,
+  renewA2AProgressDrain,
+  requestA2AProgressDrain,
+  waitForA2AProgressDrain,
+} from "../a2a-progress.js";
 import { runTool } from "../errors.js";
 import { formatJson } from "../format.js";
 import { approveOutbound } from "../permissions.js";
@@ -324,13 +332,36 @@ async function inboundIntent(
     if (context.replyIntentCommitted) {
       throw new Error("This inbound A2A task already has an outcome");
     }
-    const identity = await deps.runtime.getIdentity();
-    const reply = (identity as any).a2aReply;
-    if (typeof reply !== "function") {
-      throw new Error("This A2A tool requires @inkbox/sdk with identity.a2aReply() support.");
+    await context.beforeReplyIntent?.();
+    fenceActiveA2AReplyIntent(sessionID, context);
+    const coordinationToken = requestA2AProgressDrain(context.taskId);
+    let terminalAttempted = false;
+    let heartbeat: NodeJS.Timeout | undefined;
+    try {
+      const locallyDrained = await drainA2AProgress(context.taskId);
+      if (locallyDrained) acknowledgeA2AProgressDrain(context.taskId, coordinationToken);
+      else {
+        await waitForA2AProgressDrain(context.taskId, coordinationToken);
+      }
+      heartbeat = setInterval(
+        () => renewA2AProgressDrain(context.taskId, coordinationToken),
+        1_000,
+      );
+      heartbeat.unref?.();
+      const identity = await deps.runtime.getIdentity();
+      const reply = (identity as any).a2aReply;
+      if (typeof reply !== "function") {
+        throw new Error("This A2A tool requires @inkbox/sdk with identity.a2aReply() support.");
+      }
+      terminalAttempted = true;
+      const result = await reply.call(identity, context.taskId, { intent, text });
+      commitActiveA2ATurn(sessionID, context);
+      return formatJson(result);
+    } catch (error) {
+      if (!terminalAttempted) clearA2AProgressDrain(context.taskId, coordinationToken);
+      throw error;
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
-    const result = await reply.call(identity, context.taskId, { intent, text });
-    commitActiveA2ATurn(sessionID, context);
-    return formatJson(result);
   });
 }

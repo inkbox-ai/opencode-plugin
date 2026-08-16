@@ -1,8 +1,8 @@
 name: Live — Agent2Agent
 
-# Four real protocol legs cover both roles and conversation lengths:
-# inbound/outbound × single-turn/multi-turn. The plugin and remote identities
-# are preconfigured to allow one another in both directions.
+# Five real protocol scenarios cover both roles, conversation lengths, and a
+# long-running worker turn. The plugin and remote identities are preconfigured
+# to allow one another in both directions.
 on:
   workflow_call:
     inputs:
@@ -42,6 +42,7 @@ jobs:
         scenario:
           - inbound-single
           - inbound-multi
+          - inbound-progress
           - outbound-single
           - outbound-multi
 
@@ -76,12 +77,13 @@ jobs:
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           INKBOX_VOICEMAIL_DETECTION: "disabled"
+          INKBOX_A2A_PROGRESS_INTERVAL_SECONDS: ${{ matrix.scenario == 'inbound-progress' && '60' || '180' }}
         run: bash scripts/live-aut.sh
 
       - name: Run ${{ matrix.scenario }}
         env:
           A2A_SCENARIO: ${{ matrix.scenario }}
-          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '300' }}
+          A2A_TIMEOUT_S: ${{ matrix.scenario == 'inbound-progress' && '240' || (inputs.timeout_s || '300') }}
           AUT_INKBOX_API_KEY: ${{ secrets.AUT_INKBOX_API_KEY }}
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           INKBOX_BASE_URL: ${{ vars.INKBOX_BASE_URL || 'https://inkbox.ai' }}

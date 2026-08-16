@@ -1,13 +1,17 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { gatewayHome } from "./gateway/state.js";
+import { createStateStore, gatewayHome } from "./gateway/state.js";
 
 export interface ActiveA2ATurn {
   taskId: string;
   messageId: string;
   contextId: string;
   replyIntentCommitted: boolean;
+  replyIntentFenced?: boolean;
+  registryKey?: string;
+  registryFilePath?: string;
+  beforeReplyIntent?: () => Promise<void>;
 }
 
 const turns = new Map<string, ActiveA2ATurn>();
@@ -77,4 +81,15 @@ export function activeA2ATurn(sessionID: string): ActiveA2ATurn | undefined {
 export function commitActiveA2ATurn(sessionID: string, turn: ActiveA2ATurn): void {
   turn.replyIntentCommitted = true;
   writeTurn(sessionID, turn);
+}
+
+export function fenceActiveA2AReplyIntent(sessionID: string, turn: ActiveA2ATurn): void {
+  turn.replyIntentFenced = true;
+  writeTurn(sessionID, turn);
+  if (!turn.registryKey || !turn.registryFilePath) return;
+  createStateStore(path.dirname(turn.registryFilePath)).updateA2ATask(turn.registryKey, (entry) =>
+    entry && typeof entry === "object"
+      ? { ...entry, replyIntentFenced: true, updatedAt: Date.now() }
+      : undefined,
+  );
 }
