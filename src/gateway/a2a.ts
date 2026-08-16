@@ -251,6 +251,35 @@ function authoritativeCallerMessage(task: any):
   };
 }
 
+function authoritativeA2AData(task: any, expected: A2AEventData): A2AEventData | undefined {
+  const state = normalizedState(task?.state);
+  if (!TURN_ACTIVE.has(state)) return undefined;
+  const message = authoritativeCallerMessage(task);
+  const messageId = expected.message_id ?? "";
+  if (
+    message?.taskId !== expected.task_id ||
+    message.contextId !== expected.context_id ||
+    message.messageId !== messageId
+  ) {
+    return undefined;
+  }
+  const taskCaller = task?.caller;
+  return {
+    ...expected,
+    state,
+    message_id: messageId,
+    parts: message.parts,
+    caller: taskCaller
+      ? {
+          identity_id: String(taskCaller.identityId ?? taskCaller.identity_id ?? "") || undefined,
+          organization_id:
+            String(taskCaller.organizationId ?? taskCaller.organization_id ?? "") || undefined,
+          handle: String(taskCaller.handle ?? "") || undefined,
+        }
+      : undefined,
+  };
+}
+
 function advanceDue(previousDue: number, now: number, intervalMs: number): number {
   let next = previousDue;
   while (next <= now) next += intervalMs;
@@ -859,31 +888,8 @@ export function createA2AHandler(deps: {
         const id = await identity();
         if (typeof id.a2aTask !== "function") return;
         const task = await id.a2aTask(data.task_id);
-        if (!TURN_ACTIVE.has(normalizedState(task.state))) return;
-        const caller = authoritativeCallerMessage(task);
-        if (
-          caller?.taskId !== data.task_id ||
-          caller.contextId !== data.context_id ||
-          caller.messageId !== messageId
-        ) {
-          return;
-        }
-        const taskCaller = task?.caller;
-        const normalized: A2AEventData = {
-          ...data,
-          message_id: messageId,
-          parts: caller.parts,
-          caller: taskCaller
-            ? {
-                identity_id:
-                  String(taskCaller.identityId ?? taskCaller.identity_id ?? "") || undefined,
-                organization_id:
-                  String(taskCaller.organizationId ?? taskCaller.organization_id ?? "") ||
-                  undefined,
-                handle: String(taskCaller.handle ?? "") || undefined,
-              }
-            : data.caller,
-        };
+        const normalized = authoritativeA2AData(task, { ...data, message_id: messageId });
+        if (!normalized) return;
         const canceled = canceledTasks.get(data.task_id);
         if (canceled) {
           if (
@@ -898,7 +904,8 @@ export function createA2AHandler(deps: {
         const existing = registry(deps.state)[key];
         if (existing) {
           if (existing.state !== "finalized" && !existing.replyIntentFenced) {
-            admission = { key, data: existing.data, existing: true };
+            persist(deps.state, key, normalized, existing.state);
+            admission = { key, data: normalized, existing: true };
           }
           return;
         }
@@ -953,12 +960,22 @@ export function createA2AHandler(deps: {
           if (TURN_STOPPED.has(normalizedState(task.state))) {
             persist(deps.state, key, entry.data, "finalized");
             await settleProgress(entry.taskId);
-          } else if (!resumedTaskIds.has(entry.taskId)) {
+          } else {
+            const normalized = authoritativeA2AData(task, entry.data);
+            if (!normalized) {
+              persist(deps.state, key, entry.data, "finalized");
+              continue;
+            }
+            if (resumedTaskIds.has(entry.taskId)) {
+              persist(deps.state, key, entry.data, "finalized");
+              continue;
+            }
             resumedTaskIds.add(entry.taskId);
-            ensureProgressRecord(entry.data);
+            persist(deps.state, key, normalized, entry.state);
+            ensureProgressRecord(normalized);
             let acknowledged = false;
             try {
-              acknowledged = await ensureAcknowledgement(entry.data);
+              acknowledged = await ensureAcknowledgement(normalized);
             } catch (error) {
               deps.logger.warn("a2a.acknowledgement_attempt_failed", {
                 taskId: entry.taskId,
@@ -966,9 +983,7 @@ export function createA2AHandler(deps: {
               });
             }
             ensureProgressSupervisor(entry.taskId);
-            start(key, entry.data, acknowledged ? 0 : RETRY_MS);
-          } else {
-            persist(deps.state, key, entry.data, "finalized");
+            start(key, normalized, acknowledged ? 0 : RETRY_MS);
           }
         } catch (error) {
           deps.logger.warn("a2a.registry_reconcile_failed", {
@@ -984,18 +999,12 @@ export function createA2AHandler(deps: {
             return role === "caller" || role === "role_caller";
           });
           if (!message) continue;
-          const data: A2AEventData = {
+          const data = authoritativeA2AData(task, {
             task_id: String(task.id),
             context_id: String(task.contextId),
-            state: normalizedState(task.state),
-            caller: {
-              identity_id: String(task.caller.identityId),
-              organization_id: task.caller.organizationId,
-              handle: task.caller.handle,
-            },
             message_id: message?.messageId ?? `task:${task.id}`,
-            parts: message?.parts ?? [],
-          };
+          });
+          if (!data) continue;
           const key = `${data.task_id}:${data.message_id}`;
           if (registry(deps.state)[key]) continue;
           persist(deps.state, key, data, "queued");

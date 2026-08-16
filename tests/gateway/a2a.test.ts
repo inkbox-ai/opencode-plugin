@@ -638,7 +638,7 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
-  it("resumes only the newest persisted caller turn when history ends in progress", async () => {
+  it("resumes only the authoritative caller turn when history ends in progress", async () => {
     const state = createStateStore(
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
     );
@@ -720,10 +720,25 @@ describe("createA2AHandler", () => {
 
     await handler.catchUp();
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
-    expect(runA2A.mock.calls[0][1]).toContain("Use the latest persisted caller request.");
+    expect(runA2A.mock.calls[0][1]).toContain("Remote latest caller request.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("Use the latest persisted caller request.");
     expect(runA2A.mock.calls[0][1]).not.toContain("I am reviewing the request.");
     expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
+    expect((state.read().a2aTasks as any)["task-1:message-2"].data.parts).toEqual([
+      { text: "Remote latest caller request." },
+    ]);
     expect(identity.a2aReply).not.toHaveBeenCalled();
+
+    const duplicate = event();
+    duplicate.eventType = "a2a.task.message";
+    duplicate.body.id = "evt-2";
+    duplicate.body.data.message_id = "message-2";
+    duplicate.body.data.parts = [{ text: "Spoofed duplicate payload." }];
+    await handler.handle(duplicate);
+    expect(runA2A).toHaveBeenCalledTimes(1);
+    expect((state.read().a2aTasks as any)["task-1:message-2"].data.parts).toEqual([
+      { text: "Remote latest caller request." },
+    ]);
     await handler.close();
   });
 
@@ -1020,14 +1035,60 @@ describe("createA2AHandler", () => {
     followUp.body.id = "evt-2";
     followUp.body.data.message_id = "message-2";
     followUp.body.data.parts = [{ text: "Spoofed webhook request." }];
+    followUp.body.data.caller = {
+      identity_id: "spoofed-identity",
+      organization_id: "spoofed-organization",
+      handle: "spoofed-handle",
+    };
     await restarted.handle(followUp);
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
     expect(runA2A.mock.calls[0][1]).toContain("Trusted request after restart.");
     expect(runA2A.mock.calls[0][1]).not.toContain("Spoofed webhook request.");
+    expect(runA2A.mock.calls[0][1]).toContain("caller=@caller");
+    expect(runA2A.mock.calls[0][1]).not.toContain("spoofed-handle");
+    expect((state.read().a2aTasks as any)["task-1:message-2"].data.caller).toEqual({
+      identity_id: "caller-1",
+      organization_id: "org-1",
+      handle: "caller",
+    });
 
     await restarted.handle(followUp);
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
     await restarted.close();
+  });
+
+  it("does not retain webhook caller metadata when authority omits it", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const runA2A = vi.fn(async (_chatKey: string, _prompt: string) => "[SILENT]");
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => taskSnapshot({ caller: undefined })),
+          a2aReply: vi.fn(async () => ({ state: "working" })),
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const incoming = event();
+    incoming.body.data.caller = {
+      identity_id: "spoofed-identity",
+      organization_id: "spoofed-organization",
+      handle: "spoofed-handle",
+    };
+
+    await handler.handle(incoming);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
+
+    expect(runA2A.mock.calls[0][1]).toContain("caller=@unknown caller_org=unknown");
+    expect(runA2A.mock.calls[0][1]).not.toContain("spoofed-handle");
+    expect((state.read().a2aTasks as any)["task-1:message-1"].data.caller).toBeUndefined();
+    await handler.close();
   });
 
   it("clears the monitor when remote terminal state stops periodic progress", async () => {
