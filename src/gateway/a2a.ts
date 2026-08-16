@@ -1000,14 +1000,20 @@ export function createA2AHandler(deps: {
             const taskId = String(task?.id ?? task?.taskId ?? task?.task_id ?? "");
             if (!taskId || discoveredTaskIds.has(taskId)) continue;
             discoveredTaskIds.add(taskId);
-            const message = [...task.messages].reverse().find((candidate) => {
+            const fullTask = await id.a2aTask(taskId);
+            const messages = Array.isArray(fullTask?.messages)
+              ? fullTask.messages
+              : Array.isArray(fullTask?.raw?.history)
+                ? fullTask.raw.history
+                : [];
+            const message = [...messages].reverse().find((candidate) => {
               const role = normalizedState(candidate?.role);
               return role === "caller" || role === "role_caller";
             });
             if (!message) continue;
-            const data = authoritativeA2AData(task, {
+            const data = authoritativeA2AData(fullTask, {
               task_id: taskId,
-              context_id: String(task.contextId ?? task.context_id),
+              context_id: String(fullTask.contextId ?? fullTask.context_id),
               message_id: message?.messageId ?? message?.message_id ?? `task:${taskId}`,
             });
             if (!data) continue;

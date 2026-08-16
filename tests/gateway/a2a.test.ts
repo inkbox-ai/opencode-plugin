@@ -730,15 +730,27 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
-  it("uses the latest caller message for a newly discovered submitted task", async () => {
+  it("refetches authority before recovering a newly discovered task", async () => {
     const state = createStateStore(
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
     );
     const receipt = a2aAcknowledgementText("task-new", 180);
-    const remoteTask = {
+    const listedTask = {
       id: "task-new",
       contextId: "context-new",
       state: "submitted",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-old",
+          parts: [{ text: "Use the stale listed request." }],
+        },
+      ],
+    };
+    const remoteTask = {
+      id: "task-new",
+      contextId: "context-new",
+      state: "working",
       caller: { identityId: "caller-1", handle: "caller" },
       messages: [
         {
@@ -765,9 +777,10 @@ describe("createA2AHandler", () => {
       id: "identity-1",
       a2aTask: vi.fn(async () => remoteTask),
       a2aReply: vi.fn(),
-      iterA2ATasks: vi.fn(() =>
+      iterA2ATasks: vi.fn(({ state: requestedState }: { state: string }) =>
         (async function* () {
-          yield remoteTask;
+          if (requestedState === "submitted") yield listedTask;
+          if (requestedState === "working") yield remoteTask;
         })(),
       ),
     };
@@ -783,7 +796,11 @@ describe("createA2AHandler", () => {
 
     await handler.catchUp();
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
+    expect(identity.a2aTask).toHaveBeenCalledWith("task-new");
+    expect(identity.iterA2ATasks).toHaveBeenNthCalledWith(1, { state: "submitted" });
+    expect(identity.iterA2ATasks).toHaveBeenNthCalledWith(2, { state: "working" });
     expect(runA2A.mock.calls[0][1]).toContain("Use the latest caller request.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("Use the stale listed request.");
     expect(runA2A.mock.calls[0][1]).not.toContain("Use the old caller request.");
     expect(runA2A.mock.calls[0][1]).not.toContain("I am reviewing the request.");
     expect((state.read().a2aTasks as any)["task-new:message-new"].data.parts).toEqual([
