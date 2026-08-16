@@ -1,10 +1,7 @@
 name: Canary — plugin vs opencode latest
 
 on:
-  schedule:
-    # Twice daily; opencode ships stable releases every day or two.
-    - cron: "23 3 * * *"
-    - cron: "23 15 * * *"
+  workflow_call:
   workflow_dispatch:
 
 jobs:
@@ -55,21 +52,3 @@ jobs:
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - run: bash scripts/smoke-loader.sh
-
-  notify:
-    needs: [contract, loader-smoke]
-    if: >
-      always() && github.event_name == 'schedule' &&
-      (needs.contract.result != 'success' || needs.loader-smoke.result != 'success')
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Notify Google Chat on scheduled failure
-        env:
-          WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
-        run: |
-          [ -n "$WEBHOOK_URL" ] || { echo "GOOGLE_CHAT_WEBHOOK_URL is missing"; exit 1; }
-          curl --fail-with-body --retry 3 --retry-all-errors --max-time 20 \
-            -sS -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\": \"🚨 opencode-plugin canary FAILED: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-            "$WEBHOOK_URL"
