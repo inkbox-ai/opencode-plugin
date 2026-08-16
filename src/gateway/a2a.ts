@@ -717,14 +717,19 @@ export function createA2AHandler(deps: {
         });
         return;
       }
-      for (const [key, entry] of Object.entries(registry(deps.state))) {
+      const persistedEntries = Object.entries(registry(deps.state)).sort(
+        ([, left], [, right]) => right.updatedAt - left.updatedAt,
+      );
+      const resumedTaskIds = new Set<string>();
+      for (const [key, entry] of persistedEntries) {
         if (entry.state === "finalized") continue;
         try {
           const task = await id.a2aTask(entry.taskId);
           if (TURN_STOPPED.has(normalizedState(task.state))) {
             persist(deps.state, key, entry.data, "finalized");
             await settleProgress(entry.taskId);
-          } else {
+          } else if (!resumedTaskIds.has(entry.taskId)) {
+            resumedTaskIds.add(entry.taskId);
             ensureProgressRecord(entry.data);
             let acknowledged = false;
             try {
@@ -737,6 +742,8 @@ export function createA2AHandler(deps: {
             }
             ensureProgressSupervisor(entry.taskId);
             start(key, entry.data, acknowledged ? 0 : RETRY_MS);
+          } else {
+            persist(deps.state, key, entry.data, "finalized");
           }
         } catch (error) {
           deps.logger.warn("a2a.registry_reconcile_failed", {
@@ -747,7 +754,11 @@ export function createA2AHandler(deps: {
       }
       try {
         for await (const task of id.iterA2ATasks({ state: "submitted" })) {
-          const message = task.messages.at(-1);
+          const message = [...task.messages].reverse().find((candidate) => {
+            const role = normalizedState(candidate?.role);
+            return role === "caller" || role === "role_caller";
+          });
+          if (!message) continue;
           const data: A2AEventData = {
             task_id: String(task.id),
             context_id: String(task.contextId),

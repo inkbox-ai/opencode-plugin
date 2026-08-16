@@ -456,6 +456,289 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
+  it("retries persisted progress immediately after restart with the exact text", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const data = event().body.data;
+    const now = Date.now();
+    const receipt = a2aAcknowledgementText("task-1", 180);
+    const pending = "I'm reviewing the exact pending work. (60s elapsed)";
+    state.update({
+      a2aTasks: {
+        "task-1:message-1": {
+          taskId: "task-1",
+          contextId: "context-1",
+          messageId: "message-1",
+          state: "running",
+          data,
+          createdAt: now - 60_000,
+          updatedAt: now,
+        },
+      },
+      a2aProgress: {
+        "task-1": {
+          taskId: "task-1",
+          contextId: "context-1",
+          startedAt: now - 60_000,
+          nextDueAt: now + 120_000,
+          active: true,
+          acknowledgementText: receipt,
+          acknowledgementDelivered: true,
+          pendingText: pending,
+          deliveredCount: 0,
+          updatedAt: now,
+        },
+      },
+    });
+    const messages = [{ role: "agent", parts: [{ text: receipt }] }];
+    const a2aReply = vi.fn(async () => ({ state: "working" }));
+    const summarizeA2AProgress = vi.fn();
+    const identity = {
+      id: "identity-1",
+      a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+      a2aReply,
+      iterA2ATasks: vi.fn(() => (async function* () {})()),
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {})),
+        summarizeA2AProgress,
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.catchUp();
+    await vi.waitFor(() => expect(a2aReply).toHaveBeenCalledOnce());
+
+    expect(a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "progress",
+      text: pending,
+    });
+    expect(summarizeA2AProgress).not.toHaveBeenCalled();
+    expect((state.read().a2aProgress as any)["task-1"].pendingText).toBeUndefined();
+    expect((state.read().a2aProgress as any)["task-1"]).toMatchObject({
+      lastDeliveredText: pending,
+      deliveredCount: 1,
+    });
+    await handler.close();
+  });
+
+  it("reconciles a lost progress response before starting a follow-up", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const now = Date.now();
+    const receipt = a2aAcknowledgementText("task-1", 180);
+    const pending = "I'm checking the exact pending result. (60s elapsed)";
+    state.update({
+      a2aProgress: {
+        "task-1": {
+          taskId: "task-1",
+          contextId: "context-1",
+          startedAt: now - 60_000,
+          nextDueAt: now + 120_000,
+          active: true,
+          acknowledgementText: receipt,
+          acknowledgementDelivered: true,
+          pendingText: pending,
+          deliveredCount: 0,
+          updatedAt: now,
+        },
+      },
+    });
+    const messages = [
+      { role: "agent", parts: [{ text: receipt }] },
+      { role: "role_agent", parts: [{ text: pending }] },
+    ];
+    const a2aReply = vi.fn();
+    const summarizeA2AProgress = vi.fn();
+    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A, summarizeA2AProgress } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const followUp = event();
+    followUp.eventType = "a2a.task.message";
+    followUp.body.id = "evt-2";
+    followUp.body.data.message_id = "message-2";
+    followUp.body.data.parts = [{ text: "Continue from the latest result." }];
+
+    await handler.handle(followUp);
+    await vi.waitFor(() =>
+      expect((state.read().a2aProgress as any)["task-1"].pendingText).toBeUndefined(),
+    );
+
+    expect(a2aReply).not.toHaveBeenCalled();
+    expect(summarizeA2AProgress).not.toHaveBeenCalled();
+    expect((state.read().a2aProgress as any)["task-1"]).toMatchObject({
+      lastDeliveredText: pending,
+      deliveredCount: 1,
+    });
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
+    await handler.close();
+  });
+
+  it("resumes only the newest persisted caller turn when history ends in progress", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const oldData = event().body.data;
+    const latestData = {
+      ...oldData,
+      message_id: "message-2",
+      parts: [{ text: "Use the latest persisted caller request." }],
+    };
+    const now = Date.now();
+    state.update({
+      a2aTasks: {
+        "task-1:message-1": {
+          taskId: "task-1",
+          contextId: "context-1",
+          messageId: "message-1",
+          state: "running",
+          data: oldData,
+          createdAt: now - 1,
+          updatedAt: now - 1,
+        },
+        "task-1:message-2": {
+          taskId: "task-1",
+          contextId: "context-1",
+          messageId: "message-2",
+          state: "running",
+          data: latestData,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+    const receipt = a2aAcknowledgementText("task-1", 180);
+    const remoteTask = {
+      id: "task-1",
+      contextId: "context-1",
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        { role: "caller", messageId: "message-1", parts: [{ text: "Investigate." }] },
+        {
+          role: "role_caller",
+          messageId: "message-2",
+          parts: [{ text: "Remote latest caller request." }],
+        },
+        { role: "agent", messageId: "receipt-1", parts: [{ text: receipt }] },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const identity = {
+      id: "identity-1",
+      a2aTask: vi.fn(async () => remoteTask),
+      a2aReply: vi.fn(),
+      iterA2ATasks: vi.fn(() =>
+        (async function* () {
+          yield remoteTask;
+        })(),
+      ),
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.catchUp();
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
+    expect(runA2A.mock.calls[0][1]).toContain("Use the latest persisted caller request.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("I am reviewing the request.");
+    expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
+    expect(identity.a2aReply).not.toHaveBeenCalled();
+    await handler.close();
+  });
+
+  it("uses the latest caller message for a newly discovered submitted task", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const receipt = a2aAcknowledgementText("task-new", 180);
+    const remoteTask = {
+      id: "task-new",
+      contextId: "context-new",
+      state: "submitted",
+      caller: { identityId: "caller-1", handle: "caller" },
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-old",
+          parts: [{ text: "Use the old caller request." }],
+        },
+        {
+          role: "role_caller",
+          messageId: "message-new",
+          parts: [{ text: "Use the latest caller request." }],
+        },
+        { role: "agent", messageId: "receipt-1", parts: [{ text: receipt }] },
+        {
+          role: "role_agent",
+          messageId: "progress-1",
+          parts: [{ text: "I am reviewing the request. (180s elapsed)" }],
+        },
+      ],
+    };
+    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const identity = {
+      id: "identity-1",
+      a2aTask: vi.fn(async () => remoteTask),
+      a2aReply: vi.fn(),
+      iterA2ATasks: vi.fn(() =>
+        (async function* () {
+          yield remoteTask;
+        })(),
+      ),
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.catchUp();
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
+    expect(runA2A.mock.calls[0][1]).toContain("Use the latest caller request.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("Use the old caller request.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("I am reviewing the request.");
+    expect((state.read().a2aTasks as any)["task-new:message-new"].data.parts).toEqual([
+      { text: "Use the latest caller request." },
+    ]);
+    expect(identity.a2aReply).not.toHaveBeenCalled();
+    await handler.close();
+  });
+
   it("fences cancellation that arrives while acknowledgement state is loading", async () => {
     let release = (_task: any) => {};
     const task = new Promise<any>((resolve) => {
