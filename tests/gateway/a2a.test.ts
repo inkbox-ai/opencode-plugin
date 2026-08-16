@@ -34,6 +34,34 @@ function event() {
   };
 }
 
+function taskSnapshot(overrides: Record<string, any> = {}) {
+  const messages = Array.isArray(overrides.messages) ? overrides.messages : [];
+  const hasCurrentCaller = messages.some((message: any) => {
+    const role = String(message?.role ?? "").toLowerCase();
+    return (
+      (role === "caller" || role === "role_caller") &&
+      String(message?.messageId ?? message?.message_id ?? "") === "message-1"
+    );
+  });
+  return {
+    id: "task-1",
+    contextId: "context-1",
+    state: "submitted",
+    caller: { identityId: "caller-1", organizationId: "org-1", handle: "caller" },
+    ...overrides,
+    messages: hasCurrentCaller
+      ? messages
+      : [
+          {
+            role: "caller",
+            messageId: "message-1",
+            parts: [{ text: "Investigate." }],
+          },
+          ...messages,
+        ],
+  };
+}
+
 function abortableA2ARun(result = "[SILENT]") {
   const pending = new Set<(value: string) => void>();
   const runA2A = vi.fn(
@@ -66,7 +94,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aTask: vi.fn(async () => taskSnapshot()),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -106,7 +134,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -136,10 +164,11 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({
-            state: "submitted",
-            messages: visible ? [{ role: "agent", parts: [{ text: committedText }] }] : [],
-          })),
+          a2aTask: vi.fn(async () =>
+            taskSnapshot({
+              messages: visible ? [{ role: "agent", parts: [{ text: committedText }] }] : [],
+            }),
+          ),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -168,10 +197,11 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({
-            state: "submitted",
-            messages: [{ role: "caller", parts: [{ text: receipt }] }],
-          })),
+          a2aTask: vi.fn(async () =>
+            taskSnapshot({
+              messages: [{ role: "caller", messageId: "message-1", parts: [{ text: receipt }] }],
+            }),
+          ),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -211,7 +241,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -268,7 +298,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -302,7 +332,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply: vi.fn(async (_taskId: string, payload: any) => {
             messages.push({ role: "agent", parts: [{ text: payload.text }] });
             return { state: "working" };
@@ -339,7 +369,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply: vi.fn(async (_taskId: string, payload: any) => {
             messages.push({ role: "agent", parts: [{ text: payload.text }] });
             return { state: "working" };
@@ -370,7 +400,7 @@ describe("createA2AHandler", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
     const messages: any[] = [];
-    const a2aTask = vi.fn(async () => ({ state: "submitted", messages }));
+    const a2aTask = vi.fn(async () => taskSnapshot({ messages }));
     const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
@@ -439,7 +469,7 @@ describe("createA2AHandler", () => {
     const messages: any[] = [];
     const identity = {
       id: "identity-1",
-      a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+      a2aTask: vi.fn(async () => taskSnapshot({ messages })),
       a2aReply: vi.fn(async (_taskId: string, payload: any) => {
         messages.push({ role: "agent", parts: [{ text: payload.text }] });
       }),
@@ -508,7 +538,7 @@ describe("createA2AHandler", () => {
     const sessions = abortableA2ARun();
     const identity = {
       id: "identity-1",
-      a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+      a2aTask: vi.fn(async () => taskSnapshot({ messages })),
       a2aReply,
       iterA2ATasks: vi.fn(() => (async function* () {})()),
     };
@@ -561,7 +591,7 @@ describe("createA2AHandler", () => {
         },
       },
     });
-    const messages = [
+    const messages: any[] = [
       { role: "agent", parts: [{ text: receipt }] },
       { role: "role_agent", parts: [{ text: pending }] },
     ];
@@ -573,7 +603,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -587,6 +617,11 @@ describe("createA2AHandler", () => {
     followUp.body.id = "evt-2";
     followUp.body.data.message_id = "message-2";
     followUp.body.data.parts = [{ text: "Continue from the latest result." }];
+    messages.push({
+      role: "role_caller",
+      messageId: "message-2",
+      parts: [{ text: "Continue from the latest result." }],
+    });
 
     await handler.handle(followUp);
     await vi.waitFor(() =>
@@ -784,7 +819,7 @@ describe("createA2AHandler", () => {
     const canceled = event();
     canceled.eventType = "a2a.task.canceled";
     const cancellation = handler.handle(canceled);
-    release({ state: "submitted", messages: [] });
+    release(taskSnapshot());
     await Promise.all([initial, cancellation]);
 
     expect(a2aReply).not.toHaveBeenCalled();
@@ -926,6 +961,75 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
+  it("rejects a stale canceled generation after restart and admits the authoritative caller once", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const canceledTask = taskSnapshot({ state: "canceled" });
+    const first = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => canceledTask),
+          a2aReply: vi.fn(),
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A: vi.fn(), abortA2A: vi.fn(async () => true) } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const canceled = event();
+    canceled.eventType = "a2a.task.canceled";
+    delete (canceled.body.data as any).message_id;
+    await first.handle(canceled);
+    await first.close();
+
+    const authoritativeTask = taskSnapshot({
+      state: "working",
+      messages: [
+        {
+          role: "role_caller",
+          messageId: "message-2",
+          parts: [{ text: "Trusted request after restart." }],
+        },
+      ],
+    });
+    const runA2A = vi.fn(async (_chatKey: string, _prompt: string) => "[SILENT]");
+    const a2aReply = vi.fn(async () => ({ state: "working" }));
+    const restarted = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => authoritativeTask),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const delayed = event();
+    await restarted.handle(delayed);
+    expect(runA2A).not.toHaveBeenCalled();
+    expect(a2aReply).not.toHaveBeenCalled();
+
+    const followUp = event();
+    followUp.eventType = "a2a.task.message";
+    followUp.body.id = "evt-2";
+    followUp.body.data.message_id = "message-2";
+    followUp.body.data.parts = [{ text: "Spoofed webhook request." }];
+    await restarted.handle(followUp);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
+    expect(runA2A.mock.calls[0][1]).toContain("Trusted request after restart.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("Spoofed webhook request.");
+
+    await restarted.handle(followUp);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledOnce());
+    await restarted.close();
+  });
+
   it("clears the monitor when remote terminal state stops periodic progress", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
@@ -937,7 +1041,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: taskState, messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ state: taskState, messages })),
           a2aReply: vi.fn(async (_taskId: string, payload: any) => {
             messages.push({ role: "agent", parts: [{ text: payload.text }] });
           }),
@@ -982,7 +1086,7 @@ describe("createA2AHandler", () => {
       });
       const identity = {
         id: "identity-1",
-        a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+        a2aTask: vi.fn(async () => taskSnapshot()),
         a2aReply,
         iterA2ATasks: vi.fn(() => (async function* () {})()),
       };
@@ -1037,9 +1141,10 @@ describe("createA2AHandler", () => {
       if (payload.intent === "progress") return { state: "working" };
       throw new Error("response lost");
     });
+    const authoritativeMessages: any[] = [];
     const identity = {
       id: "identity-1",
-      a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+      a2aTask: vi.fn(async () => taskSnapshot({ messages: authoritativeMessages })),
       a2aReply,
       iterA2ATasks: vi.fn(() => (async function* () {})()),
     };
@@ -1089,6 +1194,11 @@ describe("createA2AHandler", () => {
     followUp.body.id = "evt-2";
     followUp.body.data.message_id = "message-2";
     followUp.body.data.parts = [{ text: "Genuine follow-up." }];
+    authoritativeMessages.push({
+      role: "caller",
+      messageId: "message-2",
+      parts: [{ text: "Genuine follow-up." }],
+    });
     await restarted.handle(followUp);
     await vi.waitFor(() => expect(restartedRun).toHaveBeenCalledOnce());
     expect((state.read().a2aTasks as any)["task-1:message-2"].replyIntentFenced).not.toBe(true);
@@ -1109,7 +1219,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aTask: vi.fn(async () => taskSnapshot()),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -1150,7 +1260,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -1232,7 +1342,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aTask: vi.fn(async () => taskSnapshot({ messages })),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -1258,6 +1368,11 @@ describe("createA2AHandler", () => {
     followUp.body.id = "evt-2";
     followUp.body.data.message_id = "message-2";
     followUp.body.data.parts = [{ text: "Continue with this follow-up." }];
+    messages.push({
+      role: "role_caller",
+      messageId: "message-2",
+      parts: [{ text: "Continue with this follow-up." }],
+    });
     await handler.handle(followUp);
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(2));
 
@@ -1299,7 +1414,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aTask: vi.fn(async () => taskSnapshot()),
           a2aReply,
         })),
         getClient: vi.fn(),
@@ -1348,7 +1463,7 @@ describe("createA2AHandler", () => {
       inkbox: {
         getIdentity: vi.fn(async () => ({
           id: "identity-1",
-          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aTask: vi.fn(async () => taskSnapshot()),
           a2aReply: vi.fn(async () => ({ state: "working" })),
         })),
         getClient: vi.fn(),
@@ -1380,6 +1495,32 @@ describe("createA2AHandler", () => {
     expect(JSON.stringify(state.read())).toBe(stateAfterClose);
   });
 
+  it("rejects admission after close without side effects", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const getIdentity = vi.fn(async () => ({
+      id: "identity-1",
+      a2aTask: vi.fn(async () => taskSnapshot()),
+      a2aReply: vi.fn(),
+    }));
+    const runA2A = vi.fn();
+    const handler = createA2AHandler({
+      inkbox: { getIdentity, getClient: vi.fn() } as any,
+      sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.close();
+    getIdentity.mockClear();
+    await handler.handle(event());
+
+    expect(getIdentity).not.toHaveBeenCalled();
+    expect(runA2A).not.toHaveBeenCalled();
+    expect(state.read().a2aTasks).toBeUndefined();
+  });
+
   it("persists before ack, dedupes, and guarded-completes", async () => {
     const state = createStateStore(
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
@@ -1387,7 +1528,7 @@ describe("createA2AHandler", () => {
     const a2aReply = vi.fn(async () => ({ id: "task-1", state: "completed" }));
     const identity = {
       id: "identity-1",
-      a2aTask: vi.fn(async () => ({ id: "task-1", state: "submitted" })),
+      a2aTask: vi.fn(async () => taskSnapshot()),
       a2aReply,
     };
     const sessions = {
@@ -1428,7 +1569,7 @@ describe("createA2AHandler", () => {
     const a2aReply = vi.fn();
     const identity = {
       id: "identity-1",
-      a2aTask: vi.fn(async () => ({ id: "task-1", state: "input_required" })),
+      a2aTask: vi.fn(async () => taskSnapshot({ state: "input_required" })),
       a2aReply,
     };
     const handler = createA2AHandler({

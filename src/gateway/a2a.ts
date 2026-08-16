@@ -771,6 +771,7 @@ export function createA2AHandler(deps: {
     },
 
     async handle(event) {
+      if (closing) return true;
       const type = event.eventType ?? "";
       const data = eventData(event);
       if (!data) return true;
@@ -851,9 +852,38 @@ export function createA2AHandler(deps: {
       }
       let admission: { key: string; data: A2AEventData; existing: boolean } | undefined;
       await serializeAdmission(data.task_id, async () => {
+        if (closing) return;
         const messageId = data.message_id ?? event.body.id?.toString() ?? "";
         const key = `${data.task_id}:${messageId}`;
-        let normalized = { ...data, message_id: messageId };
+        if (type !== "a2a.task.created" && type !== "a2a.task.message") return;
+        const id = await identity();
+        if (typeof id.a2aTask !== "function") return;
+        const task = await id.a2aTask(data.task_id);
+        if (!TURN_ACTIVE.has(normalizedState(task.state))) return;
+        const caller = authoritativeCallerMessage(task);
+        if (
+          caller?.taskId !== data.task_id ||
+          caller.contextId !== data.context_id ||
+          caller.messageId !== messageId
+        ) {
+          return;
+        }
+        const taskCaller = task?.caller;
+        const normalized: A2AEventData = {
+          ...data,
+          message_id: messageId,
+          parts: caller.parts,
+          caller: taskCaller
+            ? {
+                identity_id:
+                  String(taskCaller.identityId ?? taskCaller.identity_id ?? "") || undefined,
+                organization_id:
+                  String(taskCaller.organizationId ?? taskCaller.organization_id ?? "") ||
+                  undefined,
+                handle: String(taskCaller.handle ?? "") || undefined,
+              }
+            : data.caller,
+        };
         const canceled = canceledTasks.get(data.task_id);
         if (canceled) {
           if (
@@ -863,19 +893,6 @@ export function createA2AHandler(deps: {
           ) {
             return;
           }
-          const id = await identity();
-          if (typeof id.a2aTask !== "function") return;
-          const task = await id.a2aTask(data.task_id);
-          if (!TURN_ACTIVE.has(normalizedState(task.state))) return;
-          const caller = authoritativeCallerMessage(task);
-          if (
-            caller?.taskId !== data.task_id ||
-            caller.contextId !== data.context_id ||
-            caller.messageId !== messageId
-          ) {
-            return;
-          }
-          normalized = { ...normalized, parts: caller.parts };
           canceledTasks.delete(data.task_id);
         }
         const existing = registry(deps.state)[key];
