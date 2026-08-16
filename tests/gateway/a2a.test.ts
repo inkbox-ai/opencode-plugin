@@ -34,6 +34,20 @@ function event() {
   };
 }
 
+function abortableA2ARun(result = "[SILENT]") {
+  const pending = new Set<(value: string) => void>();
+  const runA2A = vi.fn(
+    (_chatKey: string, _prompt: string, _context?: any) =>
+      new Promise<string>((resolve) => pending.add(resolve)),
+  );
+  const abortA2A = vi.fn(async () => {
+    for (const resolve of pending) resolve(result);
+    pending.clear();
+    return true;
+  });
+  return { runA2A, abortA2A };
+}
+
 describe("createA2AHandler", () => {
   beforeEach(() => {
     process.env.INKBOX_OPENCODE_HOME = `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-gateway-${crypto.randomUUID()}`;
@@ -241,7 +255,8 @@ describe("createA2AHandler", () => {
       messages.push({ role: "agent", parts: [{ text: payload.text }] });
       return { state: "working" };
     });
-    const abortA2A = vi.fn(async () => true);
+    const sessions = abortableA2ARun();
+    const { abortA2A } = sessions;
     const summarizeA2AProgress = vi.fn(() => summary);
     const handler = createA2AHandler({
       inkbox: {
@@ -252,11 +267,7 @@ describe("createA2AHandler", () => {
         })),
         getClient: vi.fn(),
       } as any,
-      sessions: {
-        runA2A: vi.fn(() => new Promise(() => {})),
-        summarizeA2AProgress,
-        abortA2A,
-      } as any,
+      sessions: { ...sessions, summarizeA2AProgress } as any,
       state: createStateStore(
         `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
       ),
@@ -280,10 +291,7 @@ describe("createA2AHandler", () => {
 
   it("acknowledges a cross-process terminal drain even when periodic updates are disabled", async () => {
     const messages: any[] = [];
-    const sessions = {
-      runA2A: vi.fn(() => new Promise(() => {})),
-      abortA2A: vi.fn(async () => true),
-    };
+    const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => ({
@@ -320,6 +328,7 @@ describe("createA2AHandler", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
     const messages: any[] = [];
+    const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => ({
@@ -332,10 +341,7 @@ describe("createA2AHandler", () => {
         })),
         getClient: vi.fn(),
       } as any,
-      sessions: {
-        runA2A: vi.fn(() => new Promise(() => {})),
-        abortA2A: vi.fn(async () => true),
-      } as any,
+      sessions: sessions as any,
       state: createStateStore(
         `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
       ),
@@ -359,6 +365,7 @@ describe("createA2AHandler", () => {
     vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
     const messages: any[] = [];
     const a2aTask = vi.fn(async () => ({ state: "submitted", messages }));
+    const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => ({
@@ -371,10 +378,7 @@ describe("createA2AHandler", () => {
         })),
         getClient: vi.fn(),
       } as any,
-      sessions: {
-        runA2A: vi.fn(() => new Promise(() => {})),
-        abortA2A: vi.fn(async () => true),
-      } as any,
+      sessions: sessions as any,
       state: createStateStore(
         `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
       ),
@@ -437,12 +441,13 @@ describe("createA2AHandler", () => {
         async *[Symbol.asyncIterator]() {},
       })),
     };
+    const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => identity),
         getClient: vi.fn(),
       } as any,
-      sessions: { runA2A: vi.fn(() => new Promise(() => {})) } as any,
+      sessions: sessions as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       config: { gateway: { a2aProgressIntervalSeconds: 60 } } as any,
@@ -494,6 +499,7 @@ describe("createA2AHandler", () => {
     const messages = [{ role: "agent", parts: [{ text: receipt }] }];
     const a2aReply = vi.fn(async () => ({ state: "working" }));
     const summarizeA2AProgress = vi.fn();
+    const sessions = abortableA2ARun();
     const identity = {
       id: "identity-1",
       a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
@@ -505,10 +511,7 @@ describe("createA2AHandler", () => {
         getIdentity: vi.fn(async () => identity),
         getClient: vi.fn(),
       } as any,
-      sessions: {
-        runA2A: vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {})),
-        summarizeA2AProgress,
-      } as any,
+      sessions: { ...sessions, summarizeA2AProgress } as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
@@ -558,7 +561,8 @@ describe("createA2AHandler", () => {
     ];
     const a2aReply = vi.fn();
     const summarizeA2AProgress = vi.fn();
-    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const sessions = abortableA2ARun();
+    const { runA2A } = sessions;
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => ({
@@ -568,7 +572,7 @@ describe("createA2AHandler", () => {
         })),
         getClient: vi.fn(),
       } as any,
-      sessions: { runA2A, summarizeA2AProgress } as any,
+      sessions: { ...sessions, summarizeA2AProgress } as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
@@ -647,7 +651,8 @@ describe("createA2AHandler", () => {
         },
       ],
     };
-    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const sessions = abortableA2ARun();
+    const { runA2A } = sessions;
     const identity = {
       id: "identity-1",
       a2aTask: vi.fn(async () => remoteTask),
@@ -663,7 +668,7 @@ describe("createA2AHandler", () => {
         getIdentity: vi.fn(async () => identity),
         getClient: vi.fn(),
       } as any,
-      sessions: { runA2A } as any,
+      sessions: sessions as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
@@ -706,7 +711,8 @@ describe("createA2AHandler", () => {
         },
       ],
     };
-    const runA2A = vi.fn((_chatKey: string, _prompt: string) => new Promise(() => {}));
+    const sessions = abortableA2ARun();
+    const { runA2A } = sessions;
     const identity = {
       id: "identity-1",
       a2aTask: vi.fn(async () => remoteTask),
@@ -722,7 +728,7 @@ describe("createA2AHandler", () => {
         getIdentity: vi.fn(async () => identity),
         getClient: vi.fn(),
       } as any,
-      sessions: { runA2A } as any,
+      sessions: sessions as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
@@ -782,6 +788,7 @@ describe("createA2AHandler", () => {
     const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
     let taskState = "submitted";
     const messages: any[] = [];
+    const sessions = abortableA2ARun();
     const handler = createA2AHandler({
       inkbox: {
         getIdentity: vi.fn(async () => ({
@@ -794,7 +801,7 @@ describe("createA2AHandler", () => {
         getClient: vi.fn(),
       } as any,
       sessions: {
-        runA2A: vi.fn(() => new Promise(() => {})),
+        ...sessions,
         summarizeA2AProgress: vi.fn(async () => "I'm validating the work."),
       } as any,
       state: createStateStore(
@@ -810,6 +817,281 @@ describe("createA2AHandler", () => {
     await vi.waitFor(() => expect(clearIntervalSpy).toHaveBeenCalled());
     clearIntervalSpy.mockRestore();
     await handler.close();
+  });
+
+  it.each(["complete", "ask_caller", "fail"])(
+    "persists an explicit %s reply fence before an ambiguous send and honors it after restart",
+    async (intent) => {
+      const state = createStateStore(
+        `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+      );
+      const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+        if (payload.intent === "progress") return { state: "working" };
+        throw new Error("response lost");
+      });
+      const runA2A = vi.fn(async (_chatKey: string, _prompt: string, context: any) => {
+        await context.beforeReplyIntent();
+        expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true);
+        await a2aReply("task-1", { intent, text: "Explicit outcome." });
+        context.replyIntentCommitted = true;
+        return "[SILENT]";
+      });
+      const identity = {
+        id: "identity-1",
+        a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+        a2aReply,
+        iterA2ATasks: vi.fn(() => (async function* () {})()),
+      };
+      const handler = createA2AHandler({
+        inkbox: {
+          getIdentity: vi.fn(async () => identity),
+          getClient: vi.fn(),
+        } as any,
+        sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+        state,
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      });
+
+      await handler.handle(event());
+      await vi.waitFor(() =>
+        expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true),
+      );
+      await handler.close();
+
+      const restartedRun = vi.fn(async () => "[SILENT]");
+      const restartedReply = vi.fn();
+      const restarted = createA2AHandler({
+        inkbox: {
+          getIdentity: vi.fn(async () => ({
+            ...identity,
+            a2aReply: restartedReply,
+          })),
+          getClient: vi.fn(),
+        } as any,
+        sessions: {
+          runA2A: restartedRun,
+          abortA2A: vi.fn(async () => true),
+        } as any,
+        state,
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      });
+      await restarted.catchUp();
+      await restarted.handle(event());
+
+      expect(restartedRun).not.toHaveBeenCalled();
+      expect(restartedReply).not.toHaveBeenCalled();
+      expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true);
+      await restarted.close();
+    },
+  );
+
+  it("fences an ambiguous implicit completion but allows a genuine caller follow-up", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      if (payload.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const identity = {
+      id: "identity-1",
+      a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+      a2aReply,
+      iterA2ATasks: vi.fn(() => (async function* () {})()),
+    };
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => identity),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn(async () => "Plain final answer."),
+        abortA2A: vi.fn(async () => true),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await vi.waitFor(() =>
+      expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true),
+    );
+    await handler.close();
+
+    const restartedRun = vi.fn(async () => "[SILENT]");
+    const restartedReply = vi.fn();
+    const restarted = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({ ...identity, a2aReply: restartedReply })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: restartedRun,
+        abortA2A: vi.fn(async () => true),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    await restarted.catchUp();
+    await restarted.handle(event());
+    expect(restartedRun).not.toHaveBeenCalled();
+    expect(restartedReply).not.toHaveBeenCalled();
+
+    const followUp = event();
+    followUp.eventType = "a2a.task.message";
+    followUp.body.id = "evt-2";
+    followUp.body.data.message_id = "message-2";
+    followUp.body.data.parts = [{ text: "Genuine follow-up." }];
+    await restarted.handle(followUp);
+    await vi.waitFor(() => expect(restartedRun).toHaveBeenCalledOnce());
+    expect((state.read().a2aTasks as any)["task-1:message-2"].replyIntentFenced).not.toBe(true);
+    await restarted.close();
+  });
+
+  it("keeps a durable reply fence while the stale drain monitor runs", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      if (payload.intent === "progress") return { state: "working" };
+      throw new Error("response lost");
+    });
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn(async () => "Plain final answer."),
+        abortA2A: vi.fn(async () => true),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      config: { gateway: { a2aProgressIntervalSeconds: 1 } } as any,
+    });
+
+    await handler.handle(event());
+    await vi.waitFor(() =>
+      expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true),
+    );
+    await vi.advanceTimersByTimeAsync(7_000);
+
+    expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true);
+    expect(a2aReply).toHaveBeenCalledTimes(2);
+    expect(listA2AProgressDrains("task-1")).toHaveLength(1);
+    clearA2AProgressDrain("task-1");
+    await handler.close();
+  });
+
+  it("waits for a blocked terminal reply before cancellation returns", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    let releaseTerminal = () => {};
+    let terminalStarted = () => {};
+    const terminalGate = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    const terminalCall = new Promise<void>((resolve) => {
+      terminalStarted = resolve;
+    });
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      if (payload.intent === "complete") {
+        terminalStarted();
+        await terminalGate;
+      }
+      return { state: "working" };
+    });
+    const abortA2A = vi.fn(async () => true);
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn(async () => "Final answer."),
+        abortA2A,
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await terminalCall;
+    const canceled = event();
+    canceled.eventType = "a2a.task.canceled";
+    let settled = false;
+    const cancellation = handler.handle(canceled).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseTerminal();
+    await cancellation;
+    const stateAfterCancellation = JSON.stringify(state.read());
+    await Promise.resolve();
+    expect(JSON.stringify(state.read())).toBe(stateAfterCancellation);
+    await handler.close();
+  });
+
+  it("waits for an abort-insensitive dispatch before close returns", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    let releaseDispatch = (_value: string) => {};
+    let dispatchStarted = () => {};
+    const dispatchGate = new Promise<string>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const dispatchCall = new Promise<void>((resolve) => {
+      dispatchStarted = resolve;
+    });
+    const abortA2A = vi.fn(async () => true);
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages: [] })),
+          a2aReply: vi.fn(async () => ({ state: "working" })),
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: vi.fn(() => {
+          dispatchStarted();
+          return dispatchGate;
+        }),
+        abortA2A,
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await dispatchCall;
+    let settled = false;
+    const close = handler.close().then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(abortA2A).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+
+    releaseDispatch("Late answer.");
+    await close;
+    const stateAfterClose = JSON.stringify(state.read());
+    await Promise.resolve();
+    expect(JSON.stringify(state.read())).toBe(stateAfterClose);
   });
 
   it("persists before ack, dedupes, and guarded-completes", async () => {

@@ -56,6 +56,7 @@ interface RegistryEntry {
   messageId: string;
   state: "queued" | "running" | "finalized";
   data: A2AEventData;
+  replyIntentFenced?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -142,11 +143,30 @@ function persist(
         messageId: data.message_id ?? "",
         state: status,
         data,
+        replyIntentFenced: current[key]?.replyIntentFenced,
         createdAt: current[key]?.createdAt ?? now,
         updatedAt: now,
       },
     },
   });
+}
+
+function fenceReplyIntent(state: StateStore, key: string): void {
+  const current = registry(state);
+  const entry = current[key];
+  if (!entry || entry.replyIntentFenced) return;
+  state.update({
+    a2aTasks: {
+      ...current,
+      [key]: { ...entry, replyIntentFenced: true, updatedAt: Date.now() },
+    },
+  });
+}
+
+function latestTaskEntry(state: StateStore, taskId: string): RegistryEntry | undefined {
+  return Object.values(registry(state))
+    .filter((entry) => entry.taskId === taskId)
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
 }
 
 function saveProgress(state: StateStore, record: ProgressRecord): void {
@@ -204,11 +224,17 @@ export function createA2AHandler(deps: {
   logger: GatewayLogger;
   config?: ResolvedConfig;
 }): A2AHandler {
-  const runningKeys = new Set<string>();
-  const running = new Set<Promise<void>>();
+  interface RunningJob {
+    key: string;
+    taskId: string;
+    contextId: string;
+    task: Promise<void>;
+  }
+  const running = new Map<string, RunningJob>();
   const progressRuntimes = new Map<string, ProgressRuntime>();
   const taskLocks = new Map<string, Promise<void>>();
   const settlingTasks = new Set<string>();
+  const retryWaiters = new Map<string, Set<() => void>>();
   const intervalSeconds = deps.config?.gateway.a2aProgressIntervalSeconds ?? 180;
   const intervalMs = intervalSeconds * 1000;
   let closing = false;
@@ -232,6 +258,33 @@ export function createA2AHandler(deps: {
       release();
       if (taskLocks.get(taskId) === queued) taskLocks.delete(taskId);
     }
+  }
+
+  async function waitForRetry(taskId: string, delayMs: number): Promise<void> {
+    if (closing || settlingTasks.has(taskId)) return;
+    await new Promise<void>((resolve) => {
+      const waiters = retryWaiters.get(taskId) ?? new Set<() => void>();
+      let timer: NodeJS.Timeout;
+      const finish = () => {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        if (waiters.size === 0 && retryWaiters.get(taskId) === waiters) {
+          retryWaiters.delete(taskId);
+        }
+        resolve();
+      };
+      timer = setTimeout(finish, delayMs);
+      timer.unref?.();
+      waiters.add(finish);
+      retryWaiters.set(taskId, waiters);
+    });
+  }
+
+  function wakeRetryWaiters(taskId?: string): void {
+    const waiters = taskId
+      ? [...(retryWaiters.get(taskId) ?? [])]
+      : [...retryWaiters.values()].flatMap((taskWaiters) => [...taskWaiters]);
+    for (const finish of waiters) finish();
   }
 
   function ensureProgressRecord(data: A2AEventData): ProgressRecord {
@@ -321,7 +374,9 @@ export function createA2AHandler(deps: {
   async function emitProgress(taskId: string): Promise<boolean> {
     return serializeTask(taskId, async () => {
       let progress = progressRegistry(deps.state)[taskId];
-      if (!progress?.active || closing) return false;
+      if (!progress?.active || closing || latestTaskEntry(deps.state, taskId)?.replyIntentFenced) {
+        return false;
+      }
       const runtime = progressRuntimes.get(taskId);
       if (runtime?.stopping) return false;
       const id = await identity();
@@ -395,6 +450,12 @@ export function createA2AHandler(deps: {
     if (runtime.coordinating || closing) return;
     runtime.coordinating = true;
     try {
+      if (latestTaskEntry(deps.state, taskId)?.replyIntentFenced) {
+        runtime.stopping = true;
+        runtime.wake?.();
+        await runtime.loop;
+        return;
+      }
       let requests = listA2AProgressDrains(taskId);
       const stale = requests.filter(
         (request) => Date.now() - request.heartbeatAt >= DRAIN_STALE_MS,
@@ -464,7 +525,8 @@ export function createA2AHandler(deps: {
 
   function ensureProgressSupervisor(taskId: string): void {
     const progress = progressRegistry(deps.state)[taskId];
-    if (closing || !progress?.active) return;
+    if (closing || !progress?.active || latestTaskEntry(deps.state, taskId)?.replyIntentFenced)
+      return;
     let runtime = progressRuntimes.get(taskId);
     if (!runtime) {
       runtime = { stopping: listA2AProgressDrains(taskId).length > 0 };
@@ -526,7 +588,7 @@ export function createA2AHandler(deps: {
     const id = await identity();
     const taskId = data.task_id;
     if (initialAcknowledgementDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, initialAcknowledgementDelayMs));
+      await waitForRetry(taskId, initialAcknowledgementDelayMs);
     }
     while (!closing) {
       try {
@@ -548,7 +610,7 @@ export function createA2AHandler(deps: {
       } catch (error) {
         deps.logger.warn("a2a.task_state_retry_failed", { taskId, error: String(error) });
       }
-      await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+      await waitForRetry(taskId, RETRY_MS);
     }
     if (closing) return;
     ensureProgressSupervisor(taskId);
@@ -558,6 +620,11 @@ export function createA2AHandler(deps: {
       contextId: data.context_id,
       messageId: data.message_id ?? "",
       replyIntentCommitted: false,
+      registryKey: key,
+      registryFilePath: deps.state.filePath,
+      beforeReplyIntent: async () => {
+        fenceReplyIntent(deps.state, key);
+      },
     };
     const caller = data.caller ?? {};
     const body = (data.parts ?? [])
@@ -574,11 +641,13 @@ export function createA2AHandler(deps: {
         `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
         context,
       );
+      if (closing || settlingTasks.has(taskId)) return;
       if (
         !context.replyIntentCommitted &&
         reply?.trim() &&
         reply.trim().toUpperCase() !== "[SILENT]"
       ) {
+        await context.beforeReplyIntent?.();
         const coordinationToken = requestA2AProgressDrain(taskId);
         let terminalAttempted = false;
         let heartbeat: NodeJS.Timeout | undefined;
@@ -621,14 +690,13 @@ export function createA2AHandler(deps: {
   }
 
   function start(key: string, data: A2AEventData, acknowledgementDelayMs = 0): void {
-    if (closing || runningKeys.has(key)) return;
-    runningKeys.add(key);
-    const job = run(key, data, acknowledgementDelayMs);
-    running.add(job);
-    void job.finally(() => {
-      running.delete(job);
-      runningKeys.delete(key);
+    if (closing || settlingTasks.has(data.task_id) || running.has(key)) return;
+    let active!: RunningJob;
+    const task = run(key, data, acknowledgementDelayMs).finally(() => {
+      if (running.get(key) === active) running.delete(key);
     });
+    active = { key, taskId: data.task_id, contextId: data.context_id, task };
+    running.set(key, active);
   }
 
   return {
@@ -674,9 +742,14 @@ export function createA2AHandler(deps: {
         return true;
       }
       if (type === "a2a.task.canceled") {
+        const jobs = [...running.values()].filter(
+          (job) => job.taskId === data.task_id && job.contextId === data.context_id,
+        );
+        wakeRetryWaiters(data.task_id);
         await settleProgress(data.task_id);
         const id = await identity();
         await deps.sessions.abortA2A(`a2a:${id.id}:${data.context_id}`, data.task_id);
+        await Promise.allSettled(jobs.map((job) => job.task));
         return true;
       }
       const messageId = data.message_id ?? event.body.id?.toString() ?? "";
@@ -684,7 +757,7 @@ export function createA2AHandler(deps: {
       const normalized = { ...data, message_id: messageId };
       const existing = registry(deps.state)[key];
       if (existing) {
-        if (existing.state !== "finalized") {
+        if (existing.state !== "finalized" && !existing.replyIntentFenced) {
           const acknowledged = progressRegistry(deps.state)[data.task_id]?.acknowledgementDelivered;
           start(key, existing.data, acknowledged ? 0 : RETRY_MS);
         }
@@ -723,6 +796,11 @@ export function createA2AHandler(deps: {
       const resumedTaskIds = new Set<string>();
       for (const [key, entry] of persistedEntries) {
         if (entry.state === "finalized") continue;
+        if (entry.replyIntentFenced) {
+          resumedTaskIds.add(entry.taskId);
+          await settleProgress(entry.taskId);
+          continue;
+        }
         try {
           const task = await id.a2aTask(entry.taskId);
           if (TURN_STOPPED.has(normalizedState(task.state))) {
@@ -797,9 +875,20 @@ export function createA2AHandler(deps: {
 
     async close() {
       closing = true;
+      wakeRetryWaiters();
+      const jobs = [...running.values()];
+      try {
+        const id = await identity();
+        await Promise.allSettled(
+          jobs.map((job) => deps.sessions.abortA2A(`a2a:${id.id}:${job.contextId}`, job.taskId)),
+        );
+      } catch (error) {
+        deps.logger.warn("a2a.shutdown_abort_failed", { error: String(error) });
+      }
       const drains = [...progressRuntimes.keys()].map((taskId) => drainProgress(taskId));
       await Promise.allSettled(drains);
       await Promise.allSettled([...taskLocks.values()]);
+      await Promise.allSettled(jobs.map((job) => job.task));
       for (const runtime of progressRuntimes.values()) {
         runtime.unregister?.();
         if (runtime.monitor) clearInterval(runtime.monitor);

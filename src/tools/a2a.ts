@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { activeA2ATurn, commitActiveA2ATurn } from "../a2a-context.js";
+import { activeA2ATurn, commitActiveA2ATurn, fenceActiveA2AReplyIntent } from "../a2a-context.js";
 import { findDelegationByTask, promoteAfterSend, recordBeforeSend } from "../a2a-delegations.js";
 import {
   acknowledgeA2AProgressDrain,
@@ -332,6 +332,8 @@ async function inboundIntent(
     if (context.replyIntentCommitted) {
       throw new Error("This inbound A2A task already has an outcome");
     }
+    await context.beforeReplyIntent?.();
+    fenceActiveA2AReplyIntent(sessionID, context);
     const coordinationToken = requestA2AProgressDrain(context.taskId);
     let terminalAttempted = false;
     let heartbeat: NodeJS.Timeout | undefined;

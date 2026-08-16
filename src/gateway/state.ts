@@ -71,6 +71,7 @@ export interface StateStore {
   // Merge-and-write. Atomic (tmp file + rename) so a crash never leaves a
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
+  updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
   setSession(chatKey: string, sessionID: string): void;
   getSession(chatKey: string): string | undefined;
   clearSession(chatKey: string): void;
@@ -170,6 +171,17 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
       return mutate((state) => {
         const next = { ...state, ...patch };
         return [next, next];
+      });
+    },
+    updateA2ATask(key, update) {
+      mutate((state) => {
+        const tasks =
+          state.a2aTasks && typeof state.a2aTasks === "object"
+            ? (state.a2aTasks as Record<string, unknown>)
+            : {};
+        const entry = update(tasks[key]);
+        if (entry === undefined) return [state, undefined];
+        return [{ ...state, a2aTasks: { ...tasks, [key]: entry } }, undefined];
       });
     },
     setSession(chatKey, sessionID) {

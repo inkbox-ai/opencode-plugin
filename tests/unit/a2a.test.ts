@@ -8,6 +8,7 @@ import {
   registerA2AProgressDrain,
 } from "../../src/a2a-progress.js";
 import { defaultGatewayConfig } from "../../src/config.js";
+import { createStateStore } from "../../src/gateway/state.js";
 import { a2aTools } from "../../src/tools/a2a.js";
 
 function makeCtx() {
@@ -279,13 +280,20 @@ describe("a2aTools", () => {
   it("keeps progress fenced when a terminal reply has an ambiguous failure", async () => {
     const { deps, identity } = makeDeps();
     const ctx = makeCtx();
+    const order: string[] = [];
     const context = {
       taskId: "task-1",
       messageId: "message-1",
       contextId: "context-1",
       replyIntentCommitted: false,
+      beforeReplyIntent: vi.fn(async () => {
+        order.push("fenced");
+      }),
     };
-    identity.a2aReply.mockRejectedValueOnce(new Error("temporary failure"));
+    identity.a2aReply.mockImplementationOnce(async () => {
+      order.push("sent");
+      throw new Error("temporary failure");
+    });
     const resume = vi.fn();
     const unregister = registerA2AProgressDrain("task-1", {
       drain: vi.fn(async () => {}),
@@ -299,6 +307,8 @@ describe("a2aTools", () => {
       expect(resume).not.toHaveBeenCalled();
       expect(listA2AProgressDrains("task-1")).toHaveLength(1);
       expect(context.replyIntentCommitted).toBe(false);
+      expect(context.beforeReplyIntent).toHaveBeenCalledOnce();
+      expect(order).toEqual(["fenced", "sent"]);
     } finally {
       unregister();
       clearA2AProgressDrain("task-1");
@@ -314,7 +324,20 @@ describe("a2aTools", () => {
       messageId: "message-cross-process",
       contextId: "context-cross-process",
       replyIntentCommitted: false,
+      registryKey: "task-cross-process:message-cross-process",
+      registryFilePath: "",
     };
+    const state = createStateStore();
+    context.registryFilePath = state.filePath;
+    state.update({
+      a2aTasks: {
+        [context.registryKey]: {
+          taskId: context.taskId,
+          messageId: context.messageId,
+          state: "running",
+        },
+      },
+    });
     const target = a2aTurnContextPath(ctx.sessionID);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify(context)}\n`, { mode: 0o600 });
@@ -339,6 +362,7 @@ describe("a2aTools", () => {
       text: "Which region?",
     });
     expect(JSON.parse(fs.readFileSync(target, "utf8")).replyIntentCommitted).toBe(true);
+    expect((state.read().a2aTasks as any)[context.registryKey].replyIntentFenced).toBe(true);
     expect(fs.statSync(target).mode & 0o777).toBe(0o600);
 
     clearActiveA2ATurn(ctx.sessionID, context);
