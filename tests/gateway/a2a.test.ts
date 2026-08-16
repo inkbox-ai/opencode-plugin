@@ -643,11 +643,6 @@ describe("createA2AHandler", () => {
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
     );
     const oldData = event().body.data;
-    const latestData = {
-      ...oldData,
-      message_id: "message-2",
-      parts: [{ text: "Use the latest persisted caller request." }],
-    };
     const now = Date.now();
     state.update({
       a2aTasks: {
@@ -657,17 +652,9 @@ describe("createA2AHandler", () => {
           messageId: "message-1",
           state: "running",
           data: oldData,
+          replyIntentFenced: true,
           createdAt: now - 1,
           updatedAt: now - 1,
-        },
-        "task-1:message-2": {
-          taskId: "task-1",
-          contextId: "context-1",
-          messageId: "message-2",
-          state: "running",
-          data: latestData,
-          createdAt: now,
-          updatedAt: now,
         },
       },
     });
@@ -675,7 +662,7 @@ describe("createA2AHandler", () => {
     const remoteTask = {
       id: "task-1",
       contextId: "context-1",
-      state: "submitted",
+      state: "working",
       caller: { identityId: "caller-1", handle: "caller" },
       messages: [
         {
@@ -702,9 +689,9 @@ describe("createA2AHandler", () => {
       id: "identity-1",
       a2aTask: vi.fn(async () => remoteTask),
       a2aReply: vi.fn(),
-      iterA2ATasks: vi.fn(() =>
+      iterA2ATasks: vi.fn(({ state: requestedState }: { state: string }) =>
         (async function* () {
-          yield remoteTask;
+          if (requestedState === "working") yield remoteTask;
         })(),
       ),
     };
@@ -721,12 +708,13 @@ describe("createA2AHandler", () => {
     await handler.catchUp();
     await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
     expect(runA2A.mock.calls[0][1]).toContain("Remote latest caller request.");
-    expect(runA2A.mock.calls[0][1]).not.toContain("Use the latest persisted caller request.");
     expect(runA2A.mock.calls[0][1]).not.toContain("I am reviewing the request.");
     expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
     expect((state.read().a2aTasks as any)["task-1:message-2"].data.parts).toEqual([
       { text: "Remote latest caller request." },
     ]);
+    expect(identity.iterA2ATasks).toHaveBeenNthCalledWith(1, { state: "submitted" });
+    expect(identity.iterA2ATasks).toHaveBeenNthCalledWith(2, { state: "working" });
     expect(identity.a2aReply).not.toHaveBeenCalled();
 
     const duplicate = event();

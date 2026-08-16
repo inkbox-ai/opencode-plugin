@@ -950,11 +950,6 @@ export function createA2AHandler(deps: {
       const resumedTaskIds = new Set<string>();
       for (const [key, entry] of persistedEntries) {
         if (entry.state === "finalized") continue;
-        if (entry.replyIntentFenced) {
-          resumedTaskIds.add(entry.taskId);
-          await settleProgress(entry.taskId);
-          continue;
-        }
         try {
           const task = await id.a2aTask(entry.taskId);
           if (TURN_STOPPED.has(normalizedState(task.state))) {
@@ -964,6 +959,12 @@ export function createA2AHandler(deps: {
             const normalized = authoritativeA2AData(task, entry.data);
             if (!normalized) {
               persist(deps.state, key, entry.data, "finalized");
+              continue;
+            }
+            if (entry.replyIntentFenced) {
+              persist(deps.state, key, normalized, entry.state);
+              resumedTaskIds.add(entry.taskId);
+              await settleProgress(entry.taskId);
               continue;
             }
             if (resumedTaskIds.has(entry.taskId)) {
@@ -993,33 +994,39 @@ export function createA2AHandler(deps: {
         }
       }
       try {
-        for await (const task of id.iterA2ATasks({ state: "submitted" })) {
-          const message = [...task.messages].reverse().find((candidate) => {
-            const role = normalizedState(candidate?.role);
-            return role === "caller" || role === "role_caller";
-          });
-          if (!message) continue;
-          const data = authoritativeA2AData(task, {
-            task_id: String(task.id),
-            context_id: String(task.contextId),
-            message_id: message?.messageId ?? `task:${task.id}`,
-          });
-          if (!data) continue;
-          const key = `${data.task_id}:${data.message_id}`;
-          if (registry(deps.state)[key]) continue;
-          persist(deps.state, key, data, "queued");
-          ensureProgressRecord(data);
-          let acknowledged = false;
-          try {
-            acknowledged = await ensureAcknowledgement(data);
-          } catch (error) {
-            deps.logger.warn("a2a.acknowledgement_attempt_failed", {
-              taskId: data.task_id,
-              error: String(error),
+        const discoveredTaskIds = new Set<string>();
+        for (const state of TURN_ACTIVE) {
+          for await (const task of id.iterA2ATasks({ state })) {
+            const taskId = String(task?.id ?? task?.taskId ?? task?.task_id ?? "");
+            if (!taskId || discoveredTaskIds.has(taskId)) continue;
+            discoveredTaskIds.add(taskId);
+            const message = [...task.messages].reverse().find((candidate) => {
+              const role = normalizedState(candidate?.role);
+              return role === "caller" || role === "role_caller";
             });
+            if (!message) continue;
+            const data = authoritativeA2AData(task, {
+              task_id: taskId,
+              context_id: String(task.contextId ?? task.context_id),
+              message_id: message?.messageId ?? message?.message_id ?? `task:${taskId}`,
+            });
+            if (!data) continue;
+            const key = `${data.task_id}:${data.message_id}`;
+            if (registry(deps.state)[key]) continue;
+            persist(deps.state, key, data, "queued");
+            ensureProgressRecord(data);
+            let acknowledged = false;
+            try {
+              acknowledged = await ensureAcknowledgement(data);
+            } catch (error) {
+              deps.logger.warn("a2a.acknowledgement_attempt_failed", {
+                taskId: data.task_id,
+                error: String(error),
+              });
+            }
+            ensureProgressSupervisor(data.task_id);
+            start(key, data, acknowledged ? 0 : RETRY_MS);
           }
-          ensureProgressSupervisor(data.task_id);
-          start(key, data, acknowledged ? 0 : RETRY_MS);
         }
       } catch (error) {
         if (!isA2AApiUnavailable(error)) throw error;
