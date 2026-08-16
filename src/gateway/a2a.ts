@@ -29,6 +29,7 @@ const REQUESTER_WAKE_STATES = new Set([
   "canceled",
   "rejected",
 ]);
+const TURN_ACTIVE = new Set(["submitted", "working"]);
 const INBOUND_TASK_DIRECTIVE =
   "You are handling an inbound A2A task. Resolve it with inkbox_a2a_complete, " +
   "inkbox_a2a_ask_caller, or inkbox_a2a_fail. When caller input is needed, use " +
@@ -221,6 +222,35 @@ function workerTexts(task: any): string[] {
     .filter(Boolean);
 }
 
+function authoritativeCallerMessage(task: any):
+  | {
+      taskId: string;
+      contextId: string;
+      messageId: string;
+      parts: Array<Record<string, unknown>>;
+    }
+  | undefined {
+  const taskId = String(task?.id ?? task?.taskId ?? task?.task_id ?? "");
+  const contextId = String(task?.contextId ?? task?.context_id ?? "");
+  const messages = Array.isArray(task?.messages)
+    ? task.messages
+    : Array.isArray(task?.raw?.history)
+      ? task.raw.history
+      : [];
+  const message = [...messages].reverse().find((candidate) => {
+    const role = normalizedState(candidate?.role);
+    return role === "caller" || role === "role_caller";
+  });
+  const messageId = String(message?.messageId ?? message?.message_id ?? "");
+  if (!taskId || !contextId || !messageId) return undefined;
+  return {
+    taskId,
+    contextId,
+    messageId,
+    parts: Array.isArray(message?.parts) ? message.parts : [],
+  };
+}
+
 function advanceDue(previousDue: number, now: number, intervalMs: number): number {
   let next = previousDue;
   while (next <= now) next += intervalMs;
@@ -243,6 +273,8 @@ export function createA2AHandler(deps: {
   const running = new Map<string, RunningJob>();
   const progressRuntimes = new Map<string, ProgressRuntime>();
   const taskLocks = new Map<string, Promise<void>>();
+  const admissionLocks = new Map<string, Promise<void>>();
+  const canceledTasks = new Map<string, { contextId: string; messageKeys: Set<string> }>();
   const settlingTasks = new Set<string>();
   const retryWaiters = new Map<string, Set<() => void>>();
   const intervalSeconds = deps.config?.gateway.a2aProgressIntervalSeconds ?? 180;
@@ -267,6 +299,23 @@ export function createA2AHandler(deps: {
     } finally {
       release();
       if (taskLocks.get(taskId) === queued) taskLocks.delete(taskId);
+    }
+  }
+
+  async function serializeAdmission<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = admissionLocks.get(taskId) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => gate);
+    admissionLocks.set(taskId, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (admissionLocks.get(taskId) === queued) admissionLocks.delete(taskId);
     }
   }
 
@@ -328,6 +377,7 @@ export function createA2AHandler(deps: {
       updatedAt: Date.now(),
     };
     clearA2AProgressDrain(data.task_id);
+    settlingTasks.delete(data.task_id);
     saveProgress(deps.state, record);
     return record;
   }
@@ -758,39 +808,103 @@ export function createA2AHandler(deps: {
         return true;
       }
       if (type === "a2a.task.canceled") {
-        const jobs = [...running.values()].filter(
-          (job) => job.taskId === data.task_id && job.contextId === data.context_id,
-        );
-        wakeRetryWaiters(data.task_id);
-        await settleProgress(data.task_id);
-        const id = await identity();
-        await deps.sessions.abortA2A(`a2a:${id.id}:${data.context_id}`, data.task_id);
-        await Promise.allSettled(jobs.map((job) => job.task));
+        await serializeAdmission(data.task_id, async () => {
+          settlingTasks.add(data.task_id);
+          wakeRetryWaiters(data.task_id);
+          const prior = canceledTasks.get(data.task_id);
+          const messageKeys = new Set(
+            prior?.contextId === data.context_id ? prior.messageKeys : [],
+          );
+          for (const [registryKey, entry] of Object.entries(registry(deps.state))) {
+            if (entry.taskId === data.task_id && entry.contextId === data.context_id) {
+              messageKeys.add(registryKey);
+            }
+          }
+          if (data.message_id) messageKeys.add(`${data.task_id}:${data.message_id}`);
+          const jobs = [...running.values()].filter(
+            (job) => job.taskId === data.task_id && job.contextId === data.context_id,
+          );
+          await settleProgress(data.task_id);
+          const id = await identity();
+          await deps.sessions.abortA2A(`a2a:${id.id}:${data.context_id}`, data.task_id);
+          await Promise.allSettled(jobs.map((job) => job.task));
+          try {
+            if (typeof id.a2aTask === "function") {
+              const task = await id.a2aTask(data.task_id);
+              const caller = authoritativeCallerMessage(task);
+              if (caller?.taskId === data.task_id && caller.contextId === data.context_id) {
+                messageKeys.add(`${data.task_id}:${caller.messageId}`);
+              }
+            }
+          } catch (error) {
+            deps.logger.warn("a2a.cancellation_lookup_failed", {
+              taskId: data.task_id,
+              error: String(error),
+            });
+          }
+          canceledTasks.set(data.task_id, {
+            contextId: data.context_id,
+            messageKeys,
+          });
+        });
         return true;
       }
-      const messageId = data.message_id ?? event.body.id?.toString() ?? "";
-      const key = `${data.task_id}:${messageId}`;
-      const normalized = { ...data, message_id: messageId };
-      const existing = registry(deps.state)[key];
-      if (existing) {
-        if (existing.state !== "finalized" && !existing.replyIntentFenced) {
-          const acknowledged = progressRegistry(deps.state)[data.task_id]?.acknowledgementDelivered;
-          start(key, existing.data, acknowledged ? 0 : RETRY_MS);
+      let admission: { key: string; data: A2AEventData; existing: boolean } | undefined;
+      await serializeAdmission(data.task_id, async () => {
+        const messageId = data.message_id ?? event.body.id?.toString() ?? "";
+        const key = `${data.task_id}:${messageId}`;
+        let normalized = { ...data, message_id: messageId };
+        const canceled = canceledTasks.get(data.task_id);
+        if (canceled) {
+          if (
+            type !== "a2a.task.message" ||
+            data.context_id !== canceled.contextId ||
+            canceled.messageKeys.has(key)
+          ) {
+            return;
+          }
+          const id = await identity();
+          if (typeof id.a2aTask !== "function") return;
+          const task = await id.a2aTask(data.task_id);
+          if (!TURN_ACTIVE.has(normalizedState(task.state))) return;
+          const caller = authoritativeCallerMessage(task);
+          if (
+            caller?.taskId !== data.task_id ||
+            caller.contextId !== data.context_id ||
+            caller.messageId !== messageId
+          ) {
+            return;
+          }
+          normalized = { ...normalized, parts: caller.parts };
+          canceledTasks.delete(data.task_id);
         }
+        const existing = registry(deps.state)[key];
+        if (existing) {
+          if (existing.state !== "finalized" && !existing.replyIntentFenced) {
+            admission = { key, data: existing.data, existing: true };
+          }
+          return;
+        }
+        persist(deps.state, key, normalized, "queued");
+        ensureProgressRecord(normalized);
+        admission = { key, data: normalized, existing: false };
+      });
+      if (!admission) return true;
+      if (admission.existing) {
+        const acknowledged = progressRegistry(deps.state)[data.task_id]?.acknowledgementDelivered;
+        start(admission.key, admission.data, acknowledged ? 0 : RETRY_MS);
         return true;
       }
-      persist(deps.state, key, normalized, "queued");
-      ensureProgressRecord(normalized);
       let acknowledged = false;
       try {
-        acknowledged = await ensureAcknowledgement(normalized);
+        acknowledged = await ensureAcknowledgement(admission.data);
       } catch (error) {
         deps.logger.warn("a2a.acknowledgement_attempt_failed", {
           taskId: data.task_id,
           error: String(error),
         });
       }
-      start(key, normalized, acknowledged ? 0 : RETRY_MS);
+      start(admission.key, admission.data, acknowledged ? 0 : RETRY_MS);
       return true;
     },
 
@@ -892,6 +1006,7 @@ export function createA2AHandler(deps: {
     async close() {
       closing = true;
       wakeRetryWaiters();
+      await Promise.allSettled([...admissionLocks.values()]);
       const jobs = [...running.values()];
       try {
         const id = await identity();

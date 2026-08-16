@@ -185,7 +185,10 @@ describe("createA2AHandler", () => {
 
     await handler.handle(event());
 
-    expect(a2aReply).toHaveBeenCalledWith("task-1", { intent: "progress", text: receipt });
+    expect(a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "progress",
+      text: receipt,
+    });
     await handler.close();
   });
 
@@ -213,7 +216,10 @@ describe("createA2AHandler", () => {
         })),
         getClient: vi.fn(),
       } as any,
-      sessions: { runA2A: vi.fn(async () => "[SILENT]"), summarizeA2AProgress } as any,
+      sessions: {
+        runA2A: vi.fn(async () => "[SILENT]"),
+        summarizeA2AProgress,
+      } as any,
       state,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       config: { gateway: { a2aProgressIntervalSeconds: 60 } } as any,
@@ -637,7 +643,11 @@ describe("createA2AHandler", () => {
       state: "submitted",
       caller: { identityId: "caller-1", handle: "caller" },
       messages: [
-        { role: "caller", messageId: "message-1", parts: [{ text: "Investigate." }] },
+        {
+          role: "caller",
+          messageId: "message-1",
+          parts: [{ text: "Investigate." }],
+        },
         {
           role: "role_caller",
           messageId: "message-2",
@@ -782,6 +792,140 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
+  it("reactivates a canceled task only for one distinct authoritative caller message", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    state.update({
+      a2aTasks: {
+        "task-1:message-registry": {
+          taskId: "task-1",
+          contextId: "context-1",
+          messageId: "message-registry",
+          state: "running",
+          data: {
+            task_id: "task-1",
+            context_id: "context-1",
+            message_id: "message-registry",
+            parts: [{ text: "This persisted generation must not run." }],
+          },
+          generation: 1,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    let authoritativeTask: any = {
+      id: "task-1",
+      contextId: "context-1",
+      state: "canceled",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-current",
+          parts: [{ text: "This canceled generation must not run." }],
+        },
+      ],
+    };
+    const a2aTask = vi.fn(async () => authoritativeTask);
+    const a2aReply = vi.fn(async () => ({ state: "working" }));
+    const runA2A = vi.fn(async (_chatKey: string, _prompt: string) => "[SILENT]");
+    const abortA2A = vi.fn(async () => true);
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask,
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A, abortA2A } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const canceled = event();
+    canceled.eventType = "a2a.task.canceled";
+    delete (canceled.body.data as any).message_id;
+    await handler.handle(canceled);
+
+    const taskMessage = (
+      messageId: string,
+      contextId = "context-1",
+      text = "Untrusted webhook text.",
+    ) => {
+      const next = event();
+      next.eventType = "a2a.task.message";
+      next.body.id = `event-${messageId}-${contextId}`;
+      next.body.data.context_id = contextId;
+      next.body.data.message_id = messageId;
+      next.body.data.parts = [{ text }];
+      return next;
+    };
+
+    await handler.handle(taskMessage("message-registry"));
+    await handler.handle(taskMessage("message-current"));
+    expect(runA2A).not.toHaveBeenCalled();
+
+    authoritativeTask = {
+      id: "task-1",
+      contextId: "context-1",
+      state: "working",
+      messages: [
+        {
+          role: "caller",
+          messageId: "message-authoritative",
+          parts: [{ text: "Trusted authoritative follow-up." }],
+        },
+      ],
+    };
+    await handler.handle(taskMessage("message-spoofed"));
+    await handler.handle(taskMessage("message-authoritative", "context-wrong"));
+
+    authoritativeTask = { ...authoritativeTask, id: "task-wrong" };
+    await handler.handle(taskMessage("message-authoritative"));
+
+    authoritativeTask = {
+      ...authoritativeTask,
+      id: "task-1",
+      messages: [
+        {
+          role: "agent",
+          messageId: "message-authoritative",
+          parts: [{ text: "This is not caller-authored." }],
+        },
+      ],
+    };
+    await handler.handle(taskMessage("message-authoritative"));
+
+    authoritativeTask = {
+      id: "task-1",
+      contextId: "context-1",
+      state: "canceled",
+      messages: [
+        {
+          role: "role_caller",
+          messageId: "message-authoritative",
+          parts: [{ text: "Trusted authoritative follow-up." }],
+        },
+      ],
+    };
+    await handler.handle(taskMessage("message-authoritative"));
+    expect(runA2A).not.toHaveBeenCalled();
+
+    authoritativeTask = { ...authoritativeTask, state: "submitted" };
+    const genuine = taskMessage("message-authoritative", "context-1", "Spoofed body.");
+    await handler.handle(genuine);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
+    expect(runA2A.mock.calls[0][1]).toContain("Trusted authoritative follow-up.");
+    expect(runA2A.mock.calls[0][1]).not.toContain("Spoofed body.");
+
+    await handler.handle(genuine);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(1));
+    expect((state.read().a2aTasks as any)["task-1:message-authoritative"].generation).toBe(2);
+    await handler.close();
+  });
+
   it("clears the monitor when remote terminal state stops periodic progress", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
@@ -922,7 +1066,10 @@ describe("createA2AHandler", () => {
     const restartedReply = vi.fn();
     const restarted = createA2AHandler({
       inkbox: {
-        getIdentity: vi.fn(async () => ({ ...identity, a2aReply: restartedReply })),
+        getIdentity: vi.fn(async () => ({
+          ...identity,
+          a2aReply: restartedReply,
+        })),
         getClient: vi.fn(),
       } as any,
       sessions: {
