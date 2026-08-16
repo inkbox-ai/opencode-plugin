@@ -989,6 +989,145 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
+  it("acknowledges a fenced drain requested by a separate tool host", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const messages: any[] = [];
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      messages.push({ role: "agent", parts: [{ text: payload.text }] });
+      return { state: "working" };
+    });
+    const sessions = abortableA2ARun();
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: sessions as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      config: { gateway: { a2aProgressIntervalSeconds: 0 } } as any,
+    });
+    await handler.handle(event());
+
+    vi.resetModules();
+    const separateProgress = await import("../../src/a2a-progress.js");
+    const separateContext = await import("../../src/a2a-context.js");
+    const context = {
+      taskId: "task-1",
+      contextId: "context-1",
+      messageId: "message-1",
+      replyIntentCommitted: false,
+      registryKey: "task-1:message-1",
+      registryFilePath: state.filePath,
+    };
+    separateContext.setActiveA2ATurn("separate-session", context);
+    separateContext.fenceActiveA2AReplyIntent("separate-session", context);
+    expect(await separateProgress.drainA2AProgress("task-1")).toBe(false);
+
+    const token = separateProgress.requestA2AProgressDrain("task-1");
+    await separateProgress.waitForA2AProgressDrain("task-1", token, 2_000);
+    await a2aReply("task-1", { intent: "ask_caller", text: "Which region?" });
+
+    expect((state.read().a2aTasks as any)["task-1:message-1"].replyIntentFenced).toBe(true);
+    expect(a2aReply).toHaveBeenLastCalledWith("task-1", {
+      intent: "ask_caller",
+      text: "Which region?",
+    });
+    separateProgress.clearA2AProgressDrain("task-1", token);
+    separateContext.clearActiveA2ATurn("separate-session", context);
+    await handler.close();
+  });
+
+  it("keeps a newer caller turn current when the older fenced turn finalizes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T00:00:00Z"));
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const messages: any[] = [];
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      messages.push({ role: "agent", parts: [{ text: payload.text }] });
+      return { state: "working" };
+    });
+    let releaseOld = () => {};
+    let releaseNew = () => {};
+    let oldFenced = () => {};
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const newGate = new Promise<void>((resolve) => {
+      releaseNew = resolve;
+    });
+    const fenced = new Promise<void>((resolve) => {
+      oldFenced = resolve;
+    });
+    let runCount = 0;
+    const runA2A = vi.fn(async (_chatKey: string, _prompt: string, context: any) => {
+      runCount += 1;
+      if (runCount === 1) {
+        await context.beforeReplyIntent();
+        oldFenced();
+        await oldGate;
+        context.replyIntentCommitted = true;
+      } else {
+        await newGate;
+      }
+      return "[SILENT]";
+    });
+    const summarizeA2AProgress = vi.fn(async () => "I'm reviewing the follow-up.");
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => ({ state: "submitted", messages })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A,
+        summarizeA2AProgress,
+        abortA2A: vi.fn(async () => {
+          releaseOld();
+          releaseNew();
+          return true;
+        }),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      config: { gateway: { a2aProgressIntervalSeconds: 1 } } as any,
+    });
+
+    await handler.handle(event());
+    await fenced;
+    const followUp = event();
+    followUp.eventType = "a2a.task.message";
+    followUp.body.id = "evt-2";
+    followUp.body.data.message_id = "message-2";
+    followUp.body.data.parts = [{ text: "Continue with this follow-up." }];
+    await handler.handle(followUp);
+    await vi.waitFor(() => expect(runA2A).toHaveBeenCalledTimes(2));
+
+    releaseOld();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect((state.read().a2aProgress as any)["task-1"].active).toBe(true);
+    expect(summarizeA2AProgress).toHaveBeenCalled();
+    expect(
+      a2aReply.mock.calls.some(
+        ([, payload]) => payload.intent === "progress" && payload.text.includes("follow-up"),
+      ),
+    ).toBe(true);
+    releaseNew();
+    await handler.close();
+  });
+
   it("waits for a blocked terminal reply before cancellation returns", async () => {
     const state = createStateStore(
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,

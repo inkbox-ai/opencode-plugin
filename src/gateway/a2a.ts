@@ -57,6 +57,7 @@ interface RegistryEntry {
   state: "queued" | "running" | "finalized";
   data: A2AEventData;
   replyIntentFenced?: boolean;
+  generation?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -134,6 +135,10 @@ function persist(
 ): void {
   const current = registry(state);
   const now = Date.now();
+  const generation =
+    current[key]?.generation ??
+    Object.values(current).reduce((latest, entry) => Math.max(latest, entry.generation ?? 0), 0) +
+      1;
   state.update({
     a2aTasks: {
       ...current,
@@ -144,6 +149,7 @@ function persist(
         state: status,
         data,
         replyIntentFenced: current[key]?.replyIntentFenced,
+        generation,
         createdAt: current[key]?.createdAt ?? now,
         updatedAt: now,
       },
@@ -166,7 +172,11 @@ function fenceReplyIntent(state: StateStore, key: string): void {
 function latestTaskEntry(state: StateStore, taskId: string): RegistryEntry | undefined {
   return Object.values(registry(state))
     .filter((entry) => entry.taskId === taskId)
-    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    .sort(
+      (left, right) =>
+        (right.generation ?? right.createdAt ?? right.updatedAt) -
+        (left.generation ?? left.createdAt ?? left.updatedAt),
+    )[0];
 }
 
 function saveProgress(state: StateStore, record: ProgressRecord): void {
@@ -454,6 +464,12 @@ export function createA2AHandler(deps: {
         runtime.stopping = true;
         runtime.wake?.();
         await runtime.loop;
+        const requests = listA2AProgressDrains(taskId);
+        if (!runtime.coordinatedTokens) runtime.coordinatedTokens = new Set<string>();
+        for (const request of requests) {
+          runtime.coordinatedTokens.add(request.token);
+          acknowledgeA2AProgressDrain(taskId, request.token);
+        }
         return;
       }
       let requests = listA2AProgressDrains(taskId);
