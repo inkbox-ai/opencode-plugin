@@ -523,7 +523,12 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         progress.last =
           `accepted_marker_rows=${matched.length} ` +
           `blocked_marker_rows=${markerRows.length - matched.length} ` +
-          `registry_state=${registryEntry?.state ?? "missing"}`;
+          `registry_state=${registryEntry?.state ?? "missing"} ` +
+          `unique_accepted_rows=${new Set(matched.map((message: any) => message.id)).size} ` +
+          `journal_attempts=${registryEntry?.smsAttempts?.length ?? 0} ` +
+          `journal_successes=${registryEntry?.smsAttempts?.filter((attempt: any) => attempt.state === "success").length ?? 0} ` +
+          `journal_matched_rows=${matched.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
+          `active_capture=${Boolean(registryEntry?.active)}`;
         if (matched.length === 1 && registryEntry?.state === "completed") {
           await new Promise((resolve) => setTimeout(resolve, duplicateGraceMs));
           const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(

@@ -286,7 +286,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         query: { directory: deps.directory },
       });
       const statuses = (statusRes as any)?.data ?? statusRes;
-      if (statuses?.[turn.sessionID]?.type === "busy") {
+      const status = statuses?.[turn.sessionID]?.type;
+      if (status && status !== "idle") {
         await delay(POLL_MS);
         continue;
       }
@@ -300,7 +301,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (last?.info?.error) {
         throw new Error(`OpenCode turn failed: ${JSON.stringify(last.info.error).slice(0, 300)}`);
       }
-      if (last?.info?.time?.completed || last?.info?.finish) return extractText(last);
+      // A completed assistant step can still be followed by tool work or a
+      // model retry. Keep the turn's side-effect guards until the final answer.
+      const finish = last?.info?.finish;
+      if (finish && finish !== "tool-calls" && finish !== "unknown") return extractText(last);
       await delay(POLL_MS);
     }
     throw new HostedCaptureDeferredError();
