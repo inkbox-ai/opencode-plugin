@@ -42,7 +42,7 @@ describe("realtime session configuration", () => {
     expect(update.type).toBe("session.update");
     expect(update.session.type).toBe("realtime");
     expect(update.session.model).toBe("test-model");
-    expect(update.session.audio.input.format).toEqual({ type: "audio/pcmu" });
+    expect(update.session.audio.input.format).toEqual({ type: "audio/pcm", rate: 24000 });
     expect(update.session.audio.output.voice).toBe("test-voice");
 
     let settled = false;

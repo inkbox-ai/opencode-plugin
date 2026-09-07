@@ -389,7 +389,9 @@ inbound events. What it does:
   notifies OpenCode after it ends; the two local stacks keep the call attached
   to the OpenCode gateway. Realtime uses `INKBOX_REALTIME_API_KEY` (or
   `OPENAI_API_KEY` as the backstop) and runs the call as a live raw-audio
-  conversation with in-call actions; otherwise Inkbox handles speech-to-text
+  conversation with in-call actions. Call media negotiates mono 16-bit PCM at
+  16 kHz, with streaming conversion to and from the realtime connection’s
+  24 kHz PCM. Older call streams retain 8 kHz compatibility. Otherwise Inkbox handles speech-to-text
   and text-to-speech. Opt out with `INKBOX_VOICE_ENABLED=false` (stop answering)
   or `INKBOX_REALTIME_ENABLED=false` (force Inkbox STT/TTS).
   `inkbox_place_call` dials out with a purpose loaded into the call.

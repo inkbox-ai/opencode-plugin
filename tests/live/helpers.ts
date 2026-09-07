@@ -56,13 +56,13 @@ export function nonce(): string {
 }
 
 export async function mailboxOf(c: Inkbox): Promise<string> {
-  const boxes = await c.mailboxes.list();
+  const boxes = await retrySafeRead(() => c.mailboxes.list());
   if (boxes.length === 0) throw new Error("identity has no mailbox");
   return boxes[0].emailAddress;
 }
 
 export async function phoneOf(c: Inkbox): Promise<{ id: string; number: string }> {
-  const numbers = await c.phoneNumbers.list();
+  const numbers = await retrySafeRead(() => c.phoneNumbers.list());
   if (numbers.length === 0) throw new Error("identity has no phone number");
   return { id: numbers[0].id, number: numbers[0].number };
 }

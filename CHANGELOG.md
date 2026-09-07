@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Adds negotiated 16 kHz PCM call audio with streaming resampling and legacy call compatibility.
+- Uses the published, pinned SDK in CI and gives periodic progress delivery time to finish before the live task ends.
+- Retries connection failures during live identity discovery without repeating task submissions.
+
 ## 0.2.9 (unreleased)
 
 - Adds a resumable, non-interactive `inkbox-opencode bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and background gateway startup.

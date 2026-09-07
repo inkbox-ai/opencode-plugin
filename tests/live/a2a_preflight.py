@@ -6,6 +6,19 @@ import time
 from typing import Any
 
 
+def retry_connection_read(read: Any, *, attempts: int = 3, delay: float = 1.0) -> Any:
+    """Retry discovery reads after connection failures, never task submissions."""
+    import httpx
+
+    for attempt in range(attempts):
+        try:
+            return read()
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def enable_and_verify_card(
     identity: Any,
     a2a: Any,

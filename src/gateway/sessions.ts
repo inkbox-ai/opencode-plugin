@@ -589,7 +589,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       });
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Progress summary timed out.")), 10_000);
+        timer = setTimeout(() => reject(new Error("Progress summary timed out.")), 20_000);
         timer.unref?.();
       });
       try {
