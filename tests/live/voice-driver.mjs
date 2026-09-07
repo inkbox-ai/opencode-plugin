@@ -34,6 +34,8 @@ const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
+const REASK_MS = Number(process.env.VOICE_DRIVER_REASK || "0") * 1000;
+const REASK_LINE = process.env.VOICE_DRIVER_REASK_LINE || LINE;
 
 if (!API_KEY) {
   console.error("REMOTE_INKBOX_API_KEY required");
@@ -58,6 +60,8 @@ async function callWsHandler(ws) {
   });
   console.log("call WS accepted");
   let spoke = false;
+  let closed = false;
+  let lastHeard = Date.now();
   const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
@@ -72,7 +76,18 @@ async function callWsHandler(ws) {
     await say(GREETING);
     await sleep(SPEAK_AFTER_MS);
     await speak(LINE);
-    await sleep(LISTEN_MS);
+    const deadline = Date.now() + LISTEN_MS;
+    let lastPrompt = Date.now();
+    let nudges = 0;
+    while (!closed && Date.now() < deadline) {
+      await sleep(1000);
+      if (closed) return;
+      if (REASK_MS > 0 && nudges < 2 && Date.now() - Math.max(lastPrompt, lastHeard) >= REASK_MS) {
+        await say(REASK_LINE);
+        lastPrompt = Date.now();
+        nudges++;
+      }
+    }
     if (!AUTO_STOP) return;
     try {
       await ws.send(JSON.stringify({ event: "stop" }));
@@ -91,8 +106,9 @@ async function callWsHandler(ws) {
       }
       if (ev.event === "start") {
         console.log("call start");
-        void runTurn();
+        void runTurn().catch(() => console.log("scripted turn ended"));
       } else if (ev.event === "transcript" && ev.is_final) {
+        lastHeard = Date.now();
         console.log("heard (final):", ev.text);
         await speak(LINE); // speak now if the greeting beat our timer
       } else if (ev.event === "stop") {
@@ -103,6 +119,7 @@ async function callWsHandler(ws) {
   } catch (e) {
     console.log("WS loop ended:", String(e));
   } finally {
+    closed = true;
     try {
       await ws.close();
     } catch {
