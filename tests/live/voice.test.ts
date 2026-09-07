@@ -345,6 +345,16 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           `outbound should use Realtime speech; ${JSON.stringify(callSummary(mode))}`,
         ).toBe(true);
         // Voicemail detection belongs to the AUT's call-capable outbound request.
+        const gatewayLog = readFileSync(process.env.AUT_GATEWAY_LOG ?? "", "utf8");
+        const negotiatedHd = gatewayLog
+          .split("\n")
+          .some(
+            (line) =>
+              line.includes("call.audio_format") &&
+              line.includes(JSON.stringify(pair.aut.id)) &&
+              line.includes('"format":"pcm_s16le_16000"'),
+          );
+        expect(negotiatedHd, "the realtime call must negotiate 16 kHz PCM").toBe(true);
         // The driver's mirrored inbound leg can report its unrelated provider default.
         expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {

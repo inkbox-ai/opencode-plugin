@@ -335,7 +335,9 @@ export function createCallBridge(
       }
       if (frame.event === "start" && realtime) {
         try {
-          realtime.setAudioFormat(callAudioFormat(frame.start));
+          const format = callAudioFormat(frame.start);
+          realtime.setAudioFormat(format);
+          deps.logger.info("call.audio_format", { callId: ctx.callId, format });
           realtime.start(buildVoiceGreeting(meta));
         } catch {
           deps.logger.warn("call.unsupported_audio", {});
