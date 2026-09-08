@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
-from tests.live.a2a_preflight import enable_and_verify_card
+from tests.live.a2a_preflight import enable_and_verify_card, retry_connection_read
 
 
 class _Identity:
@@ -80,3 +80,23 @@ class A2APreflightTests(TestCase):
             )
 
         self.assertEqual(a2a.fetch_calls, 0)
+
+
+class ConnectionReadTests(TestCase):
+    def test_retries_only_connection_errors(self):
+        class ConnectError(Exception):
+            pass
+        class ConnectTimeout(Exception):
+            pass
+        with mock.patch.dict("sys.modules", {"httpx": SimpleNamespace(ConnectError=ConnectError, ConnectTimeout=ConnectTimeout)}):
+            read = mock.Mock(side_effect=[ConnectError(), "ready"])
+            self.assertEqual(retry_connection_read(read, delay=0), "ready")
+            self.assertEqual(read.call_count, 2)
+            read = mock.Mock(side_effect=ValueError("invalid response"))
+            with self.assertRaises(ValueError):
+                retry_connection_read(read, delay=0)
+            self.assertEqual(read.call_count, 1)
+            read = mock.Mock(side_effect=ConnectError())
+            with self.assertRaises(ConnectError):
+                retry_connection_read(read, attempts=2, delay=0)
+            self.assertEqual(read.call_count, 2)

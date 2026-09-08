@@ -56,6 +56,7 @@ describe("call media protocol", () => {
       "x-use-inkbox-text-to-speech": "true",
     });
     expect(callModeHeaders("raw-media")).toEqual({
+      "x-inkbox-audio-format": "pcm_s16le_16000",
       "x-use-inkbox-speech-to-text": "false",
       "x-use-inkbox-text-to-speech": "false",
     });

@@ -345,6 +345,16 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           `outbound should use Realtime speech; ${JSON.stringify(callSummary(mode))}`,
         ).toBe(true);
         // Voicemail detection belongs to the AUT's call-capable outbound request.
+        const gatewayLog = readFileSync(process.env.AUT_GATEWAY_LOG ?? "", "utf8");
+        const negotiatedHd = gatewayLog
+          .split("\n")
+          .some(
+            (line) =>
+              line.includes("call.audio_format") &&
+              line.includes(JSON.stringify(pair.aut.id)) &&
+              line.includes('"format":"pcm_s16le_16000"'),
+          );
+        expect(negotiatedHd, "the realtime call must negotiate 16 kHz PCM").toBe(true);
         // The driver's mirrored inbound leg can report its unrelated provider default.
         expect(String(mode.voicemailDetection).toLowerCase()).toBe("disabled");
       } finally {
@@ -513,7 +523,12 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         progress.last =
           `accepted_marker_rows=${matched.length} ` +
           `blocked_marker_rows=${markerRows.length - matched.length} ` +
-          `registry_state=${registryEntry?.state ?? "missing"}`;
+          `registry_state=${registryEntry?.state ?? "missing"} ` +
+          `unique_accepted_rows=${new Set(matched.map((message: any) => message.id)).size} ` +
+          `journal_attempts=${registryEntry?.smsAttempts?.length ?? 0} ` +
+          `journal_successes=${registryEntry?.smsAttempts?.filter((attempt: any) => attempt.state === "success").length ?? 0} ` +
+          `journal_matched_rows=${matched.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
+          `active_capture=${Boolean(registryEntry?.active)}`;
         if (matched.length === 1 && registryEntry?.state === "completed") {
           await new Promise((resolve) => setTimeout(resolve, duplicateGraceMs));
           const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(

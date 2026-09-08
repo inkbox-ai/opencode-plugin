@@ -16,6 +16,7 @@ import {
   type ResolvedContact,
 } from "../contacts.js";
 import type { GatewayLogger, SessionManager } from "../types.js";
+import { callAudioFormat } from "./audio.js";
 import { buildVoiceGreeting, buildVoiceInstructions, type CallMeta } from "./instructions.js";
 import { callEndedPrompt, createPostCallRegistry, postCallPrompt } from "./post-call.js";
 import {
@@ -303,7 +304,6 @@ export function createCallBridge(
 
     if (realtime) {
       (realtime as RealtimeBridge & { attach(ws: WebSocket): void }).attach(ws);
-      realtime.start(buildVoiceGreeting(meta));
     }
 
     let finishCall: () => void = () => {};
@@ -331,6 +331,19 @@ export function createCallBridge(
       if (frame.event === "media" && realtime) {
         const audio = callerAudio(frame);
         if (audio) realtime.pushAudio(audio);
+        return;
+      }
+      if (frame.event === "start" && realtime) {
+        try {
+          const format = callAudioFormat(frame.start);
+          realtime.setAudioFormat(format);
+          deps.logger.info("call.audio_format", { callId: ctx.callId, format });
+          realtime.start(buildVoiceGreeting(meta));
+        } catch {
+          deps.logger.warn("call.unsupported_audio", {});
+          closeSocketOnce(ws);
+          finishCall();
+        }
         return;
       }
       if (frame.event === "start" && !realtime) {

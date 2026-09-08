@@ -10,7 +10,7 @@ import uuid
 from typing import Any
 
 from inkbox import Inkbox
-from a2a_preflight import enable_and_verify_card
+from a2a_preflight import enable_and_verify_card, retry_connection_read
 
 STOPPED_WIRE_STATES = {
     "TASK_STATE_COMPLETED",
@@ -44,11 +44,11 @@ def _enum_value(value: Any) -> str:
 
 
 def _identity(client: Inkbox):
-    mailboxes = client.mailboxes.list()
+    mailboxes = retry_connection_read(client.mailboxes.list)
     if len(mailboxes) != 1:
         raise RuntimeError("Live A2A credentials must resolve to exactly one mailbox")
     handle = mailboxes[0].email_address.split("@", 1)[0]
-    return client.get_identity(handle), handle
+    return retry_connection_read(lambda: client.get_identity(handle)), handle
 
 
 def _parts_text(parts: list[dict[str, Any]]) -> str:
@@ -273,8 +273,8 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
     task = _send_task(
         a2a,
         target,
-        "Add 2 + 2. Wait for one minute. Then add 3 + 3. Wait for another "
-        "minute. Finally add the two results together and return the final "
+        "Add 2 + 2. Wait for 75 seconds. Then add 3 + 3. Wait for another "
+        "75 seconds. Finally add the two results together and return the final "
         f"total. Do not finish before both waits elapse. Include `{completion}` "
         "and the exact expression `4 + 6 = 10` in the final answer.",
     )

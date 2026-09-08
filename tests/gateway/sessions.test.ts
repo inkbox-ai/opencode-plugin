@@ -4,7 +4,12 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
-import { getHostedCall, saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
+import {
+  beginHostedSmsAttempt,
+  getHostedCall,
+  saveHostedCall,
+  settleHostedSmsAttempt,
+} from "../../src/gateway/hosted-call-registry.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
@@ -493,6 +498,64 @@ describe("capture turns", () => {
     await d.mgr.close();
     await expect(pending).rejects.toThrow("deferred");
     expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-old");
+  });
+
+  it.each([
+    { status: "retry", finish: "stop" },
+    { status: "idle", finish: "tool-calls" },
+    { status: "idle", finish: "unknown" },
+    { status: "idle", finish: undefined },
+  ])("retains the hosted SMS guard during $status/$finish", async ({ status, finish }) => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    d.opencode.session.status.mockImplementation(async () => ({
+      data: { "sess-1": { type: status } },
+    }));
+    const originalPrompt = d.opencode.session.promptAsync.getMockImplementation();
+    if (!originalPrompt) throw new Error("Missing prompt fixture");
+    d.opencode.session.promptAsync.mockImplementation(async (args: any) => {
+      const result = await originalPrompt(args);
+      const last = d.messages.get("sess-1")?.at(-1);
+      last.info.finish = finish;
+      const guard = beginHostedSmsAttempt({
+        sessionID: "sess-1",
+        target: "+14155550123",
+        hasConversationId: false,
+      });
+      expect(guard).toBeDefined();
+      if (guard) settleHostedSmsAttempt(guard, "success", undefined, "sent-1");
+      return result;
+    });
+    const pending = d.mgr.runHostedCapture?.("ck", "call", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "initial",
+      expectedTarget: "+14155550123",
+    });
+    try {
+      await vi.waitFor(
+        () => expect(d.opencode.session.status.mock.calls.length).toBeGreaterThan(1),
+        {
+          timeout: 2_000,
+        },
+      );
+      expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-1");
+      expect(() =>
+        beginHostedSmsAttempt({
+          sessionID: "sess-1",
+          target: "+14155550123",
+          hasConversationId: false,
+        }),
+      ).toThrow("second SMS attempt");
+      d.opencode.session.status.mockResolvedValue({ data: {} });
+      const last = d.messages.get("sess-1")?.at(-1);
+      last.info.finish = "stop";
+      await pending;
+      expect(getHostedCall("ident-1", "call-1")?.active).toBeUndefined();
+    } finally {
+      await d.mgr.close();
+      await pending?.catch(() => {});
+    }
   });
 
   it("reattaches A2A recovery to its durable turn", async () => {

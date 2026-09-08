@@ -9,21 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
-          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies from the unpublished SDK source
+      - name: Install locked dependencies
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run lint
       - run: npm run typecheck
@@ -34,21 +28,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
-          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies from the unpublished SDK source
+      - name: Install locked dependencies
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - run: bash scripts/smoke-loader.sh

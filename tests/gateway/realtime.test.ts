@@ -28,6 +28,37 @@ function emitMessage(fake: ReturnType<typeof fakeSocket>, obj: unknown) {
 }
 
 describe("realtime session configuration", () => {
+  it("converts socket audio in both directions and flushes before audio_done", () => {
+    const fake = fakeSocket();
+    const output: Array<string> = [];
+    const bridge = openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: (audio) => output.push(audio),
+        onAudioDone: () => output.push("done"),
+        onConsult: vi.fn(async () => ""),
+        onHangup: vi.fn(),
+        logger,
+      },
+      () => 0,
+      () => fake.ws as never,
+    );
+    bridge.setAudioFormat("pcm_s16le_16000");
+    bridge.pushAudio(Buffer.alloc(3200).toString("base64"));
+    const appended = fake.sent.find((event) => event.type === "input_audio_buffer.append");
+    expect(Buffer.from(appended.audio, "base64").length).toBeGreaterThan(4600);
+    emitMessage(fake, {
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(4800).toString("base64"),
+    });
+    emitMessage(fake, { type: "response.output_audio.done" });
+    expect(output.pop()).toBe("done");
+    expect(Buffer.concat(output.map((part) => Buffer.from(part, "base64")))).toEqual(
+      Buffer.alloc(3200),
+    );
+  });
+
   it("sends a GA session.update and resolves ready only on session.updated", async () => {
     const fake = fakeSocket();
     const bridge = openRealtimeBridge(
@@ -42,7 +73,7 @@ describe("realtime session configuration", () => {
     expect(update.type).toBe("session.update");
     expect(update.session.type).toBe("realtime");
     expect(update.session.model).toBe("test-model");
-    expect(update.session.audio.input.format).toEqual({ type: "audio/pcmu" });
+    expect(update.session.audio.input.format).toEqual({ type: "audio/pcm", rate: 24000 });
     expect(update.session.audio.output.voice).toBe("test-voice");
 
     let settled = false;

@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import type { GatewayLogger } from "../types.js";
+import { CallAudio, type CallAudioFormat } from "./audio.js";
 import { createHangupArmer, type PostCallRegistry } from "./post-call.js";
 
 export const CONSULT_TOOL = "consult_agent";
@@ -23,8 +24,8 @@ export interface RealtimeConfig {
 }
 
 export interface RealtimeCallbacks {
-  // Play μ-law audio (base64) back to the caller.
-  onAudio(base64Ulaw: string): void;
+  // Play negotiated call audio (base64) back to the caller.
+  onAudio(base64Audio: string): void;
   // A spoken response finished; flush the caller-side playback.
   onAudioDone?(): void;
   // The caller started talking over the model — clear queued playback.
@@ -127,8 +128,9 @@ export function realtimeTools() {
 }
 
 export interface RealtimeBridge {
-  // Feed caller μ-law audio (base64) into the model.
-  pushAudio(base64Ulaw: string): void;
+  // Feed negotiated caller audio (base64) into the model.
+  pushAudio(base64Audio: string): void;
+  setAudioFormat(format: CallAudioFormat): void;
   // Trigger the opening response once the caller leg is connected, with an
   // optional per-call greeting instruction.
   start(greetingInstructions?: string): void;
@@ -159,6 +161,7 @@ export function openRealtimeBridge(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.model)}`,
     { Authorization: `Bearer ${config.apiKey}` },
   );
+  let audio = new CallAudio();
   const hangup = createHangupArmer(HANGUP_WINDOW_MS, now);
   const consults = new Set<Promise<void>>();
   const pendingWork = new Set<string>();
@@ -235,7 +238,7 @@ export function openRealtimeBridge(
           instructions: config.instructions,
           audio: {
             input: {
-              format: { type: "audio/pcmu" },
+              format: { type: "audio/pcm", rate: 24000 },
               transcription: { model: "whisper-1" },
               // Server-side VAD: the model detects turn boundaries, responds
               // on its own, and supports caller barge-in.
@@ -250,7 +253,7 @@ export function openRealtimeBridge(
               },
             },
             output: {
-              format: { type: "audio/pcmu" },
+              format: { type: "audio/pcm", rate: 24000 },
               voice: config.voice,
             },
           },
@@ -284,10 +287,15 @@ export function openRealtimeBridge(
       }
       case "response.output_audio.delta":
       case "response.audio.delta":
-        if (typeof evt.delta === "string") cb.onAudio(evt.delta);
+        if (typeof evt.delta === "string") {
+          const converted = audio.fromRealtime(evt.delta);
+          if (converted) cb.onAudio(converted);
+        }
         break;
       case "response.output_audio.done":
       case "response.audio.done": {
+        const tail = audio.finishOutput();
+        if (tail) cb.onAudio(tail);
         cb.onAudioDone?.();
         const responseId = String(evt.response_id ?? evt.response?.id ?? "");
         const owned = ownedResponses.get(responseId);
@@ -364,6 +372,7 @@ export function openRealtimeBridge(
       case "input_audio_buffer.speech_started":
         // Server VAD already cancels the in-flight response; the audio that
         // was streamed ahead must be dropped downstream too.
+        audio.interrupt();
         cb.onBargeIn?.();
         break;
       case "error": {
@@ -480,9 +489,14 @@ export function openRealtimeBridge(
   }
 
   return {
-    pushAudio(base64Ulaw) {
+    setAudioFormat(format) {
+      audio = new CallAudio(format);
+    },
+    pushAudio(base64Audio) {
       if (!closed && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Ulaw }));
+        const converted = audio.toRealtime(base64Audio);
+        if (converted)
+          ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: converted }));
       }
     },
     start(greetingInstructions) {

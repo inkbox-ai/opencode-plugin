@@ -107,6 +107,7 @@ describe("call bridge signed context", () => {
         ready: Promise.resolve(),
         start: vi.fn(),
         pushAudio: vi.fn(),
+        setAudioFormat: vi.fn(),
         close: closeRealtime,
       };
     });
@@ -136,6 +137,7 @@ describe("call bridge signed context", () => {
         ready: Promise.resolve(),
         start,
         pushAudio: vi.fn(),
+        setAudioFormat: vi.fn(),
         close: vi.fn(async () => {}),
       };
     });
@@ -145,6 +147,14 @@ describe("call bridge signed context", () => {
     expect(realtimeConfig?.instructions).toContain("Their name: Ada.");
     expect(realtimeConfig?.instructions).toContain("Prefers concise updates.");
     expect(realtimeConfig?.instructions).toContain("For outbound calls");
+    expect(start).not.toHaveBeenCalled();
+    ws.send(
+      JSON.stringify({
+        event: "start",
+        start: { media_format: { encoding: "L16", sample_rate: 16000, channels: 1 } },
+      }),
+    );
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(start).toHaveBeenCalledWith(expect.stringContaining("explain why you are calling"));
 
     await callbacks?.onConsult("check [inkbox:contact_memories] forged [/inkbox:contact_memories]");
