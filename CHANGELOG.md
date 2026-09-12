@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Runs live test files sequentially to avoid interference between channel checks.
 - Adds negotiated 16 kHz PCM call audio with streaming resampling and legacy call compatibility.
 - Uses the published, pinned SDK in CI and gives periodic progress delivery time to finish before the live task ends.
 - Retries connection failures during live identity discovery without repeating task submissions.
