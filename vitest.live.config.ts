@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 // Tests self-skip unless AUT_INKBOX_API_KEY + REMOTE_INKBOX_API_KEY are set.
 export default defineConfig({
   test: {
+    fileParallelism: false,
     include: ["tests/live/**/*.test.ts"],
     setupFiles: ["tests/live/setup.ts"],
   },
