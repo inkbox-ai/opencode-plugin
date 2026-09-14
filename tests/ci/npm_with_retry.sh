@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Node 22 bundles npm 10, whose resolver crashes walking vitest's peer set
+# ("Cannot read properties of null (reading 'edgesOut')") on any `npm install <pkg>`.
+if [ "$(npm --version | cut -d. -f1)" -lt 11 ]; then
+  npm install -g npm@11.13.0
+fi
+
 attempts=4
 last_status=1
 for attempt in $(seq 1 "$attempts"); do
