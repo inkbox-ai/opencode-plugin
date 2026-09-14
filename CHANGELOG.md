@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Updates Vitest and pins its Vite runtime to patched releases.
 - Stabilizes hosted voice checks by waiting for a quiet greeting and verifying the caller request on both call legs.
 - Updates transitive HTTP and development dependencies to patched versions.
 - Runs live test files sequentially to avoid interference between channel checks.
