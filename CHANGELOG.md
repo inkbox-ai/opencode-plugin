@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stabilizes hosted voice checks by waiting for a quiet greeting and verifying the caller request on both call legs.
+- Updates transitive HTTP and development dependencies to patched versions.
 - Runs live test files sequentially to avoid interference between channel checks.
 - Adds negotiated 16 kHz PCM call audio with streaming resampling and legacy call compatibility.
 - Uses the published, pinned SDK in CI and gives periodic progress delivery time to finish before the live task ends.

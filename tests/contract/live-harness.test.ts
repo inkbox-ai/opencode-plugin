@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const liveAut = readFileSync("scripts/live-aut.sh", "utf8");
 const liveChannels = readFileSync(".github/workflows/live-channels.yml", "utf8");
 const liveVoice = readFileSync(".github/workflows/live-voice.yml", "utf8");
+const voiceDriver = readFileSync("tests/live/voice-driver.mjs", "utf8");
 const liveStack = readFileSync(".github/workflows/live-stack.yml", "utf8");
 
 function shellCommands(source: string): string[] {
@@ -61,6 +62,12 @@ describe("live harness readiness bounds", () => {
     expect(liveVoice).toContain(
       'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Create one post-call action now. Set both the action title and the action details to this exact five-word phrase: Send SMS $HOSTED_MARKER. Wait for the action tool to succeed, then read the exact three-word SMS body back to me. Do not paraphrase, omit a word, or send the SMS during the call."',
     );
+  });
+
+  it("waits for the hosted greeting to go quiet before speaking", () => {
+    expect(liveVoice).toContain("export VOICE_DRIVER_QUIET_AFTER_TRANSCRIPT=2");
+    expect(voiceDriver).toContain("lastTranscriptAt + QUIET_AFTER_TRANSCRIPT_MS");
+    expect(voiceDriver).not.toContain("speak now if the greeting beat our timer");
   });
 
   it("keeps failure diagnostics content-free and out of public artifacts", () => {

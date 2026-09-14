@@ -11,7 +11,8 @@
 // file (ws url + phone-number id) the test reads.
 //
 // Env: REMOTE_INKBOX_API_KEY, INKBOX_BASE_URL, VOICE_DRIVER_STATE,
-//      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s), VOICE_DRIVER_LISTEN (s),
+//      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s),
+//      VOICE_DRIVER_QUIET_AFTER_TRANSCRIPT (s), VOICE_DRIVER_LISTEN (s),
 //      VOICE_DRIVER_AUTO_STOP (false lets the test own hangup timing)
 import { writeFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
@@ -32,6 +33,8 @@ const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
 // then give the agent a turn and hang up (a dropped WS does NOT end the call — an
 // explicit stop is required or the leg lingers to the server max-duration cap).
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
+const QUIET_AFTER_TRANSCRIPT_MS =
+  Number(process.env.VOICE_DRIVER_QUIET_AFTER_TRANSCRIPT || "0") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
 
@@ -58,6 +61,7 @@ async function callWsHandler(ws) {
   });
   console.log("call WS accepted");
   let spoke = false;
+  let lastTranscriptAt = 0;
   const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
@@ -70,7 +74,13 @@ async function callWsHandler(ws) {
   };
   const runTurn = async () => {
     await say(GREETING);
-    await sleep(SPEAK_AFTER_MS);
+    const earliestSpeechAt = Date.now() + SPEAK_AFTER_MS;
+    while (!spoke) {
+      const speechAt = Math.max(earliestSpeechAt, lastTranscriptAt + QUIET_AFTER_TRANSCRIPT_MS);
+      const delay = speechAt - Date.now();
+      if (delay <= 0) break;
+      await sleep(delay);
+    }
     await speak(LINE);
     await sleep(LISTEN_MS);
     if (!AUTO_STOP) return;
@@ -92,9 +102,9 @@ async function callWsHandler(ws) {
       if (ev.event === "start") {
         console.log("call start");
         void runTurn();
-      } else if (ev.event === "transcript" && ev.is_final) {
-        console.log("heard (final):", ev.text);
-        await speak(LINE); // speak now if the greeting beat our timer
+      } else if (ev.event === "transcript") {
+        lastTranscriptAt = Date.now();
+        if (ev.is_final) console.log("heard (final):", ev.text);
       } else if (ev.event === "stop") {
         console.log("call stop");
         break;
