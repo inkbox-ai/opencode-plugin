@@ -452,14 +452,21 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             .join(" ")
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, " ");
+          const autCaller = autSegments.remote
+            .join(" ")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, " ");
           const openActions = (currentAutCall.postCallActionItems ?? []).filter(
             (item: any) => String(item.status ?? "").toLowerCase() === "open",
           );
           const actionEvidence = openActions.map((item: any) =>
             [item.action, item.details].filter(Boolean).join(" "),
           );
-          const callerReady =
+          const driverCallerReady =
             hasAfterCallSmsIntent(caller) && containsVoiceMarker(caller, HOSTED_MARKER);
+          const autCallerReady =
+            hasAfterCallSmsIntent(autCaller) && containsVoiceMarker(autCaller, HOSTED_MARKER);
+          const callerReady = driverCallerReady && autCallerReady;
           const matchingActions = actionEvidence.filter(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
@@ -477,7 +484,8 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             markerActionCount === 1;
           progress.last =
             `agent_segments=${autSegments.local.length} two_way_ready=${twoWayReady} ` +
-            `caller_ready=${callerReady} ` +
+            `caller_ready=${callerReady} driver_caller_ready=${driverCallerReady} ` +
+            `aut_caller_ready=${autCallerReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
             `sms_actions=${smsActionCount} marker_actions=${markerActionCount}`;
           if (twoWayReady && callerReady && actionReady) break;
