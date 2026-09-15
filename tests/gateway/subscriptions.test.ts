@@ -1,4 +1,3 @@
-import { InkboxAPIError } from "@inkbox/sdk";
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import {
@@ -138,204 +137,23 @@ function allLoggedText(logger: { [K in keyof GatewayLogger]: ReturnType<typeof v
 }
 
 describe("reconcileSubscriptions", () => {
-  it("creates mailbox, phone, and imessage subscriptions when none exist", async () => {
+  it("creates one mixed identity subscription without channels", async () => {
     const subs = makeSubscriptions();
-    const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
-
-    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenCalledTimes(5);
-    expect(subs.create).toHaveBeenCalledWith({
-      mailboxId: "mb-1",
-      url: WEBHOOK_URL,
-      eventTypes: MAILBOX_EVENT_TYPES,
-    });
-    expect(subs.create).toHaveBeenCalledWith({
-      phoneNumberId: "pn-1",
-      url: WEBHOOK_URL,
-      eventTypes: PHONE_EVENT_TYPES,
-    });
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: A2A_EVENT_TYPES,
-    });
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: IMESSAGE_EVENT_TYPES,
-    });
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: CALL_EVENT_TYPES,
-    });
-    expect(subs.update).not.toHaveBeenCalled();
-  });
-
-  it("strips a trailing slash from the public URL before building the webhook URL", async () => {
-    const subs = makeSubscriptions();
-    await reconcileSubscriptions(makeDeps(makeIdentity(), subs), `${PUBLIC_URL}/`);
-
-    for (const [options] of subs.create.mock.calls) {
-      expect(options.url).toBe(WEBHOOK_URL);
-    }
-  });
-
-  it("updates only the subscription whose event types differ", async () => {
-    const subs = makeSubscriptions([
-      { id: "sub-mb", mailboxId: "mb-1", url: WEBHOOK_URL, eventTypes: ["message.received"] },
-      { id: "sub-pn", phoneNumberId: "pn-1", url: WEBHOOK_URL, eventTypes: PHONE_EVENT_TYPES },
-      {
-        id: "sub-a2a",
-        agentIdentityId: "ident-1",
-        url: WEBHOOK_URL,
-        eventTypes: A2A_EVENT_TYPES,
-      },
-      {
-        id: "sub-im",
-        agentIdentityId: "ident-1",
-        url: WEBHOOK_URL,
-        eventTypes: IMESSAGE_EVENT_TYPES,
-      },
-    ]);
-    const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
-
-    expect(result).toEqual({ created: 1, updated: 1, unchanged: 3 });
-    expect(subs.update).toHaveBeenCalledTimes(1);
-    expect(subs.update).toHaveBeenCalledWith("sub-mb", { eventTypes: MAILBOX_EVENT_TYPES });
-    expect(subs.create).toHaveBeenCalledOnce();
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: CALL_EVENT_TYPES,
-    });
-  });
-
-  it("leaves a subscription unchanged when event types match in a different order", async () => {
-    const subs = makeSubscriptions([
-      {
-        id: "sub-mb",
-        mailboxId: "mb-1",
-        url: WEBHOOK_URL,
-        eventTypes: [...MAILBOX_EVENT_TYPES].reverse(),
-      },
-    ]);
-    const identity = makeIdentity({ phoneNumber: null, imessageEnabled: false });
+    const identity = makeIdentity({ mailbox: null, phoneNumber: null, imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
-
-    expect(result).toEqual({ created: 1, updated: 0, unchanged: 1 });
+    expect(result).toEqual({ created: 1, updated: 0, unchanged: 0 });
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
-      eventTypes: A2A_EVENT_TYPES,
+      eventTypes: [
+        ...MAILBOX_EVENT_TYPES,
+        ...PHONE_EVENT_TYPES,
+        ...IMESSAGE_EVENT_TYPES,
+        ...CALL_EVENT_TYPES,
+        ...A2A_EVENT_TYPES,
+      ].sort(),
     });
-    expect(subs.update).not.toHaveBeenCalled();
-  });
-
-  it("never touches subscriptions pointing at other URLs", async () => {
-    const subs = makeSubscriptions([
-      {
-        id: "sub-foreign-mb",
-        mailboxId: "mb-1",
-        url: "https://other.example.com/webhook",
-        eventTypes: ["message.received"],
-      },
-      {
-        id: "sub-foreign-pn",
-        phoneNumberId: "pn-1",
-        url: "https://crm.example.com/hooks/inkbox",
-        eventTypes: ["text.received"],
-      },
-    ]);
-    const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
-
-    // Foreign subscriptions are ignored entirely; ours are created alongside.
-    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
-    expect(subs.update).not.toHaveBeenCalled();
     expect(subs.delete).not.toHaveBeenCalled();
-  });
-
-  it("skips the phone subscription when the identity has no phone number", async () => {
-    const subs = makeSubscriptions();
-    const identity = makeIdentity({ phoneNumber: null });
-    const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
-
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
-    const owners = subs.create.mock.calls.map(([options]) => options);
-    expect(owners.some((o: Record<string, unknown>) => "phoneNumberId" in o)).toBe(false);
-    expect(subs.list).not.toHaveBeenCalledWith(
-      expect.objectContaining({ phoneNumberId: expect.anything() }),
-    );
-  });
-
-  it("keeps the identity A2A subscription when iMessage is disabled", async () => {
-    const subs = makeSubscriptions();
-    const identity = makeIdentity({ imessageEnabled: false });
-    const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
-
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
-    const owners = subs.create.mock.calls.map(([options]) => options);
-    expect(owners).toContainEqual({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: A2A_EVENT_TYPES,
-    });
-  });
-
-  it("falls back to legacy identity events when the API rejects A2A event types", async () => {
-    const subs = makeSubscriptions();
-    subs.create.mockImplementation(async (options: { url: string; eventTypes: string[] }) => {
-      if (options.eventTypes.some((eventType) => A2A_EVENT_TYPES.includes(eventType))) {
-        throw new Error("event_type 'a2a.task.created' does not belong to any known channel");
-      }
-      return {
-        id: "sub-created",
-        url: options.url,
-        eventTypes: options.eventTypes,
-        signingKey: null,
-      };
-    });
-    const deps = makeDeps(makeIdentity(), subs);
-
-    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
-
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: IMESSAGE_EVENT_TYPES,
-    });
-    expect(subs.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: CALL_EVENT_TYPES,
-    });
-    expect(deps.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("does not support A2A webhook events yet"),
-    );
-  });
-
-  it("continues without an identity subscription when only A2A events are unsupported", async () => {
-    const subs = makeSubscriptions();
-    subs.create.mockImplementation(async (options: { url: string; eventTypes: string[] }) => {
-      if (options.eventTypes.some((eventType) => A2A_EVENT_TYPES.includes(eventType))) {
-        throw new InkboxAPIError(422, { detail: "a2a.task.created is not a valid event type" });
-      }
-      return {
-        id: "sub-created",
-        url: options.url,
-        eventTypes: options.eventTypes,
-        signingKey: null,
-      };
-    });
-    const deps = makeDeps(makeIdentity({ imessageEnabled: false }), subs);
-
-    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
-
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
-    expect(deps.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("skipping the A2A subscription"),
-    );
   });
 
   it("does not touch the incoming-call action when voice is disabled", async () => {

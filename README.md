@@ -450,3 +450,11 @@ twice daily to catch upstream drift.
 Inbound delivery (email/texts arriving as opencode sessions) is being
 validated for a future release — see `docs/gateway-spike.md` for the current
 findings.
+
+### Notification subscription upgrades
+
+New receivers use one identity-owned subscription for the notification events consumed by this gateway,
+including channels that are not enabled yet. Incoming-call control is configured separately.
+On upgrade, compatible existing subscriptions retain their IDs, event selections, and context;
+missing events are added with revision-checked updates. Other destination URLs are untouched.
+Conflicting delivery authentication or context settings require review instead of replacement.

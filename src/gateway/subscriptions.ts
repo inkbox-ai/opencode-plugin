@@ -1,6 +1,7 @@
 import type { AgentIdentity } from "@inkbox/sdk";
 import { IncomingCallAction } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
+import { reconcileIdentitySubscription } from "../identity-subscription.js";
 import type { GatewayDeps } from "./types.js";
 
 // Path (under the public URL) all gateway webhook subscriptions target.
@@ -36,41 +37,6 @@ export interface ReconcileResult {
   signingKey?: string;
 }
 
-// Exactly one owner id per subscription, matching the API contract.
-type SubscriptionOwner =
-  | { mailboxId: string }
-  | { phoneNumberId: string }
-  | { agentIdentityId: string };
-
-function sameEventTypes(a: string[], b: string[]): boolean {
-  const setA = new Set(a);
-  const setB = new Set(b);
-  return setA.size === setB.size && [...setA].every((e) => setB.has(e));
-}
-
-function eventFamilies(eventTypes: string[]): Set<string> {
-  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
-}
-
-function sameWebhookPath(left: string, right: string): boolean {
-  try {
-    const leftUrl = new URL(left);
-    const rightUrl = new URL(right);
-    return leftUrl.origin === rightUrl.origin && leftUrl.pathname === rightUrl.pathname;
-  } catch {
-    return false;
-  }
-}
-
-function isUnsupportedA2AEventTypes(err: unknown): boolean {
-  const message = inkboxErrorMessage(err);
-  return (
-    A2A_EVENT_TYPES.some((eventType) => message.includes(eventType)) &&
-    (message.includes("Validation error (422)") ||
-      message.includes("does not belong to any known channel"))
-  );
-}
-
 function invalidPublicUrlError(): Error {
   return new Error(
     "Gateway public URL must be an http(s) URL. " +
@@ -93,15 +59,7 @@ export function normalizePublicUrl(publicUrl: string): string {
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
 }
 
-/**
- * Reconcile the identity's webhook subscriptions with this gateway's public
- * URL: mailbox message events, phone text events (when a number is
- * provisioned), and iMessage events (when enabled). Idempotent — existing
- * subscriptions on our URL are updated in place only when their event types
- * differ, and subscriptions pointing anywhere else are never touched. When
- * voice is enabled, also points the identity's incoming-call action at the
- * gateway's call-audio WebSocket.
- */
+/** Reconcile notifications without requiring provisioned channels. */
 export async function reconcileSubscriptions(
   deps: GatewayDeps,
   publicUrl: string,
@@ -121,86 +79,19 @@ export async function reconcileSubscriptions(
 
   const result: ReconcileResult = { created: 0, updated: 0, unchanged: 0 };
 
-  async function reconcileOwner(
-    kind: string,
-    owner: SubscriptionOwner,
-    eventTypes: string[],
-    subscriptionUrl = webhookUrl,
-  ): Promise<void> {
-    try {
-      const existing = await client.webhooks.subscriptions.list(owner);
-      const desiredFamilies = eventFamilies(eventTypes);
-      const belongsToDesiredChannel = (sub: { eventTypes: string[] }) =>
-        [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family));
-      const ours = existing.find(
-        (sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub),
-      );
-      const staleOurs = existing.filter(
-        (sub) =>
-          sub.url !== subscriptionUrl &&
-          sameWebhookPath(sub.url, subscriptionUrl) &&
-          [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
-      );
-      if (!ours) {
-        const created = await client.webhooks.subscriptions.create({
-          ...owner,
-          url: subscriptionUrl,
-          eventTypes,
-        });
-        result.created += 1;
-        if (created.signingKey) {
-          result.signingKey ??= created.signingKey;
-          deps.logger.warn(
-            "Inkbox minted a webhook signing key for this identity (shown once). " +
-              "Save it as INKBOX_SIGNING_KEY or webhook signature verification will fail.",
-            { kind, subscriptionId: created.id },
-          );
-        }
-        deps.logger.info("created webhook subscription", { kind, subscriptionId: created.id });
-      } else if (sameEventTypes(ours.eventTypes, eventTypes)) {
-        result.unchanged += 1;
-      } else {
-        await client.webhooks.subscriptions.update(ours.id, { eventTypes });
-        result.updated += 1;
-        deps.logger.info("updated webhook subscription event types", {
-          kind,
-          subscriptionId: ours.id,
-        });
-      }
-      for (const stale of staleOurs) {
-        await client.webhooks.subscriptions.delete(stale.id);
-        deps.logger.info("removed stale webhook subscription", {
-          kind,
-          subscriptionId: stale.id,
-        });
-      }
-    } catch (err) {
-      if (kind === "a2a" && isUnsupportedA2AEventTypes(err)) {
-        deps.logger.warn(
-          "Inkbox API does not support A2A webhook events yet; " + "skipping the A2A subscription",
-        );
-        return;
-      }
-      throw new Error(
-        `Failed to reconcile ${kind} webhook subscription for ${subscriptionUrl}: ` +
-          inkboxErrorMessage(err),
-      );
-    }
-  }
-
-  if (identity.mailbox) {
-    await reconcileOwner("mailbox", { mailboxId: identity.mailbox.id }, MAILBOX_EVENT_TYPES);
-  }
-  if (identity.phoneNumber) {
-    await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
-  }
-  await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
-  if (identity.imessageEnabled) {
-    await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
-  }
-
-  if (identity.phoneNumber || identity.imessageEnabled) {
-    await reconcileOwner("calls", { agentIdentityId: identity.id }, CALL_EVENT_TYPES);
+  const reconciled = await reconcileIdentitySubscription(client, identity.id, webhookUrl, [
+    ...MAILBOX_EVENT_TYPES,
+    ...PHONE_EVENT_TYPES,
+    ...IMESSAGE_EVENT_TYPES,
+    ...CALL_EVENT_TYPES,
+    ...A2A_EVENT_TYPES,
+  ]);
+  result[reconciled.action] += 1;
+  if (reconciled.signingKey) {
+    result.signingKey = reconciled.signingKey;
+    deps.logger.warn(
+      "A webhook signing key was created. Save it as INKBOX_SIGNING_KEY before restarting.",
+    );
   }
 
   if (deps.config.gateway.voice.enabled) {
