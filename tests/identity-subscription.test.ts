@@ -211,7 +211,7 @@ describe("identity receiver reconciliation", () => {
   it("bounds conflict retries", async () => {
     const h = harness([row({ eventTypes: ["message.received"] })]);
     h.subscriptions.update.mockRejectedValue(h.conflict());
-    await expect(h.run()).rejects.toThrow("changed");
+    await expect(h.run()).rejects.toThrow("changed repeatedly");
     expect(h.subscriptions.update).toHaveBeenCalledTimes(4);
   });
 });
@@ -258,4 +258,38 @@ it("does not resurrect deleted receivers", async () => {
   await h.run();
   expect(h.subscriptions.create).toHaveBeenCalledTimes(1);
   expect(h.subscriptions.update).not.toHaveBeenCalled();
+});
+
+it.each([
+  "Too many active webhook subscriptions",
+  { detail: "Maximum 10 subscriptions reached" },
+  { code: "subscription_limit_reached" },
+])("capacity conflict is not a CAS retry: %j", async (detail) => {
+  const previous = row({ id: "previous", url: "https://old.example/webhook" });
+  const h = harness([previous]);
+  h.subscriptions.create.mockRejectedValue(
+    Object.assign(new Error("capacity"), { statusCode: 409, detail }),
+  );
+  await expect(h.run()).rejects.toThrow("capacity reached");
+  expect(h.subscriptions.create).toHaveBeenCalledTimes(1);
+  expect(h.subscriptions.update).not.toHaveBeenCalled();
+  expect(h.subscriptions.delete).not.toHaveBeenCalled();
+  expect(previous.url).toBe("https://old.example/webhook");
+});
+
+it("does not claim a different host or copy its context", async () => {
+  const previous = row({
+    id: "previous",
+    url: "https://old.example/webhook",
+    contextConfig: { email: { mode: "count", count: 3 } },
+  });
+  const h = harness([previous]);
+  await h.run();
+  expect(h.subscriptions.update).not.toHaveBeenCalled();
+  expect(h.subscriptions.create).toHaveBeenCalledWith({
+    agentIdentityId: "agent",
+    url: URL,
+    eventTypes: [...EVENTS].sort(),
+  });
+  expect(previous.url).toBe("https://old.example/webhook");
 });

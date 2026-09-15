@@ -93,7 +93,21 @@ export async function reconcileIdentitySubscription(
       };
     } catch (error) {
       const status = (error as { statusCode?: number })?.statusCode;
-      if ((status !== 404 && status !== 409) || attempt === 3) throw error;
+      const detail = JSON.stringify((error as { detail?: unknown })?.detail) ?? String(error);
+      if (
+        status === 409 &&
+        /subscription/i.test(detail) &&
+        /too many|maximum|capacity|limit|\bcap\b|\bmax\s*\d/i.test(detail)
+      ) {
+        throw new Error(
+          "Webhook subscription capacity reached. Review this identity in the Inkbox Console; if the gateway URL changed, move only its verified previous destination using a revision-checked update, then retry startup. Other destinations were left unchanged.",
+        );
+      }
+      if (status !== 404 && status !== 409) throw error;
+      if (attempt === 3)
+        throw new Error(
+          "Webhook subscriptions changed repeatedly. Review concurrent edits or overlapping event selections, then retry startup.",
+        );
     }
   }
   throw new Error("Webhook subscriptions changed repeatedly; retry setup.");
