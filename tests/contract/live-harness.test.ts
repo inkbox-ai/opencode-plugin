@@ -64,9 +64,12 @@ describe("live harness readiness bounds", () => {
     );
   });
 
-  it("waits for the hosted greeting to go quiet before speaking", () => {
-    expect(liveVoice).toContain("export VOICE_DRIVER_QUIET_AFTER_TRANSCRIPT=2");
-    expect(voiceDriver).toContain("lastTranscriptAt + QUIET_AFTER_TRANSCRIPT_MS");
+  it("re-asks the hosted question while the agent is idle", () => {
+    // The driver re-asks while the agent is idle and stops once it says the
+    // marker back, so the marker has to reach the driver.
+    expect(liveVoice).toContain('export VOICE_DRIVER_ANSWER_CONTAINS="$HOSTED_MARKER"');
+    expect(voiceDriver).toContain("Date.now() - lastHeardAt >= QUIET_GAP_MS");
+    expect(voiceDriver).toContain("reasks < MAX_REASKS");
     expect(voiceDriver).not.toContain("speak now if the greeting beat our timer");
   });
 
