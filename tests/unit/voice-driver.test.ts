@@ -106,6 +106,26 @@ afterEach(() => {
 });
 
 describe("live driver greeting turn-taking", () => {
+  it.each([
+    ["BANANA, elephant... pineapple!", true],
+    ["The words are banana elephant pineapple", true],
+    ["bananaelephant pineapple", false],
+    ["banana elephantpineapple", false],
+    ["xbanana elephant pineapple", false],
+    ["banana elephant pineapplex", false],
+    ["bananas elephant pineapple", false],
+  ])("only accepts an exact word-boundary readback: %s", async (reply, matches) => {
+    vi.stubEnv("VOICE_DRIVER_ANSWER_CONTAINS", "banana elephant pineapple");
+    vi.stubEnv("VOICE_DRIVER_REASK", "20");
+    vi.stubEnv("VOICE_DRIVER_LISTEN", "180");
+    const { socket, running } = await startDriver(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    socket.push({ event: "transcript", text: reply, is_final: true });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(socket.spoken()).toHaveLength(matches ? 2 : 3);
+    await stop(socket, running);
+  });
+
   it("allows a long submitted request to play before queuing a retry", async () => {
     const longRequest = Array.from({ length: 80 }, () => "word").join(" ");
     vi.stubEnv("VOICE_DRIVER_LINE", longRequest);

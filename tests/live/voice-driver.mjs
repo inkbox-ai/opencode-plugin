@@ -53,8 +53,8 @@ const MAX_REASKS = Number(process.env.VOICE_DRIVER_MAX_REASKS || "2");
 const ANSWER_CONTAINS = process.env.VOICE_DRIVER_ANSWER_CONTAINS || "";
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
 
-// Compare speech ignoring ASR casing, spacing and punctuation.
-const speechKey = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+// Ignore ASR casing and punctuation, but preserve complete word boundaries.
+const speechKey = (text) => (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).join(" ");
 const ANSWER_KEY = speechKey(ANSWER_CONTAINS);
 
 if (!API_KEY) {
@@ -166,7 +166,7 @@ async function callWsHandler(ws) {
         else state.emptyFrames += 1;
         if (ev.is_final) {
           console.log("heard (final):", ev.text);
-          if (ANSWER_KEY && speechKey(String(ev.text || "")).includes(ANSWER_KEY)) {
+          if (ANSWER_KEY && ` ${speechKey(String(ev.text || ""))} `.includes(` ${ANSWER_KEY} `)) {
             answered = true;
           }
         }
