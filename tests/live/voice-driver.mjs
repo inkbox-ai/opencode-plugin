@@ -41,6 +41,12 @@ const REASK_EVERY_MS = Number(process.env.VOICE_DRIVER_REASK || "20") * 1000;
 // Never re-ask until the agent has been silent this long, so a reply or a tool
 // round-trip in progress is never talked over.
 const QUIET_GAP_MS = Number(process.env.VOICE_DRIVER_QUIET_GAP || "6") * 1000;
+// text.done confirms submission, not that synthesized audio has finished. Long
+// requests otherwise enqueue another copy at the fixed retry interval while
+// the first is still playing. Budget 100 spoken words/minute plus the quiet
+// gap before a retry; the configured interval remains the floor for short asks.
+const REQUEST_PLAYBACK_BUDGET_MS = (LINE.trim().match(/\S+/g)?.length ?? 0) * 600 + QUIET_GAP_MS;
+const REASK_AFTER_MS = Math.max(REASK_EVERY_MS, REQUEST_PLAYBACK_BUDGET_MS);
 const MAX_REASKS = Number(process.env.VOICE_DRIVER_MAX_REASKS || "2");
 // The agent saying this back means the question landed; stop re-asking so a
 // question that already took effect never turns into a second one.
@@ -126,7 +132,7 @@ async function callWsHandler(ws) {
         REASK_EVERY_MS > 0 &&
         !answered &&
         reasks < MAX_REASKS &&
-        Date.now() - askedAt >= REASK_EVERY_MS &&
+        Date.now() - askedAt >= REASK_AFTER_MS &&
         Date.now() - lastHeardAt >= QUIET_GAP_MS
       ) {
         await say(LINE);

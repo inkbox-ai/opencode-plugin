@@ -106,6 +106,41 @@ afterEach(() => {
 });
 
 describe("live driver greeting turn-taking", () => {
+  it("allows a long submitted request to play before queuing a retry", async () => {
+    const longRequest = Array.from({ length: 80 }, () => "word").join(" ");
+    vi.stubEnv("VOICE_DRIVER_LINE", longRequest);
+    vi.stubEnv("VOICE_DRIVER_REASK", "20");
+    vi.stubEnv("VOICE_DRIVER_LISTEN", "180");
+    const { socket, running } = await startDriver(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(socket.spoken()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(socket.spoken()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(33_999);
+    expect(socket.spoken()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(socket.spoken().map((frame) => frame.delta)).toEqual([
+      "Hello?",
+      longRequest,
+      longRequest,
+    ]);
+    await stop(socket, running);
+  });
+
+  it("still waits for peer silence after the request playback budget", async () => {
+    vi.stubEnv("VOICE_DRIVER_LINE", Array.from({ length: 80 }, () => "word").join(" "));
+    vi.stubEnv("VOICE_DRIVER_REASK", "20");
+    vi.stubEnv("VOICE_DRIVER_LISTEN", "180");
+    const { socket, running } = await startDriver(false);
+    await vi.advanceTimersByTimeAsync(58_000);
+    await heard(socket);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(socket.spoken()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.spoken()).toHaveLength(3);
+    await stop(socket, running);
+  });
+
   it("waits for quiet across partial and final greeting transcripts", async () => {
     const { socket, running } = await startDriver();
     for (const final of [false, true, false]) {

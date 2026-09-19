@@ -36,6 +36,17 @@ export function hasAfterCallSmsIntent(value: string): boolean {
   return afterCall && hasSmsIntent(normalized);
 }
 
+export function hostedCallerReadiness(driverCaller: string, autCaller: string, marker: string) {
+  const driverCallerReady =
+    hasAfterCallSmsIntent(driverCaller) && containsVoiceMarker(driverCaller, marker);
+  const autCallerReady = hasAfterCallSmsIntent(autCaller) && containsVoiceMarker(autCaller, marker);
+  return {
+    callerReady: driverCallerReady && autCallerReady,
+    driverCallerReady,
+    autCallerReady,
+  };
+}
+
 export function hasSmsIntent(value: string): boolean {
   const normalized = normalizedVoiceTokens(value).join(" ");
   return (

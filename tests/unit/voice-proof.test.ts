@@ -3,12 +3,25 @@ import {
   containsVoiceMarker,
   hasAfterCallSmsIntent,
   hasSmsIntent,
+  hostedCallerReadiness,
   normalizedVoiceTokens,
   voiceMarkerEvidence,
   wasAcceptedForDelivery,
 } from "../live/voice-proof.js";
 
 describe("hosted live voice proof normalization", () => {
+  it("requires the full caller request in both call legs, not just the driver recording", () => {
+    const complete = "After we hang up, send me an SMS saying zulu alpha bravo.";
+    const clipped = "After we hang up, send me an SMS saying zulu alpha.";
+    expect(hostedCallerReadiness(complete, clipped, "zulu alpha bravo")).toEqual({
+      callerReady: false,
+      driverCallerReady: true,
+      autCallerReady: false,
+    });
+    expect(hostedCallerReadiness(clipped, complete, "zulu alpha bravo").callerReady).toBe(false);
+    expect(hostedCallerReadiness(complete, complete, "zulu alpha bravo").callerReady).toBe(true);
+  });
+
   it("reports missing, incomplete, and reordered evidence without disclosing content", () => {
     const marker = "zulu alpha bravo";
     expect(voiceMarkerEvidence([], marker)).toEqual({

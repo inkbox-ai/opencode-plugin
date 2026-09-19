@@ -26,8 +26,8 @@ import {
 } from "./helpers.js";
 import {
   containsVoiceMarker,
-  hasAfterCallSmsIntent,
   hasSmsIntent,
+  hostedCallerReadiness,
   voiceMarkerEvidence,
   wasAcceptedForDelivery,
 } from "./voice-proof.js";
@@ -417,6 +417,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       });
 
       let autCallId: string | undefined;
+      const readiness = { twoWayReady: false, callerReady: false, actionReady: false };
       try {
         progress.phase = "hosted call placement";
         const pair = await waitForStableCallPair(
@@ -463,11 +464,11 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           const actionEvidence = openActions.map((item: any) =>
             [item.action, item.details].filter(Boolean).join(" "),
           );
-          const driverCallerReady =
-            hasAfterCallSmsIntent(caller) && containsVoiceMarker(caller, HOSTED_MARKER);
-          const autCallerReady =
-            hasAfterCallSmsIntent(autCaller) && containsVoiceMarker(autCaller, HOSTED_MARKER);
-          const callerReady = driverCallerReady && autCallerReady;
+          const { driverCallerReady, autCallerReady, callerReady } = hostedCallerReadiness(
+            caller,
+            autCaller,
+            HOSTED_MARKER,
+          );
           const matchingActions = actionEvidence.filter(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
@@ -483,19 +484,23 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             matchingActions.length === 1 &&
             smsActionCount === 1 &&
             markerActionCount === 1;
+          Object.assign(readiness, { twoWayReady, callerReady, actionReady });
           progress.last =
             `agent_segments=${autSegments.local.length} two_way_ready=${twoWayReady} ` +
             `caller_ready=${callerReady} driver_caller_ready=${driverCallerReady} ` +
             `aut_caller_ready=${autCallerReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
-            `sms_actions=${smsActionCount} marker_actions=${markerActionCount}`;
+            `sms_actions=${smsActionCount} marker_actions=${markerActionCount} ` +
+            `aut_caller_marker=${JSON.stringify(voiceMarkerEvidence([autCaller], HOSTED_MARKER))}`;
           if (twoWayReady && callerReady && actionReady) break;
           await new Promise((resolve) => setTimeout(resolve, 5_000));
         }
         expect(progress.phase).toBe("pre-hangup caller and open-action readiness");
-        expect(progress.last).toContain("two_way_ready=true");
-        expect(progress.last).toContain("caller_ready=true");
-        expect(progress.last).toContain("action_ready=true");
+        expect(readiness, progress.last).toEqual({
+          twoWayReady: true,
+          callerReady: true,
+          actionReady: true,
+        });
       } finally {
         await cleanupFreshCalls(remote, driverLegs, beforeDriverCalls);
         await cleanupFreshCalls(aut, autLegs, beforeAutCalls);
