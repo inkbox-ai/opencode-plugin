@@ -19,10 +19,11 @@ describe("hosted live voice proof normalization", () => {
     const template = workflow.match(/export VOICE_DRIVER_LINE="([^"]+)"/)?.[1];
     if (!template) throw new Error("Hosted workflow request is missing");
     const marker = "zulu alpha bravo";
-    const request = template.replaceAll("$HOSTED_MARKER", marker);
-    expect(request.split(marker)).toHaveLength(2);
+    const spokenMarker = marker.replaceAll(" ", ", ");
+    const request = template.replaceAll("$SPOKEN_MARKER", spokenMarker);
+    expect(normalizedVoiceTokens(request).join(" ").split(marker)).toHaveLength(2);
     expect(request).toContain(
-      `After we hang up, send me one SMS containing exactly these three words: ${marker}`,
+      `After we hang up, send me one SMS containing exactly these three words: ${spokenMarker}`,
     );
     expect(request).toContain("Please repeat the three words back so I know you heard them.");
     expect(request).not.toMatch(/\b(?:action|tool|register|title|details|saving)\b|inkbox_/i);

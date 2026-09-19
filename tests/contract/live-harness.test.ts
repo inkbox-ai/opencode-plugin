@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -60,7 +61,27 @@ describe("live harness readiness bounds", () => {
 
   it("uses a natural hosted caller request without implementation coaching", () => {
     expect(liveVoice).toContain(
-      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Please repeat the three words back so I know you heard them."',
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $SPOKEN_MARKER. Please repeat the three words back so I know you heard them."',
+    );
+  });
+
+  it("separates spoken words without changing the exact machine marker", () => {
+    const spokenAssignment = liveVoice.match(/^ +SPOKEN_MARKER=.*$/m)?.[0];
+    const lineAssignment = liveVoice.match(/^ +export VOICE_DRIVER_LINE=.*$/m)?.[0];
+    expect(spokenAssignment).toBeDefined();
+    expect(lineAssignment).toBeDefined();
+    const result = execFileSync(
+      "bash",
+      [
+        "-c",
+        `${spokenAssignment}\n${lineAssignment}\nprintf '%s\\n%s' "$HOSTED_MARKER" "$VOICE_DRIVER_LINE"`,
+      ],
+      { env: { ...process.env, HOSTED_MARKER: "banana elephant pineapple" }, encoding: "utf8" },
+    );
+    const [machine, spoken] = result.split("\n");
+    expect(machine).toBe("banana elephant pineapple");
+    expect(spoken).toBe(
+      "After we hang up, send me one SMS containing exactly these three words: banana, elephant, pineapple. Please repeat the three words back so I know you heard them.",
     );
   });
 
