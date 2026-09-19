@@ -18,15 +18,16 @@ describe("hosted live voice proof normalization", () => {
     if (!template) throw new Error("Hosted workflow request is missing");
     const marker = "zulu alpha bravo";
     const request = template.replaceAll("$HOSTED_MARKER", marker);
-    // A standalone prohibition invited an acknowledgement that cut off the
-    // request before its marker; only the complete instruction ends a sentence.
+    // Put the complete action first and say its body once: a second late
+    // details copy was clipped even when the earlier SMS request was heard.
     expect(request.match(/[.!?]/g)).toEqual(["."]);
-    expect(request).toMatch(/^Do not text during this call, but after we hang up/);
-    expect(request).toContain(`send me exactly one SMS with body exactly ${marker}`);
+    expect(request).toMatch(/^Create one post-call action titled Send SMS/);
+    expect(request.split(marker)).toHaveLength(2);
     expect(request).toContain(
-      `one post-call action now titled Send SMS with details exactly ${marker}`,
+      `details exactly ${marker} to send me exactly one SMS only after we hang up`,
     );
-    expect(request).toContain("after the tool succeeds read back the three-word body.");
+    expect(request).toContain("never during this call");
+    expect(request).toContain("read back the body after saving.");
     expect(hostedCallerReadiness(request, request, marker).callerReady).toBe(true);
     expect(hostedCallerReadiness(request, "Do not text during this call", marker).callerReady).toBe(
       false,
