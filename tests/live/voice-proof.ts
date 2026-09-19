@@ -11,6 +11,23 @@ export function containsVoiceMarker(value: string, marker: string): boolean {
   );
 }
 
+// Diagnostics must distinguish a missing row from a misheard/reordered marker
+// without exposing message bodies or call transcripts in public CI logs.
+export function voiceMarkerEvidence(values: string[], marker: string) {
+  const expected = new Set(normalizedVoiceTokens(marker));
+  return {
+    rows: values.length,
+    exactMarkerRows: values.filter((value) => containsVoiceMarker(value, marker)).length,
+    maxMatchedWords: Math.max(
+      0,
+      ...values.map(
+        (value) =>
+          new Set(normalizedVoiceTokens(value).filter((token) => expected.has(token))).size,
+      ),
+    ),
+  };
+}
+
 export function hasAfterCallSmsIntent(value: string): boolean {
   const normalized = normalizedVoiceTokens(value).join(" ");
   const afterCall =

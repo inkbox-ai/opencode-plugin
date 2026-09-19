@@ -28,6 +28,7 @@ import {
   containsVoiceMarker,
   hasAfterCallSmsIntent,
   hasSmsIntent,
+  voiceMarkerEvidence,
   wasAcceptedForDelivery,
 } from "./voice-proof.js";
 
@@ -529,12 +530,19 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           registryEntry = undefined;
         }
         progress.last =
+          `fresh_target_sms=${JSON.stringify(
+            voiceMarkerEvidence(
+              fresh.map((message: any) => String(message.text ?? "")),
+              HOSTED_MARKER,
+            ),
+          )} ` +
           `accepted_marker_rows=${matched.length} ` +
           `blocked_marker_rows=${markerRows.length - matched.length} ` +
           `registry_state=${registryEntry?.state ?? "missing"} ` +
           `unique_accepted_rows=${new Set(matched.map((message: any) => message.id)).size} ` +
           `journal_attempts=${registryEntry?.smsAttempts?.length ?? 0} ` +
           `journal_successes=${registryEntry?.smsAttempts?.filter((attempt: any) => attempt.state === "success").length ?? 0} ` +
+          `journal_fresh_rows=${fresh.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
           `journal_matched_rows=${matched.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
           `active_capture=${Boolean(registryEntry?.active)}`;
         if (matched.length === 1 && registryEntry?.state === "completed") {
@@ -552,7 +560,49 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         if (registryEntry?.state === "failed") throw new Error("hosted settlement failed");
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
-      throw new Error(`hosted SMS settlement timed out: ${JSON.stringify(progress)}`);
+      // Fetch only the journal's actual send results, so list visibility/filtering
+      // can be separated from wrong content without logging bodies or identifiers.
+      const sentEvidence = await Promise.all(
+        (registryEntry?.smsAttempts ?? [])
+          .filter((attempt: any) => attempt.state === "success" && attempt.providerMessageId)
+          .map(async (attempt: any) => {
+            const message = await aut.texts
+              .get(autPhone.id, attempt.providerMessageId)
+              .catch(() => undefined);
+            return {
+              readable: Boolean(message),
+              targetMatches: message
+                ? smsTargets(message).has(st.number.replace(/\D/g, ""))
+                : false,
+              currentRun: message
+                ? !beforeSmsIds.has(message.id) &&
+                  (recordCreatedAt(message) ?? -1) >= scenarioStartedAt
+                : false,
+              accepted: message ? wasAcceptedForDelivery(message) : false,
+              ...voiceMarkerEvidence(message ? [String(message.text ?? "")] : [], HOSTED_MARKER),
+            };
+          }),
+      );
+      const finalCall = autCallId
+        ? await aut.calls.get(autCallId).catch(() => undefined)
+        : undefined;
+      const finalActions = (finalCall?.postCallActionItems ?? []).filter(
+        (item: any) => String(item.status ?? "").toLowerCase() === "open",
+      );
+      const actionEvidence = {
+        readable: Boolean(finalCall),
+        titles: voiceMarkerEvidence(
+          finalActions.map((item: any) => String(item.action ?? "")),
+          HOSTED_MARKER,
+        ),
+        details: voiceMarkerEvidence(
+          finalActions.map((item: any) => String(item.details ?? "")),
+          HOSTED_MARKER,
+        ),
+      };
+      throw new Error(
+        `hosted SMS settlement timed out: ${JSON.stringify({ ...progress, sentEvidence, actionEvidence })}`,
+      );
     },
   );
 });
