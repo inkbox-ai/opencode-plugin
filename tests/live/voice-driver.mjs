@@ -30,12 +30,8 @@ const LINE =
 // and the call is hung up before the agent ever speaks. Answer the way a person
 // does — one word, then silence — and hold the prompt until that window closes.
 const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
-// Delay before the first ask. A greeting arrives as several final transcripts
-// 1.5-5s apart, so no silence threshold tells "between greeting sentences" from
-// "greeting over" — the first ask is simply allowed to land wherever it lands, and
-// runTurn re-asks once the agent is actually idle. Then give the agent a turn and
-// hang up (a dropped WS does NOT end the call — an explicit stop is required or
-// the leg lingers to the server max-duration cap).
+// Wait through the initial greeting before asking: speaking on a fixed timer
+// can clip the request or its marker while the other party is still talking.
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
 // Re-ask the question this often while the agent is idle. An ask the greeting
@@ -84,9 +80,30 @@ async function callWsHandler(ws) {
     await ws.send(JSON.stringify({ event: "text", done: true }));
     console.log("spoke:", text);
   };
+  const waitForGreeting = async () => {
+    const deadline = Date.now() + Math.max(30_000, SPEAK_AFTER_MS + QUIET_GAP_MS);
+    await sleep(SPEAK_AFTER_MS);
+    while (true) {
+      const now = Date.now();
+      const quietIn = QUIET_GAP_MS - (now - lastHeardAt);
+      if (quietIn <= 0) return true;
+      if (now >= deadline) return false;
+      await sleep(Math.min(quietIn, deadline - now));
+    }
+  };
   const runTurn = async () => {
     await say(GREETING);
-    await sleep(SPEAK_AFTER_MS);
+    if (!(await waitForGreeting())) {
+      console.log("peer did not pause before the greeting deadline");
+      if (AUTO_STOP) {
+        try {
+          await ws.send(JSON.stringify({ event: "stop" }));
+        } catch {
+          /* already closing */
+        }
+      }
+      return;
+    }
     await say(LINE);
     let askedAt = Date.now();
     lastHeardAt = askedAt;
