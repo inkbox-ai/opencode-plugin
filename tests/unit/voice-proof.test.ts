@@ -5,6 +5,7 @@ import {
   hasAfterCallSmsIntent,
   hasSmsIntent,
   hostedCallerReadiness,
+  hostedReadbackReadiness,
   hostedSmsDeliveryEvidence,
   normalizedVoiceTokens,
   smsIntentEvidence,
@@ -31,37 +32,46 @@ describe("hosted live voice proof normalization", () => {
     );
   });
 
+  it("requires the marker readback to be both spoken by the agent and heard by the caller", () => {
+    const marker = "zulu alpha bravo";
+    expect(hostedReadbackReadiness(marker, marker, marker).readbackReady).toBe(true);
+    expect(hostedReadbackReadiness(marker, "hello", marker).readbackReady).toBe(false);
+    expect(hostedReadbackReadiness("hello", marker, marker).readbackReady).toBe(false);
+    expect(hostedReadbackReadiness("hello", "hello", marker).readbackReady).toBe(false);
+  });
+
   it("requires one whole-body, journal-matched SMS sent only after the call ended", () => {
+    const proof = (
+      messages: Parameters<typeof hostedSmsDeliveryEvidence>[0],
+      marker: string,
+      endedAt: Date | null,
+      ids: string[],
+    ) => hostedSmsDeliveryEvidence(messages, marker, endedAt, ids, "+15555550123");
     const endedAt = new Date("2026-01-01T12:00:00Z");
     const message = {
       id: "current",
+      remotePhoneNumber: "+15555550123",
       text: "Zulu, alpha bravo.",
       createdAt: new Date("2026-01-01T12:00:01Z"),
       deliveryStatus: "delivered",
     };
-    expect(
-      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", endedAt, ["current"]).complete,
-    ).toBe(true);
+    expect(proof([message], "zulu alpha bravo", endedAt, ["current"]).complete).toBe(true);
     for (const text of [
       "Here are the words zulu alpha bravo",
       "zulu alpha bravo confirmed",
       "zulu bravo alpha",
       "zulu alpha",
+      "zulualpha bravo",
     ]) {
-      expect(
-        hostedSmsDeliveryEvidence([{ ...message, text }], "zulu alpha bravo", endedAt, ["current"])
-          .complete,
-      ).toBe(false);
+      expect(proof([{ ...message, text }], "zulu alpha bravo", endedAt, ["current"]).complete).toBe(
+        false,
+      );
     }
-    expect(hostedSmsDeliveryEvidence([message], "", endedAt, ["current"]).complete).toBe(false);
+    expect(proof([message], "", endedAt, ["current"]).complete).toBe(false);
+    expect(proof([message], "zulu alpha bravo", endedAt, ["different"]).complete).toBe(false);
+    expect(proof([message], "zulu alpha bravo", null, ["current"]).complete).toBe(false);
     expect(
-      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", endedAt, ["different"]).complete,
-    ).toBe(false);
-    expect(
-      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", null, ["current"]).complete,
-    ).toBe(false);
-    expect(
-      hostedSmsDeliveryEvidence(
+      proof(
         [{ ...message, createdAt: new Date("2026-01-01T11:59:59Z") }],
         "zulu alpha bravo",
         endedAt,
@@ -69,7 +79,7 @@ describe("hosted live voice proof normalization", () => {
       ).complete,
     ).toBe(false);
     expect(
-      hostedSmsDeliveryEvidence(
+      proof(
         [message, { ...message, id: "extra", text: "I will call you now" }],
         "zulu alpha bravo",
         endedAt,
@@ -77,8 +87,26 @@ describe("hosted live voice proof normalization", () => {
       ).complete,
     ).toBe(false);
     expect(
-      hostedSmsDeliveryEvidence(
-        [{ ...message, deliveryStatus: "blocked_spam_filter" }],
+      proof([{ ...message, deliveryStatus: "blocked_spam_filter" }], "zulu alpha bravo", endedAt, [
+        "current",
+      ]).complete,
+    ).toBe(false);
+    expect(
+      proof([{ ...message, remotePhoneNumber: "+15555550999" }], "zulu alpha bravo", endedAt, [
+        "current",
+      ]).complete,
+    ).toBe(false);
+    expect(
+      proof(
+        [{ ...message, recipients: [{ recipientPhoneNumber: "+15555550999" }] }],
+        "zulu alpha bravo",
+        endedAt,
+        ["current"],
+      ).complete,
+    ).toBe(false);
+    expect(
+      proof(
+        [message, { ...message, id: "wrong-target", remotePhoneNumber: "+15555550999" }],
         "zulu alpha bravo",
         endedAt,
         ["current"],

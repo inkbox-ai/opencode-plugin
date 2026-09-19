@@ -300,3 +300,26 @@ export async function askOverSms(
   assertNotErrorReply(reply.text, "sms");
   return reply.text;
 }
+
+// One immutable lower bound spans baseline and polling; each paginated snapshot
+// also fixes its upper bound so newly arriving messages cannot shift offsets.
+export async function outboundTexts(inkbox: Inkbox, numberId: string, startDatetime: string) {
+  const endDatetime = new Date().toISOString();
+  const rows: Awaited<ReturnType<Inkbox["texts"]["list"]>> = [];
+  const seen = new Set<string>();
+  for (let offset = 0; ; offset += 200) {
+    const page = await inkbox.texts.list(numberId, {
+      limit: 200,
+      offset,
+      startDatetime,
+      endDatetime,
+    });
+    for (const message of page) {
+      if (message.direction.toLowerCase() === "outbound" && !seen.has(message.id)) {
+        seen.add(message.id);
+        rows.push(message);
+      }
+    }
+    if (page.length < 200) return rows;
+  }
+}

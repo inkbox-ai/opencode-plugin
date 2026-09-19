@@ -18,6 +18,7 @@ import {
   client,
   LIVE,
   listCalls,
+  outboundTexts,
   phoneOf,
   REAL_MODEL,
   REMOTE_KEY,
@@ -28,6 +29,7 @@ import {
   containsVoiceMarker,
   hasSmsIntent,
   hostedCallerReadiness,
+  hostedReadbackReadiness,
   hostedSmsDeliveryEvidence,
   smsIntentEvidence,
   voiceMarkerEvidence,
@@ -101,15 +103,6 @@ function smsTargets(message: any): Set<string> {
     values.push(recipient?.recipientPhoneNumber ?? recipient?.recipient_phone_number ?? "");
   }
   return new Set(values.map((value) => String(value).replace(/\D/g, "")).filter(Boolean));
-}
-
-async function outboundTextsTo(inkbox: ReturnType<typeof client>, numberId: string, to: string) {
-  const target = to.replace(/\D/g, "");
-  return (await inkbox.texts.list(numberId, { limit: 200 })).filter(
-    (message: any) =>
-      String(message.direction ?? "").toLowerCase() === "outbound" &&
-      smsTargets(message).has(target),
-  );
 }
 
 async function hangupCall(
@@ -405,7 +398,8 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const baselineAutCalls = await autLegs();
       const beforeDriverCalls = new Set(baselineDriverCalls.map((call) => call.id));
       const beforeAutCalls = new Set(baselineAutCalls.map((call) => call.id));
-      const baseline = await outboundTextsTo(aut, autPhone.id, st.number);
+      const smsWindowStart = new Date(Date.now() - 5 * 60_000).toISOString();
+      const baseline = await outboundTexts(aut, autPhone.id, smsWindowStart);
       const beforeSmsIds = new Set(baseline.map((message: any) => message.id));
       const scenarioStartedAt = Date.now() - 10_000;
       const deadline = Date.now() + VOICE_TIMEOUT_MS;
@@ -417,7 +411,12 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       });
 
       let autCallId: string | undefined;
-      const readiness = { twoWayReady: false, callerReady: false, actionReady: false };
+      const readiness = {
+        twoWayReady: false,
+        callerReady: false,
+        readbackReady: false,
+        actionReady: false,
+      };
       try {
         progress.phase = "hosted call placement";
         const pair = await waitForStableCallPair(
@@ -469,6 +468,11 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             autCaller,
             HOSTED_MARKER,
           );
+          const { autReadbackReady, driverReadbackReady, readbackReady } = hostedReadbackReadiness(
+            autSegments.local.join(" "),
+            driverSegments.remote.join(" "),
+            HOSTED_MARKER,
+          );
           const matchingActions = actionEvidence.filter(
             (value: string) => hasSmsIntent(value) && containsVoiceMarker(value, HOSTED_MARKER),
           );
@@ -484,22 +488,24 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             matchingActions.length === 1 &&
             smsActionCount === 1 &&
             markerActionCount === 1;
-          Object.assign(readiness, { twoWayReady, callerReady, actionReady });
+          Object.assign(readiness, { twoWayReady, callerReady, readbackReady, actionReady });
           progress.last =
             `agent_segments=${autSegments.local.length} two_way_ready=${twoWayReady} ` +
             `caller_ready=${callerReady} driver_caller_ready=${driverCallerReady} ` +
-            `aut_caller_ready=${autCallerReady} ` +
+            `aut_caller_ready=${autCallerReady} readback_ready=${readbackReady} ` +
+            `aut_readback_ready=${autReadbackReady} driver_readback_ready=${driverReadbackReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
             `sms_actions=${smsActionCount} marker_actions=${markerActionCount} ` +
             `action_lexical=${JSON.stringify(smsIntentEvidence(actionEvidence))} ` +
             `aut_caller_marker=${JSON.stringify(voiceMarkerEvidence([autCaller], HOSTED_MARKER))}`;
-          if (twoWayReady && callerReady && actionReady) break;
+          if (twoWayReady && callerReady && readbackReady && actionReady) break;
           await new Promise((resolve) => setTimeout(resolve, 5_000));
         }
         expect(progress.phase).toBe("pre-hangup caller and open-action readiness");
         expect(readiness, progress.last).toEqual({
           twoWayReady: true,
           callerReady: true,
+          readbackReady: true,
           actionReady: true,
         });
       } finally {
@@ -519,7 +525,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       let registryEntry: any;
       while (Date.now() < deadline - duplicateGraceMs) {
         progress.phase = "post-call tool settlement";
-        const fresh = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
+        const fresh = (await outboundTexts(aut, autPhone.id, smsWindowStart)).filter(
           (message: any) => {
             const created = recordCreatedAt(message);
             return (
@@ -567,16 +573,18 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             HOSTED_MARKER,
             endedCall.endedAt,
             successfulProviderIds,
+            st.number,
           );
           expect(delivery, JSON.stringify(delivery)).toEqual({
             acceptedRows: 1,
+            exactTargetRows: 1,
             exactBodyRows: 1,
             postCallRows: 1,
             journalMatchedRows: 1,
             complete: true,
           });
           await new Promise((resolve) => setTimeout(resolve, duplicateGraceMs));
-          const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
+          const afterGrace = (await outboundTexts(aut, autPhone.id, smsWindowStart)).filter(
             (message: any) =>
               !beforeSmsIds.has(message.id) &&
               (recordCreatedAt(message) ?? -1) >= scenarioStartedAt,
@@ -586,6 +594,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             HOSTED_MARKER,
             endedCall.endedAt,
             successfulProviderIds,
+            st.number,
           );
           expect(settledDelivery, JSON.stringify(settledDelivery)).toEqual(delivery);
           return;

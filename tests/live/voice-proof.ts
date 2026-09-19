@@ -47,6 +47,16 @@ export function hostedCallerReadiness(driverCaller: string, autCaller: string, m
   };
 }
 
+export function hostedReadbackReadiness(autSpeech: string, driverHeard: string, marker: string) {
+  const autReadbackReady = containsVoiceMarker(autSpeech, marker);
+  const driverReadbackReady = containsVoiceMarker(driverHeard, marker);
+  return {
+    autReadbackReady,
+    driverReadbackReady,
+    readbackReady: autReadbackReady && driverReadbackReady,
+  };
+}
+
 export function hasSmsIntent(value: string): boolean {
   const normalized = normalizedVoiceTokens(value)
     .join(" ")
@@ -79,12 +89,14 @@ export function wasAcceptedForDelivery(message: {
 }
 
 // Delivery proof concerns the whole message, not a marker embedded in prose.
-// Count every accepted fresh target message so a wrong-body duplicate cannot
+// Count every accepted fresh outbound message so a wrong-body duplicate cannot
 // disappear from the one-send invariant.
 export function hostedSmsDeliveryEvidence(
   messages: Array<{
     id: string;
     text?: string | null;
+    remotePhoneNumber?: string | null;
+    recipients?: Array<{ recipientPhoneNumber?: string | null }> | null;
     createdAt?: Date | string | null;
     deliveryStatus?: unknown;
     delivery_status?: unknown;
@@ -92,9 +104,22 @@ export function hostedSmsDeliveryEvidence(
   marker: string,
   endedAt: Date | string | null | undefined,
   successfulProviderIds: string[],
+  expectedTarget: string,
 ) {
   const accepted = messages.filter(wasAcceptedForDelivery);
   const expected = normalizedVoiceTokens(marker).join(" ");
+  const target = expectedTarget.replace(/\D/g, "");
+  const exactTargetRows = accepted.filter((message) => {
+    const targets = new Set(
+      [
+        message.remotePhoneNumber,
+        ...(message.recipients ?? []).map((row) => row.recipientPhoneNumber),
+      ]
+        .map((value) => String(value ?? "").replace(/\D/g, ""))
+        .filter(Boolean),
+    );
+    return target && targets.size === 1 && targets.has(target);
+  }).length;
   const endedMs = endedAt instanceof Date ? endedAt.getTime() : Date.parse(endedAt ?? "");
   const exactBodyRows = accepted.filter(
     (message) => expected && normalizedVoiceTokens(message.text ?? "").join(" ") === expected,
@@ -111,11 +136,13 @@ export function hostedSmsDeliveryEvidence(
   ).length;
   return {
     acceptedRows: accepted.length,
+    exactTargetRows,
     exactBodyRows,
     postCallRows,
     journalMatchedRows,
     complete:
       accepted.length === 1 &&
+      exactTargetRows === 1 &&
       exactBodyRows === 1 &&
       postCallRows === 1 &&
       journalMatchedRows === 1,
