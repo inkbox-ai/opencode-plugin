@@ -77,3 +77,47 @@ export function wasAcceptedForDelivery(message: {
   const status = String(message.deliveryStatus ?? message.delivery_status ?? "").toLowerCase();
   return status !== "blocked_spam_filter";
 }
+
+// Delivery proof concerns the whole message, not a marker embedded in prose.
+// Count every accepted fresh target message so a wrong-body duplicate cannot
+// disappear from the one-send invariant.
+export function hostedSmsDeliveryEvidence(
+  messages: Array<{
+    id: string;
+    text?: string | null;
+    createdAt?: Date | string | null;
+    deliveryStatus?: unknown;
+    delivery_status?: unknown;
+  }>,
+  marker: string,
+  endedAt: Date | string | null | undefined,
+  successfulProviderIds: string[],
+) {
+  const accepted = messages.filter(wasAcceptedForDelivery);
+  const expected = normalizedVoiceTokens(marker).join(" ");
+  const endedMs = endedAt instanceof Date ? endedAt.getTime() : Date.parse(endedAt ?? "");
+  const exactBodyRows = accepted.filter(
+    (message) => expected && normalizedVoiceTokens(message.text ?? "").join(" ") === expected,
+  ).length;
+  const postCallRows = accepted.filter((message) => {
+    const sentMs =
+      message.createdAt instanceof Date
+        ? message.createdAt.getTime()
+        : Date.parse(message.createdAt ?? "");
+    return Number.isFinite(endedMs) && Number.isFinite(sentMs) && sentMs >= endedMs;
+  }).length;
+  const journalMatchedRows = accepted.filter((message) =>
+    successfulProviderIds.includes(message.id),
+  ).length;
+  return {
+    acceptedRows: accepted.length,
+    exactBodyRows,
+    postCallRows,
+    journalMatchedRows,
+    complete:
+      accepted.length === 1 &&
+      exactBodyRows === 1 &&
+      postCallRows === 1 &&
+      journalMatchedRows === 1,
+  };
+}

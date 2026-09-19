@@ -28,6 +28,7 @@ import {
   containsVoiceMarker,
   hasSmsIntent,
   hostedCallerReadiness,
+  hostedSmsDeliveryEvidence,
   smsIntentEvidence,
   voiceMarkerEvidence,
   wasAcceptedForDelivery,
@@ -323,7 +324,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       const deadline = Date.now() + VOICE_TIMEOUT_MS;
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
-        text: "Please call me right now by phone and set voicemailDetection to disabled.",
+        text: "Please call me right now by phone.",
       });
 
       try {
@@ -411,9 +412,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
       await remote.texts.send(st.number_id, {
         to: autPhone.number,
         text:
-          "Use inkbox_place_call to call me now. Inkbox Voice AI must handle the call. " +
-          "Set voicemailDetection to disabled. " +
-          "The purpose is to complete my spoken request and record any post-call action. " +
+          "Please call me now by phone. I would like to ask you something when we are connected. " +
           `Do not text before calling. Request ref ${Date.now().toString(36)}.`,
       });
 
@@ -508,6 +507,13 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         await cleanupFreshCalls(aut, autLegs, beforeAutCalls);
       }
 
+      if (!autCallId) throw new Error("Hosted call identifier is missing after call readiness");
+      let endedCall = await aut.calls.get(autCallId);
+      while (!endedCall.endedAt && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        endedCall = await aut.calls.get(autCallId);
+      }
+      expect(endedCall.endedAt, "The hosted call must have a persisted end time").toBeTruthy();
       const duplicateGraceMs = 10_000;
       let matched: any[] = [];
       let registryEntry: any;
@@ -552,16 +558,36 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
           `journal_fresh_rows=${fresh.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
           `journal_matched_rows=${matched.filter((message: any) => registryEntry?.smsAttempts?.some((attempt: any) => attempt.providerMessageId === message.id)).length} ` +
           `active_capture=${Boolean(registryEntry?.active)}`;
-        if (matched.length === 1 && registryEntry?.state === "completed") {
+        if (registryEntry?.state === "completed" && fresh.some(wasAcceptedForDelivery)) {
+          const successfulProviderIds = (registryEntry.smsAttempts ?? [])
+            .filter((attempt: any) => attempt.state === "success" && attempt.providerMessageId)
+            .map((attempt: any) => String(attempt.providerMessageId));
+          const delivery = hostedSmsDeliveryEvidence(
+            fresh,
+            HOSTED_MARKER,
+            endedCall.endedAt,
+            successfulProviderIds,
+          );
+          expect(delivery, JSON.stringify(delivery)).toEqual({
+            acceptedRows: 1,
+            exactBodyRows: 1,
+            postCallRows: 1,
+            journalMatchedRows: 1,
+            complete: true,
+          });
           await new Promise((resolve) => setTimeout(resolve, duplicateGraceMs));
           const afterGrace = (await outboundTextsTo(aut, autPhone.id, st.number)).filter(
             (message: any) =>
               !beforeSmsIds.has(message.id) &&
-              (recordCreatedAt(message) ?? -1) >= scenarioStartedAt &&
-              wasAcceptedForDelivery(message) &&
-              containsVoiceMarker(String(message.text ?? ""), HOSTED_MARKER),
+              (recordCreatedAt(message) ?? -1) >= scenarioStartedAt,
           );
-          expect(afterGrace.length).toBe(1);
+          const settledDelivery = hostedSmsDeliveryEvidence(
+            afterGrace,
+            HOSTED_MARKER,
+            endedCall.endedAt,
+            successfulProviderIds,
+          );
+          expect(settledDelivery, JSON.stringify(settledDelivery)).toEqual(delivery);
           return;
         }
         if (registryEntry?.state === "failed") throw new Error("hosted settlement failed");

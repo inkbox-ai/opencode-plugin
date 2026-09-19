@@ -5,6 +5,7 @@ import {
   hasAfterCallSmsIntent,
   hasSmsIntent,
   hostedCallerReadiness,
+  hostedSmsDeliveryEvidence,
   normalizedVoiceTokens,
   smsIntentEvidence,
   voiceMarkerEvidence,
@@ -12,26 +13,77 @@ import {
 } from "../live/voice-proof.js";
 
 describe("hosted live voice proof normalization", () => {
-  it("keeps the actual hosted request in one complete spoken sentence", () => {
+  it("keeps the actual hosted request natural without telling the agent how to fulfill it", () => {
     const workflow = readFileSync(".github/workflows/live-voice.yml", "utf8");
     const template = workflow.match(/export VOICE_DRIVER_LINE="([^"]+)"/)?.[1];
     if (!template) throw new Error("Hosted workflow request is missing");
     const marker = "zulu alpha bravo";
     const request = template.replaceAll("$HOSTED_MARKER", marker);
-    // Put the complete action first and say its body once: a second late
-    // details copy was clipped even when the earlier SMS request was heard.
-    expect(request.match(/[.!?]/g)).toEqual(["."]);
-    expect(request).toMatch(/^Create one post-call action titled Send SMS/);
     expect(request.split(marker)).toHaveLength(2);
     expect(request).toContain(
-      `details exactly ${marker} to send me exactly one SMS only after we hang up`,
+      `After we hang up, send me one SMS containing exactly these three words: ${marker}`,
     );
-    expect(request).toContain("never during this call");
-    expect(request).toContain("read back the body after saving.");
+    expect(request).toContain("Please repeat the three words back so I know you heard them.");
+    expect(request).not.toMatch(/\b(?:action|tool|register|title|details|saving)\b|inkbox_/i);
     expect(hostedCallerReadiness(request, request, marker).callerReady).toBe(true);
     expect(hostedCallerReadiness(request, "Do not text during this call", marker).callerReady).toBe(
       false,
     );
+  });
+
+  it("requires one whole-body, journal-matched SMS sent only after the call ended", () => {
+    const endedAt = new Date("2026-01-01T12:00:00Z");
+    const message = {
+      id: "current",
+      text: "Zulu, alpha bravo.",
+      createdAt: new Date("2026-01-01T12:00:01Z"),
+      deliveryStatus: "delivered",
+    };
+    expect(
+      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", endedAt, ["current"]).complete,
+    ).toBe(true);
+    for (const text of [
+      "Here are the words zulu alpha bravo",
+      "zulu alpha bravo confirmed",
+      "zulu bravo alpha",
+      "zulu alpha",
+    ]) {
+      expect(
+        hostedSmsDeliveryEvidence([{ ...message, text }], "zulu alpha bravo", endedAt, ["current"])
+          .complete,
+      ).toBe(false);
+    }
+    expect(hostedSmsDeliveryEvidence([message], "", endedAt, ["current"]).complete).toBe(false);
+    expect(
+      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", endedAt, ["different"]).complete,
+    ).toBe(false);
+    expect(
+      hostedSmsDeliveryEvidence([message], "zulu alpha bravo", null, ["current"]).complete,
+    ).toBe(false);
+    expect(
+      hostedSmsDeliveryEvidence(
+        [{ ...message, createdAt: new Date("2026-01-01T11:59:59Z") }],
+        "zulu alpha bravo",
+        endedAt,
+        ["current"],
+      ).complete,
+    ).toBe(false);
+    expect(
+      hostedSmsDeliveryEvidence(
+        [message, { ...message, id: "extra", text: "I will call you now" }],
+        "zulu alpha bravo",
+        endedAt,
+        ["current"],
+      ).complete,
+    ).toBe(false);
+    expect(
+      hostedSmsDeliveryEvidence(
+        [{ ...message, deliveryStatus: "blocked_spam_filter" }],
+        "zulu alpha bravo",
+        endedAt,
+        ["current"],
+      ).complete,
+    ).toBe(false);
   });
 
   it("reports action lexical evidence without disclosing action text", () => {

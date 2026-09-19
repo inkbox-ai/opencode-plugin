@@ -58,10 +58,20 @@ describe("live harness readiness bounds", () => {
     expect(voiceJob).toMatch(/^ {4}timeout-minutes: 15$/m);
   });
 
-  it("requires the hosted caller to persist and read back the exact SMS body", () => {
+  it("uses a natural hosted caller request without implementation coaching", () => {
     expect(liveVoice).toContain(
-      'export VOICE_DRIVER_LINE="Create one post-call action titled Send SMS with details exactly $HOSTED_MARKER to send me exactly one SMS only after we hang up, never during this call, and read back the body after saving."',
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Please repeat the three words back so I know you heard them."',
     );
+  });
+
+  it("does not tell real-model callers which tools or schema fields to use", () => {
+    const a2a = readFileSync("tests/live/a2a_driver.py", "utf8");
+    const voice = readFileSync("tests/live/voice.test.ts", "utf8");
+    expect(a2a).not.toMatch(/inkbox_a2a_(?:call|check|reply|complete|ask_caller)/);
+    expect(voice).not.toContain("Use inkbox_place_call");
+    expect(voice).not.toContain("set voicemailDetection");
+    expect(voice).not.toContain("record any post-call action");
+    expect(liveVoice).not.toMatch(/export VOICE_DRIVER_LINE=.*(?:action|tool|title|details)/);
   });
 
   it("re-asks the hosted question while the agent is idle", () => {
