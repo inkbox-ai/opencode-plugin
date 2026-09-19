@@ -75,9 +75,14 @@ async function callWsHandler(ws) {
   console.log("call WS accepted");
   let answered = false;
   let lastHeardAt = 0;
+  const state = { partialFrames: 0, finalFrames: 0, emptyFrames: 0, utterances: 0 };
+  const reportState = (reason) => {
+    console.log(`voice_driver_state=${JSON.stringify({ reason, ...state })}`);
+  };
   const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
+    state.utterances += 1;
     console.log("spoke:", text);
   };
   const waitForGreeting = async () => {
@@ -94,7 +99,7 @@ async function callWsHandler(ws) {
   const runTurn = async () => {
     await say(GREETING);
     if (!(await waitForGreeting())) {
-      console.log("peer did not pause before the greeting deadline");
+      reportState("greeting_timeout");
       if (AUTO_STOP) {
         try {
           await ws.send(JSON.stringify({ event: "stop" }));
@@ -105,6 +110,7 @@ async function callWsHandler(ws) {
       return;
     }
     await say(LINE);
+    reportState("request_spoken");
     let askedAt = Date.now();
     lastHeardAt = askedAt;
     // Re-ask if the agent never got the question: the greeting routinely runs
@@ -148,7 +154,10 @@ async function callWsHandler(ws) {
         console.log("call start");
         void runTurn();
       } else if (ev.event === "transcript") {
-        lastHeardAt = Date.now();
+        if (ev.is_final) state.finalFrames += 1;
+        else state.partialFrames += 1;
+        if (String(ev.text || "").trim()) lastHeardAt = Date.now();
+        else state.emptyFrames += 1;
         if (ev.is_final) {
           console.log("heard (final):", ev.text);
           if (ANSWER_KEY && speechKey(String(ev.text || "")).includes(ANSWER_KEY)) {
@@ -163,6 +172,7 @@ async function callWsHandler(ws) {
   } catch (e) {
     console.log("WS loop ended:", String(e));
   } finally {
+    reportState("socket_closed");
     try {
       await ws.close();
     } catch {

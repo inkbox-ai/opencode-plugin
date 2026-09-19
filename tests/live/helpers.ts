@@ -169,17 +169,37 @@ export async function waitTwoWayCall(
   const endedStatuses = new Set(["completed"]);
   const endedGraceMs = Number(process.env.LIVE_VOICE_ENDED_GRACE_S || "15") * 1000;
   let endedAt: number | undefined;
+  const observation = {
+    remoteSegments: 0,
+    localSegments: 0,
+    transcriptReadable: false,
+    callReadable: false,
+    status: "unknown",
+    useInkboxTts: null as boolean | null,
+    useInkboxStt: null as boolean | null,
+  };
   return pollUntil(
     "two-way call transcript",
     async () => {
-      const { remote, local } = await callSegments(aut, callId).catch(() => ({
-        remote: [],
-        local: [],
-      }));
+      const { remote, local } = await callSegments(aut, callId)
+        .then((segments) => {
+          observation.transcriptReadable = true;
+          return segments;
+        })
+        .catch(() => {
+          observation.transcriptReadable = false;
+          return { remote: [], local: [] };
+        });
+      observation.remoteSegments = remote.length;
+      observation.localSegments = local.length;
       if (remote.length > 0 && local.length > 0) return local.join(" | ");
 
       const call = await aut.calls.get(callId).catch(() => undefined);
       const status = (call?.status ?? "").toLowerCase();
+      observation.callReadable = call !== undefined;
+      observation.status = status || "unknown";
+      observation.useInkboxTts = call?.useInkboxTts ?? null;
+      observation.useInkboxStt = call?.useInkboxStt ?? null;
       const detail = () =>
         JSON.stringify({
           status: call?.status,
@@ -199,7 +219,10 @@ export async function waitTwoWayCall(
       return undefined;
     },
     timeoutMs,
-  );
+  ).catch((error: unknown) => {
+    const reason = error instanceof Error ? error.message : "two-way call proof failed";
+    throw new Error(`${reason}; observation=${JSON.stringify(observation)}`);
+  });
 }
 
 // Read from the driver owner: local is the scripted driver speech.

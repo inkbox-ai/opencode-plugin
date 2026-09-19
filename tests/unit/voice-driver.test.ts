@@ -119,6 +119,21 @@ describe("live driver greeting turn-taking", () => {
     await stop(socket, running);
   });
 
+  it("does not treat empty transcript frames as peer speech", async () => {
+    const { socket, running } = await startDriver();
+    for (const isFinal of [false, true]) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      socket.push({ event: "transcript", text: "   ", is_final: isFinal });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.spoken().map((frame) => frame.delta)).toEqual(["Hello?", "Scripted request"]);
+    expect(console.log).toHaveBeenCalledWith(
+      'voice_driver_state={"reason":"request_spoken","partialFrames":1,"finalFrames":1,"emptyFrames":2,"utterances":2}',
+    );
+    await stop(socket, running);
+  });
+
   it("asks a silent peer after the configured initial delay", async () => {
     const { socket, running } = await startDriver();
     await vi.advanceTimersByTimeAsync(4_999);
