@@ -739,6 +739,9 @@ export function createA2AHandler(deps: {
       if (closing || settlingTasks.has(taskId)) return;
       if (
         !context.replyIntentCommitted &&
+        // The tool host commits through a serialized context. Its durable fence
+        // remains authoritative even if the caller resumes before this turn ends.
+        !registry(deps.state)[key]?.replyIntentFenced &&
         reply?.trim() &&
         reply.trim().toUpperCase() !== "[SILENT]"
       ) {

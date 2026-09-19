@@ -23,6 +23,31 @@ describe("live voice leg ownership", () => {
     expect(aut.calls.get).not.toHaveBeenCalled();
   });
 
+  it("reports missing party and call mode without exposing transcript content", async () => {
+    vi.useFakeTimers();
+    try {
+      const aut = ownerWithTranscript([{ party: "local", text: "private transcript sentinel" }]);
+      aut.calls.get.mockResolvedValue({
+        status: "answered",
+        useInkboxTts: true,
+        useInkboxStt: true,
+      });
+      const result = waitTwoWayCall(aut as never, "private-call-id", 1).catch(
+        (error: Error) => error,
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toContain('"remoteSegments":0,"localSegments":1');
+      expect(message).toContain('"transcriptReadable":true,"callReadable":true');
+      expect(message).toContain('"status":"answered","useInkboxTts":true,"useInkboxStt":true');
+      expect(message).not.toContain("private");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses only local speech as proof on the driver-owned leg", async () => {
     const driver = ownerWithTranscript([
       { party: "local", text: "scripted caller line" },

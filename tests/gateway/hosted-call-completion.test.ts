@@ -112,6 +112,95 @@ afterEach(() => {
 });
 
 describe("hosted call completion", () => {
+  it.each(["initial", "correction", "recovery"])(
+    "keeps the recorded exact SMS body authoritative during %s without replaying accepted sends",
+    async (mode) => {
+      const phase = mode === "initial" ? "initial" : "correction";
+      const success: HostedSmsAttempt = {
+        phase,
+        id: "attempt-1",
+        target: "+14155550123",
+        targetMatches: true,
+        state: "success",
+      };
+      const d = deps(mode === "correction" ? [undefined, success] : [success]);
+      const body = "Blue  lantern, meadow!";
+      const noisyBody = "Blue lantern lovely meadow!";
+      d.authoritativeCall.postCallActionItems = [
+        {
+          id: "action-1",
+          status: "open",
+          action: "Send SMS",
+          details: `Exact SMS body: "${body}"`,
+        },
+      ];
+      d.inkbox.getIdentity.mockResolvedValue({
+        id: "ident-1",
+        listTranscripts: vi.fn(async () => [
+          {
+            party: "remote",
+            text: `After we hang up, send me an SMS saying ${noisyBody}`,
+          },
+        ]),
+      });
+      const service = createHostedCallCompletion(d);
+      if (mode === "recovery") {
+        saveHostedCall({
+          identityId: "ident-1",
+          callId: "call-1",
+          eventId: "evt-1",
+          state: "failed",
+          outcome: "correction_pre_dispatch_retries_exhausted",
+          retryable: true,
+          event: event(),
+        });
+        await service.catchUp();
+      } else {
+        await service.ingest(event());
+      }
+      await waitForState("completed");
+      const calls = d.runHostedCapture.mock.calls;
+      expect(calls).toHaveLength(mode === "correction" ? 2 : 1);
+      if (mode !== "recovery") expect(calls[0][1]).toContain(noisyBody);
+      for (const [, prompt] of calls) {
+        expect(prompt).toContain(`Exact SMS body: "${body}"`);
+        expect(prompt).toContain("Prefer the explicit body recorded in an open post-call action");
+        expect(prompt).toContain(
+          "Override the recorded body only when the caller clearly corrects or cancels",
+        );
+        expect(prompt).toContain("After a send is accepted, do not send another message");
+        expect(prompt).toContain('to="+14155550123"');
+      }
+      const acceptedCount = calls.length;
+      await service.ingest(event());
+      await service.catchUp();
+      expect(d.runHostedCapture).toHaveBeenCalledTimes(acceptedCount);
+    },
+  );
+
+  it.each(["S M S", "S.M.S.", "S-M-S"])(
+    "recognizes %s before splitting transcript clauses, preserving timing and negation",
+    (acronym) => {
+      expect(hasHostedSmsCommitment(`Send ${acronym} the release address.`, "action")).toBe(true);
+      expect(
+        hasHostedSmsCommitment(
+          `After we hang up, send me ${acronym} the release address.`,
+          "transcript",
+        ),
+      ).toBe(true);
+      expect(hasHostedSmsCommitment(`Do not send ${acronym} the release address.`, "action")).toBe(
+        false,
+      );
+      expect(hasHostedSmsCommitment(`Send me ${acronym} right now.`, "transcript")).toBe(false);
+      expect(hasHostedSmsCommitment(`Review ${acronym} history.`, "action")).toBe(false);
+    },
+  );
+
+  it.each(["Send S M X", "Send S M system", "Send ASM S", "Send S MMS"])(
+    "does not create a hosted commitment from unrelated letters: %s",
+    (value) => expect(hasHostedSmsCommitment(value, "action")).toBe(false),
+  );
+
   it("rejects a corrupt durable journal before dispatching any reconciliation", async () => {
     fs.writeFileSync(path.join(dir, "hosted-call-completions.json"), "{broken", { mode: 0o600 });
     const d = deps([]);

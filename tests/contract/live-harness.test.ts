@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -58,10 +59,40 @@ describe("live harness readiness bounds", () => {
     expect(voiceJob).toMatch(/^ {4}timeout-minutes: 15$/m);
   });
 
-  it("requires the hosted caller to persist and read back the exact SMS body", () => {
+  it("uses a natural hosted caller request without implementation coaching", () => {
     expect(liveVoice).toContain(
-      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $HOSTED_MARKER. Create one post-call action now. Set both the action title and the action details to this exact five-word phrase: Send SMS $HOSTED_MARKER. Wait for the action tool to succeed, then read the exact three-word SMS body back to me. Do not paraphrase, omit a word, or send the SMS during the call."',
+      'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these three words: $SPOKEN_MARKER. Please repeat the three words back so I know you heard them."',
     );
+  });
+
+  it("separates spoken words without changing the exact machine marker", () => {
+    const spokenAssignment = liveVoice.match(/^ +SPOKEN_MARKER=.*$/m)?.[0];
+    const lineAssignment = liveVoice.match(/^ +export VOICE_DRIVER_LINE=.*$/m)?.[0];
+    expect(spokenAssignment).toBeDefined();
+    expect(lineAssignment).toBeDefined();
+    const result = execFileSync(
+      "bash",
+      [
+        "-c",
+        `${spokenAssignment}\n${lineAssignment}\nprintf '%s\\n%s' "$HOSTED_MARKER" "$VOICE_DRIVER_LINE"`,
+      ],
+      { env: { ...process.env, HOSTED_MARKER: "banana elephant pineapple" }, encoding: "utf8" },
+    );
+    const [machine, spoken] = result.split("\n");
+    expect(machine).toBe("banana elephant pineapple");
+    expect(spoken).toBe(
+      "After we hang up, send me one SMS containing exactly these three words: banana, elephant, pineapple. Please repeat the three words back so I know you heard them.",
+    );
+  });
+
+  it("does not tell real-model callers which tools or schema fields to use", () => {
+    const a2a = readFileSync("tests/live/a2a_driver.py", "utf8");
+    const voice = readFileSync("tests/live/voice.test.ts", "utf8");
+    expect(a2a).not.toMatch(/inkbox_a2a_(?:call|check|reply|complete|ask_caller)/);
+    expect(voice).not.toContain("Use inkbox_place_call");
+    expect(voice).not.toContain("set voicemailDetection");
+    expect(voice).not.toContain("record any post-call action");
+    expect(liveVoice).not.toMatch(/export VOICE_DRIVER_LINE=.*(?:action|tool|title|details)/);
   });
 
   it("re-asks the hosted question while the agent is idle", () => {

@@ -30,12 +30,8 @@ const LINE =
 // and the call is hung up before the agent ever speaks. Answer the way a person
 // does — one word, then silence — and hold the prompt until that window closes.
 const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
-// Delay before the first ask. A greeting arrives as several final transcripts
-// 1.5-5s apart, so no silence threshold tells "between greeting sentences" from
-// "greeting over" — the first ask is simply allowed to land wherever it lands, and
-// runTurn re-asks once the agent is actually idle. Then give the agent a turn and
-// hang up (a dropped WS does NOT end the call — an explicit stop is required or
-// the leg lingers to the server max-duration cap).
+// Wait through the initial greeting before asking: speaking on a fixed timer
+// can clip the request or its marker while the other party is still talking.
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
 // Re-ask the question this often while the agent is idle. An ask the greeting
@@ -45,14 +41,20 @@ const REASK_EVERY_MS = Number(process.env.VOICE_DRIVER_REASK || "20") * 1000;
 // Never re-ask until the agent has been silent this long, so a reply or a tool
 // round-trip in progress is never talked over.
 const QUIET_GAP_MS = Number(process.env.VOICE_DRIVER_QUIET_GAP || "6") * 1000;
+// text.done confirms submission, not that synthesized audio has finished. Long
+// requests otherwise enqueue another copy at the fixed retry interval while
+// the first is still playing. Budget 100 spoken words/minute plus the quiet
+// gap before a retry; the configured interval remains the floor for short asks.
+const REQUEST_PLAYBACK_BUDGET_MS = (LINE.trim().match(/\S+/g)?.length ?? 0) * 600 + QUIET_GAP_MS;
+const REASK_AFTER_MS = Math.max(REASK_EVERY_MS, REQUEST_PLAYBACK_BUDGET_MS);
 const MAX_REASKS = Number(process.env.VOICE_DRIVER_MAX_REASKS || "2");
 // The agent saying this back means the question landed; stop re-asking so a
 // question that already took effect never turns into a second one.
 const ANSWER_CONTAINS = process.env.VOICE_DRIVER_ANSWER_CONTAINS || "";
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
 
-// Compare speech ignoring ASR casing, spacing and punctuation.
-const speechKey = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+// Ignore ASR casing and punctuation, but preserve complete word boundaries.
+const speechKey = (text) => (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).join(" ");
 const ANSWER_KEY = speechKey(ANSWER_CONTAINS);
 
 if (!API_KEY) {
@@ -79,15 +81,42 @@ async function callWsHandler(ws) {
   console.log("call WS accepted");
   let answered = false;
   let lastHeardAt = 0;
+  const state = { partialFrames: 0, finalFrames: 0, emptyFrames: 0, utterances: 0, bargeIns: 0 };
+  const reportState = (reason) => {
+    console.log(`voice_driver_state=${JSON.stringify({ reason, ...state })}`);
+  };
   const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
+    state.utterances += 1;
     console.log("spoke:", text);
+  };
+  const waitForGreeting = async () => {
+    const deadline = Date.now() + Math.max(30_000, SPEAK_AFTER_MS + QUIET_GAP_MS);
+    await sleep(SPEAK_AFTER_MS);
+    while (true) {
+      const now = Date.now();
+      const quietIn = QUIET_GAP_MS - (now - lastHeardAt);
+      if (quietIn <= 0) return true;
+      if (now >= deadline) return false;
+      await sleep(Math.min(quietIn, deadline - now));
+    }
   };
   const runTurn = async () => {
     await say(GREETING);
-    await sleep(SPEAK_AFTER_MS);
+    if (!(await waitForGreeting())) {
+      reportState("greeting_timeout");
+      if (AUTO_STOP) {
+        try {
+          await ws.send(JSON.stringify({ event: "stop" }));
+        } catch {
+          /* already closing */
+        }
+      }
+      return;
+    }
     await say(LINE);
+    reportState("request_spoken");
     let askedAt = Date.now();
     lastHeardAt = askedAt;
     // Re-ask if the agent never got the question: the greeting routinely runs
@@ -103,7 +132,7 @@ async function callWsHandler(ws) {
         REASK_EVERY_MS > 0 &&
         !answered &&
         reasks < MAX_REASKS &&
-        Date.now() - askedAt >= REASK_EVERY_MS &&
+        Date.now() - askedAt >= REASK_AFTER_MS &&
         Date.now() - lastHeardAt >= QUIET_GAP_MS
       ) {
         await say(LINE);
@@ -131,13 +160,18 @@ async function callWsHandler(ws) {
         console.log("call start");
         void runTurn();
       } else if (ev.event === "transcript") {
-        lastHeardAt = Date.now();
+        if (ev.is_final) state.finalFrames += 1;
+        else state.partialFrames += 1;
+        if (String(ev.text || "").trim()) lastHeardAt = Date.now();
+        else state.emptyFrames += 1;
         if (ev.is_final) {
           console.log("heard (final):", ev.text);
-          if (ANSWER_KEY && speechKey(String(ev.text || "")).includes(ANSWER_KEY)) {
+          if (ANSWER_KEY && ` ${speechKey(String(ev.text || ""))} `.includes(` ${ANSWER_KEY} `)) {
             answered = true;
           }
         }
+      } else if (ev.event === "barge_in") {
+        state.bargeIns += 1;
       } else if (ev.event === "stop") {
         console.log("call stop");
         break;
@@ -146,6 +180,7 @@ async function callWsHandler(ws) {
   } catch (e) {
     console.log("WS loop ended:", String(e));
   } finally {
+    reportState("socket_closed");
     try {
       await ws.close();
     } catch {

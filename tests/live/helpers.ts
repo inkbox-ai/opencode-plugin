@@ -90,12 +90,19 @@ export function assertNotErrorReply(body: string, label: string): void {
   }
 }
 
-// Collect inbound email ids currently visible in the remote mailbox.
-export async function inboundEmailIds(c: Inkbox, mailbox: string): Promise<Set<string>> {
+// Snapshot every inbound email in the fixed scenario window, across all pages.
+export async function inboundEmailIds(
+  c: Inkbox,
+  mailbox: string,
+  startDatetime: string,
+): Promise<Set<string>> {
   const ids = new Set<string>();
-  for await (const m of c.messages.list(mailbox, { direction: "inbound" as never, pageSize: 30 })) {
+  for await (const m of c.messages.list(mailbox, {
+    direction: "inbound" as never,
+    pageSize: 30,
+    startDatetime,
+  })) {
     ids.add((m as { id: string }).id);
-    if (ids.size >= 30) break;
   }
   return ids;
 }
@@ -106,10 +113,15 @@ export async function newInboundEmailFrom(
   mailbox: string,
   fromAddress: string,
   before: Set<string>,
+  startDatetime: string,
   accept?: (message: { id: string; subject?: string; snippet?: string }) => boolean,
 ): Promise<{ id: string; subject?: string; snippet?: string } | undefined> {
   const want = fromAddress.toLowerCase();
-  for await (const m of c.messages.list(mailbox, { direction: "inbound" as never, pageSize: 30 })) {
+  for await (const m of c.messages.list(mailbox, {
+    direction: "inbound" as never,
+    pageSize: 30,
+    startDatetime,
+  })) {
     const msg = m as { id: string; fromAddress?: string; subject?: string; snippet?: string };
     if (before.has(msg.id)) continue;
     if ((msg.fromAddress ?? "").toLowerCase() !== want) continue;
@@ -169,17 +181,37 @@ export async function waitTwoWayCall(
   const endedStatuses = new Set(["completed"]);
   const endedGraceMs = Number(process.env.LIVE_VOICE_ENDED_GRACE_S || "15") * 1000;
   let endedAt: number | undefined;
+  const observation = {
+    remoteSegments: 0,
+    localSegments: 0,
+    transcriptReadable: false,
+    callReadable: false,
+    status: "unknown",
+    useInkboxTts: null as boolean | null,
+    useInkboxStt: null as boolean | null,
+  };
   return pollUntil(
     "two-way call transcript",
     async () => {
-      const { remote, local } = await callSegments(aut, callId).catch(() => ({
-        remote: [],
-        local: [],
-      }));
+      const { remote, local } = await callSegments(aut, callId)
+        .then((segments) => {
+          observation.transcriptReadable = true;
+          return segments;
+        })
+        .catch(() => {
+          observation.transcriptReadable = false;
+          return { remote: [], local: [] };
+        });
+      observation.remoteSegments = remote.length;
+      observation.localSegments = local.length;
       if (remote.length > 0 && local.length > 0) return local.join(" | ");
 
       const call = await aut.calls.get(callId).catch(() => undefined);
       const status = (call?.status ?? "").toLowerCase();
+      observation.callReadable = call !== undefined;
+      observation.status = status || "unknown";
+      observation.useInkboxTts = call?.useInkboxTts ?? null;
+      observation.useInkboxStt = call?.useInkboxStt ?? null;
       const detail = () =>
         JSON.stringify({
           status: call?.status,
@@ -199,7 +231,10 @@ export async function waitTwoWayCall(
       return undefined;
     },
     timeoutMs,
-  );
+  ).catch((error: unknown) => {
+    const reason = error instanceof Error ? error.message : "two-way call proof failed";
+    throw new Error(`${reason}; observation=${JSON.stringify(observation)}`);
+  });
 }
 
 // Read from the driver owner: local is the scripted driver speech.
@@ -264,4 +299,36 @@ export async function askOverSms(
   });
   assertNotErrorReply(reply.text, "sms");
   return reply.text;
+}
+
+// One immutable lower bound spans baseline and polling; each paginated snapshot
+// also fixes its upper bound so newly arriving messages cannot shift offsets.
+export async function outboundTexts(inkbox: Inkbox, numberId: string, startDatetime: string) {
+  const endDatetime = new Date().toISOString();
+  const rows: Awaited<ReturnType<Inkbox["texts"]["list"]>> = [];
+  const seen = new Set<string>();
+  for (let offset = 0; ; offset += 200) {
+    const page = await inkbox.texts.list(numberId, {
+      limit: 200,
+      offset,
+      startDatetime,
+      endDatetime,
+    });
+    for (const message of page) {
+      if (message.direction.toLowerCase() === "outbound" && !seen.has(message.id)) {
+        seen.add(message.id);
+        rows.push(message);
+      }
+    }
+    if (page.length < 200) return rows;
+  }
+}
+
+// The mail service may append its standard footer according to organization
+// settings. Validate the complete delivered body, never strip arbitrary prose.
+export function isExactEmailReplyBody(body: string, expected: string): boolean {
+  const delivered = body.replace(/\r\n/g, "\n").trim();
+  return (
+    delivered === expected || delivered === `${expected}\n\nSent via Inkbox (https://inkbox.ai)`
+  );
 }

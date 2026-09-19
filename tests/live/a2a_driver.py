@@ -59,14 +59,6 @@ def _parts_text(parts: list[dict[str, Any]]) -> str:
     )
 
 
-def _wire_history_text(task: Any) -> str:
-    return "\n".join(
-        _parts_text(message.get("parts", []))
-        for message in task.raw.get("history", [])
-        if isinstance(message, dict)
-    )
-
-
 def _wire_history_messages(task: Any) -> list[str]:
     return [
         _parts_text(message.get("parts", []))
@@ -84,6 +76,13 @@ def _wire_worker_messages(task: Any) -> list[str]:
             and str(message.get("role", "")).lower() in {"agent", "role_agent"}
         )
     ]
+
+
+def _final_worker_text(task: Any) -> str:
+    messages = _wire_worker_messages(task)
+    if not messages:
+        raise AssertionError("Completed A2A task returned no agent answer")
+    return messages[-1]
 
 
 def _wait_for_history_message(
@@ -221,7 +220,7 @@ def _inbound_single(a2a: Any, target: Any, timeout: float, run: str) -> None:
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if completion not in _wire_history_text(final):
+        if completion not in _final_worker_text(final):
             raise AssertionError("Inbound single-turn completion token is missing")
     finally:
         _cancel_if_open(a2a, target, task.id)
@@ -233,9 +232,9 @@ def _inbound_multi(a2a: Any, target: Any, timeout: float, run: str) -> None:
     task = _send_task(
         a2a,
         target,
-        "First call inkbox_a2a_ask_caller to request the access code. "
-        "Do not complete or fail the task before the caller responds. "
-        "After the caller replies, call inkbox_a2a_complete and include both "
+        "Please verify my access code, which I have not provided yet. "
+        "Ask me for it and wait for my response before giving your final answer. "
+        "After I reply, include both "
         f"the supplied code and `{completion}` in the final answer.",
     )
     try:
@@ -260,7 +259,7 @@ def _inbound_multi(a2a: Any, target: Any, timeout: float, run: str) -> None:
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        history = _wire_history_text(final)
+        history = _final_worker_text(final)
         if answer not in history or completion not in history:
             raise AssertionError("Inbound multi-turn history is incomplete")
     finally:
@@ -353,11 +352,10 @@ def _outbound_single(
     outer = _send_task(
         a2a,
         target,
-        "Delegate a new task with inkbox_a2a_call to the Agent Card at "
-        f"{remote_card_url}. The delegated task text must contain "
-        f"`{inner_token}`. Wait for it with inkbox_a2a_check and do not "
-        "complete this outer task first. After the worker completes, call "
-        "inkbox_a2a_complete and include the worker's response in the answer.",
+        "Ask the agent at "
+        f"{remote_card_url} to handle a task identified by "
+        f"`{inner_token}`. Wait for that agent to finish before answering me, "
+        "then include their response in your final answer.",
     )
     inner = None
     try:
@@ -375,7 +373,7 @@ def _outbound_single(
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if worker_result not in _wire_history_text(final):
+        if worker_result not in _final_worker_text(final):
             raise AssertionError("Outbound single-turn worker result is missing")
     finally:
         if inner is not None:
@@ -397,12 +395,11 @@ def _outbound_multi(
     outer = _send_task(
         a2a,
         target,
-        "Delegate a new task with inkbox_a2a_call to the Agent Card at "
-        f"{remote_card_url}. The delegated task text must contain "
-        f"`{inner_token}`. The worker will request input; reply with "
-        f"`{answer}` using inkbox_a2a_reply, then wait again with "
-        "inkbox_a2a_check. Do not complete this outer task before the worker. "
-        "Finally call inkbox_a2a_complete with the worker's response.",
+        "Ask the agent at "
+        f"{remote_card_url} to handle a task identified by "
+        f"`{inner_token}`. That agent will need a verification value; give them "
+        f"`{answer}` when they ask. Wait for their finished result before "
+        "answering me, then include their response in your final answer.",
     )
     inner = None
     try:
@@ -427,7 +424,7 @@ def _outbound_multi(
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if worker_result not in _wire_history_text(final):
+        if worker_result not in _final_worker_text(final):
             raise AssertionError("Outbound multi-turn worker result is missing")
     finally:
         if inner is not None:
