@@ -48,11 +48,26 @@ export function hostedCallerReadiness(driverCaller: string, autCaller: string, m
 }
 
 export function hasSmsIntent(value: string): boolean {
-  const normalized = normalizedVoiceTokens(value).join(" ");
+  const normalized = normalizedVoiceTokens(value)
+    .join(" ")
+    .replace(/\bs m s\b/g, "sms");
   return (
     /\bsend\b.{0,80}\b(?:sms|text(?: message)?)\b/.test(normalized) ||
     /\b(?:text|sms) (?:me|the caller|the user|them|him|her)\b/.test(normalized)
   );
+}
+
+export function smsIntentEvidence(values: string[]) {
+  const normalized = values.map((value) => normalizedVoiceTokens(value).join(" "));
+  return {
+    rows: values.length,
+    sendVerbRows: normalized.filter((value) => /\bsend\b/.test(value)).length,
+    smsRows: normalized.filter((value) => /\bsms\b/.test(value)).length,
+    spelledSmsRows: normalized.filter((value) => /\bs m s\b/.test(value)).length,
+    textRows: normalized.filter((value) => /\btext\b/.test(value)).length,
+    recognizedRows: values.filter(hasSmsIntent).length,
+    maxWords: Math.max(0, ...values.map((value) => normalizedVoiceTokens(value).length)),
+  };
 }
 
 export function wasAcceptedForDelivery(message: {

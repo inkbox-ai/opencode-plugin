@@ -30,6 +30,9 @@ const ACTION_PATTERNS = [
 export function hasHostedSmsCommitment(value: string, source: "action" | "transcript"): boolean {
   const patterns = source === "action" ? ACTION_PATTERNS : TRANSCRIPT_PATTERNS;
   const clauses = value
+    // Speech transcripts can spell the initialism with spaces or punctuation.
+    // Normalize it before periods are interpreted as clause boundaries.
+    .replace(/\bs[\s.-]+m[\s.-]+s\b/gi, "SMS")
     .split(/(?:[.!?;:\n]+|\s+[—–]\s+|\s+--\s+)/)
     .map((part) => part.trim())
     .filter(Boolean);

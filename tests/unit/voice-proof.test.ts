@@ -5,11 +5,27 @@ import {
   hasSmsIntent,
   hostedCallerReadiness,
   normalizedVoiceTokens,
+  smsIntentEvidence,
   voiceMarkerEvidence,
   wasAcceptedForDelivery,
 } from "../live/voice-proof.js";
 
 describe("hosted live voice proof normalization", () => {
+  it("reports action lexical evidence without disclosing action text", () => {
+    const evidence = smsIntentEvidence(["Send S.M.S. private-content"]);
+    expect(evidence).toEqual({
+      rows: 1,
+      sendVerbRows: 1,
+      smsRows: 0,
+      spelledSmsRows: 1,
+      textRows: 0,
+      recognizedRows: 1,
+      maxWords: 6,
+    });
+    expect(JSON.stringify(evidence)).not.toContain("private-content");
+    expect(smsIntentEvidence([]).maxWords).toBe(0);
+  });
+
   it("requires the full caller request in both call legs, not just the driver recording", () => {
     const complete = "After we hang up, send me an SMS saying zulu alpha bravo.";
     const clipped = "After we hang up, send me an SMS saying zulu alpha.";
@@ -65,6 +81,22 @@ describe("hosted live voice proof normalization", () => {
     expect(hasSmsIntent("Send a text message containing the marker after the call.")).toBe(true);
     expect(hasSmsIntent("Review the text-message history.")).toBe(false);
   });
+
+  it.each(["S M S", "S.M.S.", "S-M-S"])(
+    "recognizes the spoken acronym %s without dropping the send requirement",
+    (acronym) => {
+      expect(hasSmsIntent(`Send ${acronym} zulu alpha bravo`)).toBe(true);
+      expect(hasAfterCallSmsIntent(`After we hang up, send me ${acronym} zulu alpha bravo`)).toBe(
+        true,
+      );
+      expect(hasSmsIntent(`Review ${acronym} history`)).toBe(false);
+    },
+  );
+
+  it.each(["Send S M X", "Send S M system", "Send ASM S", "Send S MMS"])(
+    "does not turn unrelated letters into SMS intent: %s",
+    (value) => expect(hasSmsIntent(value)).toBe(false),
+  );
 
   it("does not count a pre-delivery policy block as an accepted SMS", () => {
     expect(wasAcceptedForDelivery({ deliveryStatus: "blocked_spam_filter" })).toBe(false);

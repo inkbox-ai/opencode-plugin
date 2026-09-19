@@ -28,6 +28,7 @@ import {
   containsVoiceMarker,
   hasSmsIntent,
   hostedCallerReadiness,
+  smsIntentEvidence,
   voiceMarkerEvidence,
   wasAcceptedForDelivery,
 } from "./voice-proof.js";
@@ -491,6 +492,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
             `aut_caller_ready=${autCallerReady} ` +
             `action_ready=${actionReady} open_actions=${openActions.length} ` +
             `sms_actions=${smsActionCount} marker_actions=${markerActionCount} ` +
+            `action_lexical=${JSON.stringify(smsIntentEvidence(actionEvidence))} ` +
             `aut_caller_marker=${JSON.stringify(voiceMarkerEvidence([autCaller], HOSTED_MARKER))}`;
           if (twoWayReady && callerReady && actionReady) break;
           await new Promise((resolve) => setTimeout(resolve, 5_000));

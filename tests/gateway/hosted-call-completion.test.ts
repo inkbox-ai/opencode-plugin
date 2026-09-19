@@ -112,6 +112,29 @@ afterEach(() => {
 });
 
 describe("hosted call completion", () => {
+  it.each(["S M S", "S.M.S.", "S-M-S"])(
+    "recognizes %s before splitting transcript clauses, preserving timing and negation",
+    (acronym) => {
+      expect(hasHostedSmsCommitment(`Send ${acronym} the release address.`, "action")).toBe(true);
+      expect(
+        hasHostedSmsCommitment(
+          `After we hang up, send me ${acronym} the release address.`,
+          "transcript",
+        ),
+      ).toBe(true);
+      expect(hasHostedSmsCommitment(`Do not send ${acronym} the release address.`, "action")).toBe(
+        false,
+      );
+      expect(hasHostedSmsCommitment(`Send me ${acronym} right now.`, "transcript")).toBe(false);
+      expect(hasHostedSmsCommitment(`Review ${acronym} history.`, "action")).toBe(false);
+    },
+  );
+
+  it.each(["Send S M X", "Send S M system", "Send ASM S", "Send S MMS"])(
+    "does not create a hosted commitment from unrelated letters: %s",
+    (value) => expect(hasHostedSmsCommitment(value, "action")).toBe(false),
+  );
+
   it("rejects a corrupt durable journal before dispatching any reconciliation", async () => {
     fs.writeFileSync(path.join(dir, "hosted-call-completions.json"), "{broken", { mode: 0o600 });
     const d = deps([]);
