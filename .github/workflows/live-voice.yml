@@ -93,7 +93,7 @@ jobs:
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             HOSTED_MARKER="$(node scripts/nato-marker.mjs "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly: $HOSTED_MARKER. Save one post-call action now, with both title and details exactly: Send SMS $HOSTED_MARKER. After the tool succeeds, read back the exact three-word SMS body. Do not text during this call."
+            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS containing exactly: $HOSTED_MARKER. Save one post-call action now, with both title and details exactly: Send SMS $HOSTED_MARKER. After the tool succeeds, read back the exact three-word SMS body."
             export VOICE_DRIVER_ANSWER_CONTAINS="$HOSTED_MARKER"
             export VOICE_DRIVER_LISTEN=180
             export VOICE_DRIVER_AUTO_STOP=false
