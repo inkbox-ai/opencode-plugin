@@ -58,6 +58,15 @@ export interface HostedCallCompletionDeps {
 
 const PRE_DISPATCH_RETRY_DELAYS_MS = [250, 1_000] as const;
 
+const EXACT_SMS_BODY_INSTRUCTIONS =
+  "When the caller specifies an exact message body, copy it verbatim, including every word. " +
+  "Prefer the explicit body recorded in an open post-call action over incidental differences " +
+  "in speech transcription. Do not merge alternate transcriptions into that recorded body. " +
+  "Override the recorded body only when the caller clearly corrects or cancels that action later. " +
+  "Copy the requested body, not the action title, instructions, or a confirmation. " +
+  "Do not replace it with a summary or an acknowledgement. Verify the body before calling the send tool. " +
+  "After a send is accepted, do not send another message merely to correct its wording.";
+
 function escapePromptData(value: string): string {
   return value.replaceAll("[inkbox:", "[inkbox\u200b:");
 }
@@ -215,7 +224,7 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
                 "Do not execute any non-SMS post-call action in this correction turn.",
                 "Do not delegate this send to another session or agent.",
                 `Exact open SMS commitment:\n${escapePromptData(smsCommitment ?? "")}`,
-                "If the caller specified an exact message body, copy it verbatim from the action or transcript. Do not replace it with an acknowledgement or summary.",
+                EXACT_SMS_BODY_INSTRUCTIONS,
                 `Call inkbox_send_sms exactly once with to="${escapePromptData(remote)}". Do not use conversationId, send to another number, or make a second attempt. Plain-text replies are suppressed.`,
               ].join("\n\n")
             : [
@@ -243,7 +252,7 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
                   ? `A promised SMS must use inkbox_send_sms exactly once with to="${escapePromptData(remote)}". Do not use conversationId, a contact-derived number, or delegate the send to another session or agent. Count it complete only when the tool reports success; do not retry inside this turn.`
                   : undefined,
                 "Complete every still-open commitment once. Do not repeat work already completed during the call. If nothing remains, return [SILENT]; plain text is suppressed.",
-                "If the caller specified an exact message body, copy it verbatim from the action or transcript. Do not replace it with an acknowledgement or summary.",
+                EXACT_SMS_BODY_INSTRUCTIONS,
               ]
                 .filter(Boolean)
                 .join("\n\n");
