@@ -1312,6 +1312,79 @@ describe("createA2AHandler", () => {
     await handler.close();
   });
 
+  it("does not complete a resumed caller turn with the previous separately hosted question", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    let taskState = "submitted";
+    const messages: any[] = [];
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      messages.push({ role: "agent", parts: [{ text: payload.text }] });
+      taskState =
+        payload.intent === "ask_caller"
+          ? "input_required"
+          : payload.intent === "complete"
+            ? "completed"
+            : "working";
+      return { state: taskState };
+    });
+    const runA2A = vi.fn(async (_chatKey: string, _prompt: string, context: any) => {
+      if (context.messageId === "message-2") return "Your code is code-123.";
+      // The tool host receives a serialized durable context, not this object.
+      const separateContext = await import("../../src/a2a-context.js");
+      const toolContext = JSON.parse(JSON.stringify(context));
+      separateContext.fenceActiveA2AReplyIntent("separate-session", toolContext);
+      await a2aReply("task-1", { intent: "ask_caller", text: "What is your access code?" });
+      separateContext.commitActiveA2ATurn("separate-session", toolContext);
+      expect(context.replyIntentCommitted).toBe(false);
+      // The caller can answer before the first model turn has finished.
+      messages.push({ role: "caller", messageId: "message-2", parts: [{ text: "code-123" }] });
+      taskState = "working";
+      return "What is your access code?";
+    });
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => taskSnapshot({ state: taskState, messages })),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      config: { gateway: { a2aProgressIntervalSeconds: 0 } } as any,
+    });
+    try {
+      await handler.handle(event());
+      await vi.waitFor(() =>
+        expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized"),
+      );
+      expect(a2aReply.mock.calls.map(([, payload]) => payload.intent)).toEqual([
+        "progress",
+        "ask_caller",
+      ]);
+      expect(taskState).toBe("working");
+      const followUp = event();
+      followUp.eventType = "a2a.task.message";
+      followUp.body.id = "evt-2";
+      followUp.body.data.message_id = "message-2";
+      followUp.body.data.parts = [{ text: "code-123" }];
+      await handler.handle(followUp);
+      await vi.waitFor(() => expect(taskState).toBe("completed"));
+      expect(a2aReply).toHaveBeenLastCalledWith("task-1", {
+        intent: "complete",
+        text: "Your code is code-123.",
+      });
+      expect(
+        a2aReply.mock.calls.filter(([, payload]) => payload.intent === "complete"),
+      ).toHaveLength(1);
+    } finally {
+      await handler.close();
+    }
+  });
+
   it("acknowledges a fenced drain requested by a separate tool host", async () => {
     const state = createStateStore(
       `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
