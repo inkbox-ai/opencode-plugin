@@ -164,9 +164,23 @@ describe("live driver greeting turn-taking", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(socket.spoken().map((frame) => frame.delta)).toEqual(["Hello?", "Scripted request"]);
     expect(console.log).toHaveBeenCalledWith(
-      'voice_driver_state={"reason":"request_spoken","partialFrames":1,"finalFrames":1,"emptyFrames":2,"utterances":2}',
+      'voice_driver_state={"reason":"request_spoken","partialFrames":1,"finalFrames":1,"emptyFrames":2,"utterances":2,"bargeIns":0}',
     );
     await stop(socket, running);
+  });
+
+  it("counts playback interruptions without treating them as an answer", async () => {
+    vi.stubEnv("VOICE_DRIVER_REASK", "20");
+    vi.stubEnv("VOICE_DRIVER_LISTEN", "180");
+    const { socket, running } = await startDriver(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    socket.push({ event: "barge_in" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(socket.spoken()).toHaveLength(3);
+    await stop(socket, running);
+    expect(console.log).toHaveBeenCalledWith(
+      'voice_driver_state={"reason":"socket_closed","partialFrames":0,"finalFrames":0,"emptyFrames":0,"utterances":3,"bargeIns":1}',
+    );
   });
 
   it("asks a silent peer after the configured initial delay", async () => {

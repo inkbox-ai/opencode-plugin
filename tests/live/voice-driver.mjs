@@ -81,7 +81,7 @@ async function callWsHandler(ws) {
   console.log("call WS accepted");
   let answered = false;
   let lastHeardAt = 0;
-  const state = { partialFrames: 0, finalFrames: 0, emptyFrames: 0, utterances: 0 };
+  const state = { partialFrames: 0, finalFrames: 0, emptyFrames: 0, utterances: 0, bargeIns: 0 };
   const reportState = (reason) => {
     console.log(`voice_driver_state=${JSON.stringify({ reason, ...state })}`);
   };
@@ -170,6 +170,8 @@ async function callWsHandler(ws) {
             answered = true;
           }
         }
+      } else if (ev.event === "barge_in") {
+        state.bargeIns += 1;
       } else if (ev.event === "stop") {
         console.log("call stop");
         break;

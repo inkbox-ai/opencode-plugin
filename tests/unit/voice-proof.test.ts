@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   containsVoiceMarker,
@@ -11,6 +12,27 @@ import {
 } from "../live/voice-proof.js";
 
 describe("hosted live voice proof normalization", () => {
+  it("keeps the actual hosted request in one complete spoken sentence", () => {
+    const workflow = readFileSync(".github/workflows/live-voice.yml", "utf8");
+    const template = workflow.match(/export VOICE_DRIVER_LINE="([^"]+)"/)?.[1];
+    if (!template) throw new Error("Hosted workflow request is missing");
+    const marker = "zulu alpha bravo";
+    const request = template.replaceAll("$HOSTED_MARKER", marker);
+    // A standalone prohibition invited an acknowledgement that cut off the
+    // request before its marker; only the complete instruction ends a sentence.
+    expect(request.match(/[.!?]/g)).toEqual(["."]);
+    expect(request).toMatch(/^Do not text during this call, but after we hang up/);
+    expect(request).toContain(`send me exactly one SMS with body exactly ${marker}`);
+    expect(request).toContain(
+      `one post-call action now titled Send SMS with details exactly ${marker}`,
+    );
+    expect(request).toContain("after the tool succeeds read back the three-word body.");
+    expect(hostedCallerReadiness(request, request, marker).callerReady).toBe(true);
+    expect(hostedCallerReadiness(request, "Do not text during this call", marker).callerReady).toBe(
+      false,
+    );
+  });
+
   it("reports action lexical evidence without disclosing action text", () => {
     const evidence = smsIntentEvidence(["Send S.M.S. private-content"]);
     expect(evidence).toEqual({

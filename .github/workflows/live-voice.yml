@@ -93,7 +93,7 @@ jobs:
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             HOSTED_MARKER="$(node scripts/nato-marker.mjs "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send one SMS with exactly these words: $HOSTED_MARKER. Save one post-call action titled Send SMS, with details exactly $HOSTED_MARKER. After the tool succeeds, read back the SMS body."
+            export VOICE_DRIVER_LINE="Do not text during this call, but after we hang up send me exactly one SMS with body exactly $HOSTED_MARKER, and create one post-call action now titled Send SMS with details exactly $HOSTED_MARKER, then after the tool succeeds read back the three-word body."
             export VOICE_DRIVER_ANSWER_CONTAINS="$HOSTED_MARKER"
             export VOICE_DRIVER_LISTEN=180
             export VOICE_DRIVER_AUTO_STOP=false
@@ -143,7 +143,7 @@ jobs:
               if state.get("reason") not in {"request_spoken", "greeting_timeout", "socket_closed"}:
                   continue
               safe = {"reason": state["reason"]}
-              for key in ("partialFrames", "finalFrames", "emptyFrames", "utterances"):
+              for key in ("partialFrames", "finalFrames", "emptyFrames", "utterances", "bargeIns"):
                   if type(state.get(key)) is int and state[key] >= 0:
                       safe[key] = state[key]
               print("voice_driver_state=" + json.dumps(safe, sort_keys=True))
