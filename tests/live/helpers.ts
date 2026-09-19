@@ -90,12 +90,19 @@ export function assertNotErrorReply(body: string, label: string): void {
   }
 }
 
-// Collect inbound email ids currently visible in the remote mailbox.
-export async function inboundEmailIds(c: Inkbox, mailbox: string): Promise<Set<string>> {
+// Snapshot every inbound email in the fixed scenario window, across all pages.
+export async function inboundEmailIds(
+  c: Inkbox,
+  mailbox: string,
+  startDatetime: string,
+): Promise<Set<string>> {
   const ids = new Set<string>();
-  for await (const m of c.messages.list(mailbox, { direction: "inbound" as never, pageSize: 30 })) {
+  for await (const m of c.messages.list(mailbox, {
+    direction: "inbound" as never,
+    pageSize: 30,
+    startDatetime,
+  })) {
     ids.add((m as { id: string }).id);
-    if (ids.size >= 30) break;
   }
   return ids;
 }
@@ -106,10 +113,15 @@ export async function newInboundEmailFrom(
   mailbox: string,
   fromAddress: string,
   before: Set<string>,
+  startDatetime: string,
   accept?: (message: { id: string; subject?: string; snippet?: string }) => boolean,
 ): Promise<{ id: string; subject?: string; snippet?: string } | undefined> {
   const want = fromAddress.toLowerCase();
-  for await (const m of c.messages.list(mailbox, { direction: "inbound" as never, pageSize: 30 })) {
+  for await (const m of c.messages.list(mailbox, {
+    direction: "inbound" as never,
+    pageSize: 30,
+    startDatetime,
+  })) {
     const msg = m as { id: string; fromAddress?: string; subject?: string; snippet?: string };
     if (before.has(msg.id)) continue;
     if ((msg.fromAddress ?? "").toLowerCase() !== want) continue;

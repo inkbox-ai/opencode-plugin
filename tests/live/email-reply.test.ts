@@ -28,7 +28,8 @@ describe.skipIf(!LIVE)("live email reply", () => {
     const autEmail = await mailboxOf(aut);
 
     const tag = nonce();
-    const before = await inboundEmailIds(remote, remoteEmail);
+    const since = new Date(Date.now() - 5 * 60_000).toISOString();
+    const before = await inboundEmailIds(remote, remoteEmail, since);
     await remote.messages.send(remoteEmail, {
       to: [autEmail],
       subject: `Reachability probe ${tag}`,
@@ -36,7 +37,7 @@ describe.skipIf(!LIVE)("live email reply", () => {
     });
 
     const reply = await pollUntil("email reply", () =>
-      newInboundEmailFrom(remote, remoteEmail, autEmail, before, (message) => {
+      newInboundEmailFrom(remote, remoteEmail, autEmail, before, since, (message) => {
         const content = `${message.subject ?? ""}\n${message.snippet ?? ""}`;
         return content.includes("REPLY_OK") && content.includes(tag);
       }),
@@ -55,20 +56,24 @@ describe.skipIf(!LIVE)("live email reply", () => {
     const remoteEmail = await mailboxOf(remote);
     const autEmail = await mailboxOf(aut);
 
-    const before = await inboundEmailIds(remote, remoteEmail);
+    const tag = nonce();
+    const since = new Date(Date.now() - 5 * 60_000).toISOString();
+    const before = await inboundEmailIds(remote, remoteEmail, since);
     await remote.messages.send(remoteEmail, {
       to: [autEmail],
-      subject: "Quick check",
-      bodyText: "Please reply with the single word CONFIRMED and nothing else.",
+      subject: `Quick check ${tag}`,
+      bodyText: `Please reply with exactly CONFIRMED ${tag} and nothing else.`,
     });
 
     const reply = await pollUntil("email reply", () =>
-      newInboundEmailFrom(remote, remoteEmail, autEmail, before, (message) =>
-        `${message.subject ?? ""}\n${message.snippet ?? ""}`.toLowerCase().includes("confirmed"),
-      ),
+      newInboundEmailFrom(remote, remoteEmail, autEmail, before, since, (message) => {
+        const content = (message.snippet ?? "").toLowerCase();
+        return content.includes("confirmed") && content.includes(tag);
+      }),
     );
     const body = `${reply.subject ?? ""}\n${reply.snippet ?? ""}`;
     assertNotErrorReply(body, "email");
-    expect(body.toLowerCase().includes("confirmed")).toBe(true);
+    const response = (reply.snippet ?? "").toLowerCase();
+    expect(response.includes("confirmed") && response.includes(tag)).toBe(true);
   });
 });
