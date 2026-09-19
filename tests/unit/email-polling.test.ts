@@ -1,6 +1,6 @@
 import { Inkbox } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { inboundEmailIds, newInboundEmailFrom } from "../live/helpers.js";
+import { inboundEmailIds, isExactEmailReplyBody, newInboundEmailFrom } from "../live/helpers.js";
 
 const mailbox = "driver@example.com";
 const sender = "agent@example.com";
@@ -52,6 +52,26 @@ afterEach(() => {
 });
 
 describe("live email polling", () => {
+  it("allows only the exact authored answer and the documented transport footer", () => {
+    const expected = "CONFIRMED current-run";
+    const footer = "\n\nSent via Inkbox (https://inkbox.ai)";
+    expect(isExactEmailReplyBody(expected, expected)).toBe(true);
+    expect(isExactEmailReplyBody(expected + footer, expected)).toBe(true);
+    expect(isExactEmailReplyBody((expected + footer).replaceAll("\n", "\r\n"), expected)).toBe(
+      true,
+    );
+    for (const body of [
+      `Here is your answer: ${expected}`,
+      `${expected} plus additional content`,
+      `${expected}${footer} plus additional content`,
+      `${expected}${footer}${footer}`,
+      `${expected}\n\nSent by a different service`,
+      `CONFIRMED old-run${footer}`,
+      "CONFIRMED", // The current nonce only in an inherited subject is insufficient.
+    ])
+      expect(isExactEmailReplyBody(body, expected)).toBe(false);
+  });
+
   it("keeps the inclusive bound on every SDK page through a delayed reply", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);

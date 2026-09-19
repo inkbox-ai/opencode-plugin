@@ -7,6 +7,7 @@ import {
   assertNotErrorReply,
   client,
   inboundEmailIds,
+  isExactEmailReplyBody,
   LIVE,
   mailboxOf,
   newInboundEmailFrom,
@@ -75,6 +76,9 @@ describe.skipIf(!LIVE)("live email reply", () => {
     const detail = await remote.messages.get(remoteEmail, reply.id);
     const body = detail.bodyText ?? "";
     assertNotErrorReply(body, "email");
-    expect(body.trim().replace(/\s+/g, " ")).toBe(`CONFIRMED ${tag}`);
+    expect(
+      isExactEmailReplyBody(body, `CONFIRMED ${tag}`),
+      "Email response must contain only the requested answer and optional standard transport footer",
+    ).toBe(true);
   });
 });

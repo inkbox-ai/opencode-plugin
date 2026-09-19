@@ -323,3 +323,12 @@ export async function outboundTexts(inkbox: Inkbox, numberId: string, startDatet
     if (page.length < 200) return rows;
   }
 }
+
+// The mail service may append its standard footer according to organization
+// settings. Validate the complete delivered body, never strip arbitrary prose.
+export function isExactEmailReplyBody(body: string, expected: string): boolean {
+  const delivered = body.replace(/\r\n/g, "\n").trim();
+  return (
+    delivered === expected || delivered === `${expected}\n\nSent via Inkbox (https://inkbox.ai)`
+  );
+}
