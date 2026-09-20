@@ -8,6 +8,12 @@ import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/limits.js
 
 function makeIdentity() {
   return {
+    getMessage: vi.fn(async () => ({
+      id: "parent-1",
+      threadId: "thread-1",
+      messageId: "<parent@example.com>",
+      replyAllRecipients: { to: ["sponsor@example.com"], cc: ["fred@example.com"] },
+    })),
     sendEmail: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "email-1" })),
     sendText: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "sms-1" })),
     sendIMessage: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "im-1" })),
@@ -53,6 +59,31 @@ describe("deliverReply suppression", () => {
 });
 
 describe("deliverReply email", () => {
+  it.each(["parent", "audience"])(
+    "rejects changed Companion %s without a send or recipient rewrite",
+    async (changed) => {
+      const identity = makeIdentity();
+      identity.getMessage.mockResolvedValue({
+        id: "parent-1",
+        threadId: changed === "parent" ? "other-thread" : "thread-1",
+        messageId: "<parent@example.com>",
+        replyAllRecipients: { to: ["outside@example.com"], cc: [] },
+      });
+      const target: ReplyTarget = {
+        channel: "email",
+        conversationId: "thread-1",
+        companion: {
+          replyToMessageId: "parent-1",
+          to: ["sponsor@example.com"],
+          cc: ["fred@example.com"],
+        },
+      };
+      await expect(
+        deliverReply(makeRuntime(identity), target, "reply", makeLogger()),
+      ).rejects.toThrow(changed === "parent" ? "parent is unavailable" : "audience differs");
+      expect(identity.sendEmail).not.toHaveBeenCalled();
+    },
+  );
   it("sends to the target with a single Re: prefix and threads by message id", async () => {
     const target: ReplyTarget = {
       channel: "email",

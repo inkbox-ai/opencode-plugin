@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ActiveA2ATurn } from "../a2a-context.js";
+import type { CompanionTurn } from "./companion.js";
 import type { ReplyTarget, TurnKind } from "./types.js";
 
 export interface DurableHostedCapture {
@@ -12,6 +13,8 @@ export interface DurableHostedCapture {
 }
 
 export type DurableTurnState =
+  | "hydrating"
+  | "paused"
   | "queued"
   | "submitting"
   | "submitted"
@@ -22,6 +25,7 @@ export type DurableTurnState =
   | "interrupted";
 
 export interface DurableTurn {
+  companion?: CompanionTurn;
   id: string;
   messageID: string;
   chatKey: string;
@@ -71,17 +75,19 @@ export interface StateStore {
   // Merge-and-write. Atomic (tmp file + rename) so a crash never leaves a
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
-  setSession(chatKey: string, sessionID: string): void;
+  setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
   getSession(chatKey: string): string | undefined;
-  clearSession(chatKey: string): void;
+  clearSession(chatKey: string, owner?: { turnId: string; ownerId: string }): void;
   setReplyTarget(chatKey: string, target: ReplyTarget): void;
   getReplyTarget(chatKey: string): ReplyTarget | undefined;
   saveTurn(turn: DurableTurn): void;
+  reserveTurns(turns: DurableTurn[]): DurableTurn[];
   updateTurn(id: string, patch: Partial<DurableTurn>): DurableTurn | undefined;
   transitionTurn(
     id: string,
     expected: DurableTurnState[],
     patch: Partial<DurableTurn>,
+    ownerId?: string,
   ): DurableTurn | undefined;
   getTurn(id: string): DurableTurn | undefined;
   listTurns(): DurableTurn[];
@@ -115,7 +121,8 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           typeof raw.replyTargets === "object" && raw.replyTargets ? raw.replyTargets : {},
         permissions: typeof raw.permissions === "object" && raw.permissions ? raw.permissions : {},
       };
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       loaded = { sessions: {}, turns: {}, replyTargets: {}, permissions: {} };
     }
     return loaded;
@@ -125,9 +132,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
     const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flush: true });
     fs.renameSync(tmp, filePath);
     fs.chmodSync(filePath, 0o600);
+    const directory = fs.openSync(dir, "r");
+    try {
+      fs.fsyncSync(directory);
+    } finally {
+      fs.closeSync(directory);
+    }
   }
 
   function mutate<T>(change: (state: GatewayState) => [GatewayState, T]): T {
@@ -163,6 +176,21 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
     }
   }
 
+  function checkSessionOwner(
+    state: GatewayState,
+    owner?: { turnId: string; ownerId: string },
+  ): void {
+    if (!owner) return;
+    const turn = state.turns[owner.turnId];
+    if (
+      !turn ||
+      turn.ownerId !== owner.ownerId ||
+      (turn.leaseUntil ?? 0) <= Date.now() ||
+      !["hydrating", "queued"].includes(turn.state)
+    )
+      throw new Error("Durable turn lease was lost.");
+  }
+
   return {
     filePath,
     read,
@@ -172,17 +200,18 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
         return [next, next];
       });
     },
-    setSession(chatKey, sessionID) {
-      mutate((state) => [
-        { ...state, sessions: { ...state.sessions, [chatKey]: sessionID } },
-        undefined,
-      ]);
+    setSession(chatKey, sessionID, owner) {
+      mutate((state) => {
+        checkSessionOwner(state, owner);
+        return [{ ...state, sessions: { ...state.sessions, [chatKey]: sessionID } }, undefined];
+      });
     },
     getSession(chatKey) {
       return read().sessions[chatKey];
     },
-    clearSession(chatKey) {
+    clearSession(chatKey, owner) {
       mutate((state) => {
+        checkSessionOwner(state, owner);
         const sessions = { ...state.sessions };
         delete sessions[chatKey];
         return [{ ...state, sessions }, undefined];
@@ -204,11 +233,21 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           .filter(
             (candidate) =>
               !candidate.hostedCapture &&
+              !candidate.companion &&
               ["completed", "delivered", "failed", "interrupted"].includes(candidate.state),
           )
           .sort((a, b) => b.updatedAt - a.updatedAt);
         for (const stale of terminal.slice(200)) delete turns[stale.id];
         return [{ ...state, turns }, undefined];
+      });
+    },
+    reserveTurns(candidates) {
+      return mutate((state) => {
+        const turns = { ...state.turns };
+        for (const candidate of candidates) {
+          if (!turns[candidate.id]) turns[candidate.id] = candidate;
+        }
+        return [{ ...state, turns }, candidates.map((candidate) => turns[candidate.id])];
       });
     },
     updateTurn(id, patch) {
@@ -219,10 +258,12 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
         return [{ ...state, turns: { ...state.turns, [id]: turn } }, turn];
       });
     },
-    transitionTurn(id, expected, patch) {
+    transitionTurn(id, expected, patch, ownerId) {
       return mutate((state) => {
         const current = state.turns[id];
         if (!current || !expected.includes(current.state)) return [state, undefined];
+        if (ownerId && (current.ownerId !== ownerId || (current.leaseUntil ?? 0) <= Date.now()))
+          return [state, undefined];
         const turn = { ...current, ...patch, updatedAt: Date.now() };
         return [{ ...state, turns: { ...state.turns, [id]: turn } }, turn];
       });
@@ -237,11 +278,30 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
       return mutate((state) => {
         const current = state.turns[id];
         if (!current) return [state, undefined];
+        const companion = current.companion;
+        if (
+          companion &&
+          Object.values(state.turns).some(
+            (candidate) =>
+              candidate.id !== id &&
+              candidate.chatKey === current.chatKey &&
+              candidate.companion &&
+              (candidate.state === "paused" ||
+                (!["completed", "delivered", "failed", "interrupted"].includes(candidate.state) &&
+                  (candidate.companion.initialization ||
+                    (!companion.initialization &&
+                      candidate.companion.metadata.sequence < companion.metadata.sequence)))),
+          )
+        ) {
+          return [state, undefined];
+        }
         const conflictingChatOwner = Object.values(state.turns).some(
           (candidate) =>
             candidate.id !== id &&
             candidate.chatKey === current.chatKey &&
-            ["queued", "submitting", "submitted", "delivery_started"].includes(candidate.state) &&
+            ["hydrating", "queued", "submitting", "submitted", "delivery_started"].includes(
+              candidate.state,
+            ) &&
             Boolean(candidate.ownerId) &&
             candidate.ownerId !== ownerId &&
             (candidate.leaseUntil ?? 0) > Date.now(),

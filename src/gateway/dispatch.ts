@@ -2,6 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import type { BurstBuffer } from "./burst.js";
+import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
 import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
@@ -13,6 +14,7 @@ import type {
   Channel,
   GatewayLogger,
   InboundMessage,
+  ReplyTarget,
   SenderAgentIdentity,
   SessionManager,
   VerifiedEvent,
@@ -135,7 +137,7 @@ async function selfAddresses(inkbox: InkboxRuntime): Promise<Set<string>> {
   }
 }
 
-function senderAllowed(
+export function senderAllowed(
   from: string,
   contactId: string | undefined,
   g: ResolvedGatewayConfig,
@@ -180,7 +182,7 @@ function extractInbound(
     const r = resourceOf(body, "text_message");
     return {
       resource: r,
-      from: str(r?.remote_phone_number),
+      from: str(r?.sender_phone_number) ?? str(r?.remote_phone_number),
       text: str(r?.text) ?? "",
       conversationId: str(r?.conversation_id),
       messageId: str(r?.id),
@@ -189,7 +191,7 @@ function extractInbound(
   const r = resourceOf(body, "message");
   return {
     resource: r,
-    from: str(r?.remote_number),
+    from: str(r?.sender_number) ?? str(r?.remote_number),
     text: str(r?.content) ?? "",
     conversationId: str(r?.conversation_id),
     messageId: str(r?.id),
@@ -202,6 +204,77 @@ async function handleInbound(
   event: VerifiedEvent,
 ): Promise<boolean> {
   const info = extractInbound(channel, event.body);
+  const companion = Object.hasOwn(event.body, "companion")
+    ? event.body.companion
+    : record(event.body.data)?.companion;
+  if (companion !== undefined) {
+    if (!event.verified || !deps.sessions.acceptCompanion) {
+      throw new Error("Companion mode requires verified delivery and a compatible receiver.");
+    }
+    const metadata = companionMetadata(companion);
+    const expectedChannel = channel === "email" ? "mail" : channel === "sms" ? "phone" : channel;
+    if (
+      metadata.channel !== expectedChannel ||
+      !info.from ||
+      !info.messageId ||
+      (info.conversationId ?? info.threadId) !== metadata.conversation_id
+    ) {
+      throw new Error("Companion conversation does not match the received message.");
+    }
+    const identity = await deps.inkbox.getIdentity();
+    if (!identity.id || !identity.agentHandle)
+      throw new Error("Companion identity is unavailable.");
+    let target: ReplyTarget | undefined;
+    if (metadata.phase === "ordinary") {
+      const contact = await deps.contacts.resolve(info.from);
+      if (!senderAllowed(info.from, contact.contactId, deps.config.gateway)) {
+        throw new Error("Companion conversation sender is not locally permitted.");
+      }
+      target =
+        channel === "email"
+          ? {
+              channel,
+              conversationId: metadata.conversation_id,
+              subject: info.subject,
+              companion: {
+                replyToMessageId: info.messageId,
+                to: [
+                  info.from,
+                  ...(Array.isArray(info.resource?.to_addresses)
+                    ? (info.resource.to_addresses as string[])
+                    : []),
+                ].filter((address) => address !== identity.emailAddress),
+                cc: (Array.isArray(info.resource?.cc_addresses)
+                  ? (info.resource.cc_addresses as string[])
+                  : []
+                ).filter((address) => address !== identity.emailAddress),
+              },
+            }
+          : { channel, conversationId: metadata.conversation_id };
+    }
+    await deps.sessions.acceptCompanion(
+      {
+        metadata,
+        identityId: identity.id,
+        handle: identity.agentHandle,
+        sourceId: info.messageId,
+        from: info.from,
+        initialization: metadata.phase === "initialization",
+        mailBodyPending:
+          channel === "email" &&
+          (info.resource?.body_truncated === true ||
+            ["truncated", "unavailable"].includes(String(info.resource?.body_state)) ||
+            (info.resource?.has_attachments === true &&
+              !Array.isArray(info.resource?.attachments)) ||
+            typeof info.resource?.body !== "string"),
+        subject: info.subject,
+      },
+      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
+      target,
+    );
+    deps.logger.info("companion.accepted", { chatKey: companionChatKey(identity.id, metadata) });
+    return true;
+  }
   const from = info.from;
   if (!from) {
     deps.logger.warn("dispatch.no_sender", { channel });
@@ -421,6 +494,16 @@ async function handleDeliveryFailure(
   const r = resourceOf(event.body, isText ? "text_message" : "message");
   if (str(r?.direction)?.toLowerCase() === "inbound") return true;
   const messageId = str(r?.id);
+  const companionConversationId = str(r?.conversation_id) ?? str(r?.thread_id);
+  const channel = isImessage ? "imessage" : isText ? "sms" : "email";
+  if (deps.sessions.ownsCompanionDelivery?.(channel, messageId, companionConversationId)) {
+    deps.logger.warn("companion.reply_failed", {
+      type,
+      messageId,
+      conversationId: companionConversationId,
+    });
+    return true;
+  }
   const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];
   const failedRecipient = recipientRows
     .map((item) => record(item))

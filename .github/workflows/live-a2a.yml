@@ -64,7 +64,7 @@ jobs:
         run: |
           npm ci
           npm install --no-save --package-lock=false \
-            @inkbox/sdk@0.5.9 \
+            @inkbox/sdk@0.7.3 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
           npm install -g opencode-ai@latest
 

@@ -11,6 +11,40 @@ afterEach(() => {
 });
 
 describe("gateway state", () => {
+  it("fences stale host session creation from replacing the initialized mapping", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    state.saveTurn({
+      id: "init",
+      messageID: "msg_init",
+      chatKey: "group",
+      state: "queued",
+      kind: "capture",
+      text: "context",
+      deliver: false,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    state.claimTurn("init", "first", 10000);
+    state.updateTurn("init", { leaseUntil: 0 });
+    state.claimTurn("init", "second", 10000);
+    state.setSession("group", "initialized", { turnId: "init", ownerId: "second" });
+    expect(() => state.setSession("group", "stale", { turnId: "init", ownerId: "first" })).toThrow(
+      "lease was lost",
+    );
+    expect(() => state.clearSession("group", { turnId: "init", ownerId: "first" })).toThrow(
+      "lease was lost",
+    );
+    expect(state.getSession("group")).toBe("initialized");
+  });
+  it("does not reset a damaged journal and replay accepted work", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    fs.writeFileSync(state.filePath, "{");
+    expect(() => state.read()).toThrow();
+  });
   it("persists turns, reply targets, and permissions", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
     dirs.push(dir);

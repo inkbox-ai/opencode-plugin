@@ -86,7 +86,16 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
     }
 
     const requestId = headers["x-inkbox-request-id"];
-    if (!deps.dedup.begin(requestId)) {
+    // Companion retries must reach the durable reservation before each ACK.
+    const companion =
+      provider.name === "inkbox" &&
+      parsed &&
+      typeof parsed === "object" &&
+      (Object.hasOwn(parsed, "companion") ||
+        (parsed.data &&
+          typeof parsed.data === "object" &&
+          Object.hasOwn(parsed.data, "companion")));
+    if (!companion && !deps.dedup.begin(requestId)) {
       // Already seen/in-flight — ack so the sender stops retrying.
       return send(res, 200, JSON.stringify({ deduped: true }), "application/json");
     }
@@ -106,13 +115,13 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
     try {
       const ok = await deps.onEvent(event);
       if (ok === false) {
-        deps.dedup.rollback(requestId);
+        if (!companion) deps.dedup.rollback(requestId);
         return send(res, 500, "dispatch failed");
       }
-      deps.dedup.commit(requestId);
+      if (!companion) deps.dedup.commit(requestId);
       return send(res, 200, JSON.stringify({ ok: true }), "application/json");
     } catch (err) {
-      deps.dedup.rollback(requestId);
+      if (!companion) deps.dedup.rollback(requestId);
       deps.logger.error("webhook.dispatch_error", { error: String(err) });
       return send(res, 500, "dispatch error");
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.11 (unreleased)
+
+- Adds Companion mode for sponsored email, MMS, and iMessage groups with isolated conversation sessions and one complete initialization input.
+- Persists pending history loading and live messages before acknowledging delivery. Uncertain host submissions pause instead of being replayed.
+- Keeps group reply audiences and local sponsor admission checks. Historical commands and group replies cannot answer remote tool approvals.
+- Requires `@inkbox/sdk` 0.7.3. Companion mode remains opt-in through identity settings.
+
 ## 0.2.9 (unreleased)
 
 - Adds a resumable, non-interactive `inkbox-opencode bootstrap` command for existing identities, hosted Voice AI, explicit signing-key rotation, and background gateway startup.

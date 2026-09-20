@@ -4,6 +4,12 @@ import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import {
+  assertCompanionSize,
+  COMPANION_MAX_BYTES,
+  companionChatKey,
+  companionFrame,
+} from "./companion.js";
+import {
   clearDeliveryFailures,
   deliveryFailureKey,
   deliveryFailureRecovery,
@@ -46,10 +52,19 @@ export interface SessionManagerDeps {
   state: StateStore;
   logger: GatewayLogger;
   directory: string;
+  companionSenderAllowed?(from: string, requireReply?: boolean): Promise<boolean>;
+  companionContactId?(from: string): Promise<string | undefined>;
 }
 
 const TERMINAL = new Set(["delivered", "failed", "interrupted"]);
-const ACTIVE = new Set(["queued", "submitting", "submitted", "delivery_started"]);
+const ACTIVE = new Set([
+  "hydrating",
+  "paused",
+  "queued",
+  "submitting",
+  "submitted",
+  "delivery_started",
+]);
 const INTERRUPTIBLE = ["queued", "submitting", "submitted"] as const;
 const POLL_MS = 250;
 const LEASE_MS = 60_000;
@@ -64,7 +79,9 @@ function createMessageID(): string {
   return `msg_${timestamp}${random}`;
 }
 
-export function createSessionManager(deps: SessionManagerDeps): SessionManager {
+export function createSessionManager(
+  deps: SessionManagerDeps,
+): SessionManager & { acceptCompanion: NonNullable<SessionManager["acceptCompanion"]> } {
   const keys = new Map<string, PerKey>();
   const waiters = new Map<string, TurnWaiter[]>();
   const ownerId = randomUUID();
@@ -134,11 +151,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   }
 
-  async function ensureSession(chatKey: string): Promise<string> {
+  async function ensureSession(chatKey: string, turn?: DurableTurn): Promise<string> {
+    const sessionOwner = turn?.companion ? { turnId: turn.id, ownerId } : undefined;
     const existing = deps.state.getSession(chatKey);
     if (existing) {
       if (await sessionUsable(existing)) return existing;
-      deps.state.clearSession(chatKey);
+      deps.state.clearSession(chatKey, sessionOwner);
       deps.logger.warn("session.stale_dropped", { chatKey, sessionID: existing });
     }
     const res = await deps.opencode.session.create({
@@ -152,7 +170,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         `opencode session.create returned no session id${err ? `: ${JSON.stringify(err).slice(0, 300)}` : ""}`,
       );
     }
-    deps.state.setSession(chatKey, id);
+    deps.state.setSession(chatKey, id, sessionOwner);
     deps.logger.info("session.created", { chatKey, sessionID: id });
     return id;
   }
@@ -207,11 +225,53 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   }
 
   async function submit(turn: DurableTurn): Promise<DurableTurn> {
-    const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey));
-    const next = deps.state.transitionTurn(turn.id, ["queued"], {
-      state: "submitting",
-      sessionID,
-    });
+    if (turn.companion) turn = await hydrateCompanion(turn);
+    if (TERMINAL.has(turn.state)) return turn;
+    if (closing) throw new HostedCaptureDeferredError();
+    if (turn.companion?.metadata.activation_id && !turn.companion.initialization) {
+      const initializedSession = deps.state.getSession(turn.chatKey);
+      if (!initializedSession || !(await sessionUsable(initializedSession))) {
+        throw new Error("Companion initialized host session is unavailable; recovery is paused.");
+      }
+    }
+    const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey, turn));
+    const body = await promptBody(turn);
+    if (turn.companion) assertCompanionSize(JSON.stringify(body));
+    const activationId = turn.companion?.metadata.activation_id;
+    if (turn.companion && activationId) {
+      const c = turn.companion;
+      const client = await deps.inkbox.getClient();
+      const page = await client.companion.activationMessages(c.handle, activationId, {
+        limit: 1,
+      });
+      const reply = page.replyContext;
+      const expected = turn.replyTarget?.companion;
+      if (
+        page.scopeId !== c.metadata.scope_id ||
+        page.activationId !== c.metadata.activation_id ||
+        page.conversationId !== c.metadata.conversation_id ||
+        page.channel !== c.metadata.channel ||
+        reply.conversationId !== c.metadata.conversation_id ||
+        reply.channel !== c.metadata.channel ||
+        (expected &&
+          JSON.stringify([reply.replyToMessageId, reply.to ?? [], reply.cc ?? []]) !==
+            JSON.stringify([expected.replyToMessageId, expected.to, expected.cc]))
+      ) {
+        throw new Error("Companion scope changed before host submission.");
+      }
+    }
+    if (closing) throw new HostedCaptureDeferredError();
+    if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
+      throw new Error("Durable turn lease was lost.");
+    const next = deps.state.transitionTurn(
+      turn.id,
+      ["queued"],
+      {
+        state: "submitting",
+        sessionID,
+      },
+      turn.companion ? ownerId : undefined,
+    );
     if (!next) {
       const current = deps.state.getTurn(turn.id);
       if (current?.state === "interrupted") return current;
@@ -225,13 +285,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const res = await deps.opencode.session.promptAsync({
         path: { id: sessionID },
         query: { directory: deps.directory },
-        body: (await promptBody(next)) as never,
+        body: body as never,
       });
       const err = (res as any)?.error;
       if (err) throw new Error(`session.promptAsync failed: ${JSON.stringify(err).slice(0, 300)}`);
-      const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
-        state: "submitted",
-      });
+      const submitted = deps.state.transitionTurn(
+        turn.id,
+        ["submitting"],
+        {
+          state: "submitted",
+        },
+        next.companion ? ownerId : undefined,
+      );
       if (submitted) return submitted;
       const current = deps.state.getTurn(turn.id);
       if (current?.state === "interrupted") return current;
@@ -239,20 +304,186 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     } catch (err) {
       if (await wasAccepted(next).catch(() => false)) {
         deps.logger.warn("turn.submit_outcome_reconciled", { chatKey: next.chatKey });
-        const submitted = deps.state.transitionTurn(turn.id, ["submitting"], {
-          state: "submitted",
-        });
+        const submitted = deps.state.transitionTurn(
+          turn.id,
+          ["submitting"],
+          {
+            state: "submitted",
+          },
+          next.companion ? ownerId : undefined,
+        );
         if (submitted) return submitted;
         const current = deps.state.getTurn(turn.id);
         if (current?.state === "interrupted") return current;
         throw new Error("Durable turn changed during submission reconciliation.");
       }
-      deps.state.transitionTurn(turn.id, ["submitting"], {
-        state: "failed",
-        error: String(err),
-      });
+      deps.state.transitionTurn(
+        turn.id,
+        ["submitting"],
+        {
+          state: next.companion ? "paused" : "failed",
+          error: String(err),
+        },
+        next.companion ? ownerId : undefined,
+      );
       throw err;
     }
+  }
+
+  async function hydrateCompanion(turn: DurableTurn): Promise<DurableTurn> {
+    const c = turn.companion;
+    if (!c) return turn;
+    const identity = await deps.inkbox.getIdentity();
+    if (identity.id !== c.identityId || identity.agentHandle !== c.handle) {
+      throw new Error("Companion identity changed; queued context is paused.");
+    }
+    let liveContent = c.content ?? turn.text;
+    if (!c.initialization && c.mailBodyPending) {
+      const message = await identity.getMessage(c.sourceId);
+      if (
+        message.id !== c.sourceId ||
+        message.threadId !== c.metadata.conversation_id ||
+        message.fromAddress.toLowerCase() !== c.from.toLowerCase()
+      ) {
+        throw new Error("Companion live message does not match its conversation.");
+      }
+      if (
+        (message.bodyText == null &&
+          message.bodyHtml == null &&
+          !message.attachmentMetadata?.length) ||
+        (message.hasAttachments && !message.attachmentMetadata?.length)
+      ) {
+        throw new Error("Companion mail body or attachments are unavailable.");
+      }
+      liveContent = JSON.stringify({
+        author: message.fromAddress,
+        occurredAt: message.createdAt,
+        text: message.bodyText ?? message.bodyHtml ?? "",
+        attachments: message.attachmentMetadata ?? [],
+      });
+    }
+    if (c.metadata.phase === "ordinary") {
+      if (!(await deps.companionSenderAllowed?.(c.from)))
+        throw new Error("Companion sender is not locally permitted.");
+      const contactId = await deps.companionContactId?.(c.from);
+      const channel =
+        c.metadata.channel === "mail"
+          ? "email"
+          : c.metadata.channel === "phone"
+            ? "sms"
+            : "imessage";
+      const override = (map: Record<string, string>) =>
+        (contactId ? map[contactId] : undefined) ?? map[channel];
+      if (!turn.replyTarget) throw new Error("Companion ordinary reply target is missing.");
+      const updated = deps.state.transitionTurn(
+        turn.id,
+        ["hydrating", "queued"],
+        {
+          agent: override(deps.config.gateway.channelAgents),
+          text: companionFrame(
+            `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}`,
+            turn.replyTarget,
+          ),
+        },
+        ownerId,
+      );
+      if (!updated) throw new Error("Durable turn lease was lost.");
+      return updated;
+    }
+    const client = await deps.inkbox.getClient();
+    if (typeof client.companion?.loadInitialization !== "function") {
+      throw new Error("Companion mode requires Inkbox SDK 0.7.3 or newer.");
+    }
+    if (!c.metadata.activation_id) throw new Error("Companion activation is missing.");
+    const snapshot = await client.companion.loadInitialization(c.handle, c.metadata.activation_id, {
+      maxBytes: COMPANION_MAX_BYTES,
+    });
+    if (closing) throw new HostedCaptureDeferredError();
+    if (
+      snapshot.scopeId !== c.metadata.scope_id ||
+      snapshot.activationId !== c.metadata.activation_id ||
+      snapshot.conversationId !== c.metadata.conversation_id ||
+      snapshot.channel !== c.metadata.channel
+    ) {
+      throw new Error("Companion initialization does not match its conversation.");
+    }
+    const trigger = snapshot.entries.filter((entry) => entry.isTrigger);
+    if (trigger.length !== 1 || !(await deps.companionSenderAllowed?.(trigger[0].author, true))) {
+      throw new Error("Companion sponsor is not locally permitted.");
+    }
+    if (c.metadata.phase === "initialization" && trigger[0].id !== c.sourceId) {
+      throw new Error("Companion trigger does not match the received message.");
+    }
+    if (!c.initialization && snapshot.entries.some((entry) => entry.id === c.sourceId)) {
+      if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
+        throw new Error("Durable turn lease was lost.");
+      const duplicate = deps.state.transitionTurn(
+        turn.id,
+        ["hydrating", "queued"],
+        { state: "delivered" },
+        ownerId,
+      );
+      if (!duplicate) throw new Error("Durable turn lease was lost.");
+      return duplicate;
+    }
+    const sponsorContactId = await deps.companionContactId?.(trigger[0].author);
+    const localChannel =
+      c.metadata.channel === "mail" ? "email" : c.metadata.channel === "phone" ? "sms" : "imessage";
+    const overrides = (map: Record<string, string>) =>
+      (sponsorContactId ? map[sponsorContactId] : undefined) ?? map[localChannel];
+    const context = snapshot.replyContext;
+    if (
+      context.conversationId !== c.metadata.conversation_id ||
+      context.channel !== c.metadata.channel
+    ) {
+      throw new Error("Companion reply scope does not match its conversation.");
+    }
+    const channel =
+      context.channel === "mail" ? "email" : context.channel === "phone" ? "sms" : "imessage";
+    const target: ReplyTarget = {
+      channel,
+      conversationId: context.conversationId,
+      subject: c.subject,
+    };
+    if (channel === "email") {
+      if (!context.replyToMessageId || (!context.to?.length && !context.cc?.length))
+        throw new Error("Companion email reply context is incomplete.");
+      target.companion = {
+        replyToMessageId: context.replyToMessageId,
+        to: [...(context.to ?? [])],
+        cc: [...(context.cc ?? [])],
+      };
+    }
+    if (
+      turn.replyTarget &&
+      JSON.stringify(turn.replyTarget.companion ?? turn.replyTarget.conversationId) !==
+        JSON.stringify(target.companion ?? target.conversationId)
+    ) {
+      throw new Error("Companion reply audience changed; queued turn is paused.");
+    }
+    const text = c.initialization
+      ? snapshot.text +
+        (snapshot.notices?.length ? `\nNotices: ${JSON.stringify(snapshot.notices)}` : "")
+      : liveContent;
+    if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
+      throw new Error("Durable turn lease was lost.");
+    const next = deps.state.transitionTurn(
+      turn.id,
+      ["hydrating", "queued"],
+      {
+        state: "queued",
+        text: companionFrame(
+          `${overrides(deps.config.gateway.channelPrompts) ?? ""}\n${text}`,
+          target,
+        ),
+        replyTarget: turn.replyTarget ?? target,
+        agent: overrides(deps.config.gateway.channelAgents),
+      },
+      ownerId,
+    );
+    if (!next) throw new Error("Durable turn lease was lost.");
+    deps.state.setReplyTarget(turn.chatKey, next.replyTarget ?? target);
+    return next;
   }
 
   async function completion(turn: DurableTurn): Promise<string | undefined> {
@@ -326,8 +557,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           deliveryMessageId: sent.messageId,
         });
       } catch (err) {
-        deps.state.updateTurn(current.id, { state: "failed", error: String(err) });
+        deps.state.updateTurn(current.id, {
+          state: "failed",
+          error: String(err),
+        });
         deps.logger.error("reply.failed", { chatKey: current.chatKey, error: String(err) });
+        if (current.companion) {
+          settle(current.id, output);
+          return;
+        }
         const recovery = deliveryFailureRecovery({
           key: deliveryFailureKey(
             current.replyTarget.channel,
@@ -358,8 +596,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return;
     }
     if (TERMINAL.has(turn.state)) return;
+    const renewal = setInterval(() => {
+      try {
+        deps.state.claimTurn(id, ownerId, LEASE_MS);
+      } catch {
+        /* Checked before submission. */
+      }
+    }, LEASE_MS / 3);
+    renewal.unref?.();
     try {
-      if (turn.state === "queued") turn = await submit(turn);
+      if (turn.state === "paused") return;
+      if (turn.companion && turn.sessionID && !(await sessionUsable(turn.sessionID))) {
+        throw new Error("Companion host session ownership could not be verified.");
+      }
+      if (turn.state === "hydrating" || turn.state === "queued") turn = await submit(turn);
       else if (turn.state === "submitting") {
         if (!(await wasAccepted(turn))) throw new Error("Prompt submission outcome is ambiguous.");
         turn =
@@ -393,11 +643,20 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const latest = deps.state.getTurn(id);
       const leaseLost = String(err).includes("Durable turn lease was lost");
       if (!closing && !leaseLost && latest && !TERMINAL.has(latest.state)) {
-        deps.state.updateTurn(id, { state: "failed", error: String(err) });
+        deps.state.transitionTurn(
+          id,
+          [latest.state],
+          {
+            state: turn.companion ? "paused" : "failed",
+            error: String(err),
+          },
+          turn.companion ? ownerId : undefined,
+        );
       }
       deps.logger.error("turn.failed", { chatKey: turn.chatKey, error: String(err) });
       if (!(leaseLost && turn.hostedCapture)) settle(id, undefined, err);
     } finally {
+      clearInterval(renewal);
       if (turn.hostedCapture) {
         try {
           const latest = deps.state.getTurn(turn.id);
@@ -425,6 +684,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     for (let id = entry.queue.shift(); id; id = entry.queue.shift()) {
       const turn = deps.state.getTurn(id);
       if (!turn || TERMINAL.has(turn.state)) continue;
+      if (
+        turn.companion &&
+        deps.state
+          .listTurns()
+          .some((candidate) => candidate.chatKey === chatKey && candidate.state === "paused")
+      )
+        return;
       entry.runningId = id;
       let retry = false;
       try {
@@ -445,6 +711,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       } finally {
         entry.runningId = undefined;
       }
+      if (turn.companion && deps.state.getTurn(id)?.state === "paused") return;
       if (retry) {
         const timer = setTimeout(() => void drain(chatKey), POLL_MS);
         timer.unref?.();
@@ -457,6 +724,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     if (!deps.state.getTurn(turn.id)) deps.state.saveTurn(turn);
     const entry = per(turn.chatKey);
     if (entry.runningId !== turn.id && !entry.queue.includes(turn.id)) entry.queue.push(turn.id);
+    if (turn.companion)
+      entry.queue.sort((a, b) => {
+        const left = deps.state.getTurn(a)?.companion;
+        const right = deps.state.getTurn(b)?.companion;
+        return (
+          (left?.initialization ? -1 : (left?.metadata.sequence ?? 0)) -
+          (right?.initialization ? -1 : (right?.metadata.sequence ?? 0))
+        );
+      });
     void drain(turn.chatKey);
   }
 
@@ -523,6 +799,63 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   }
 
   return {
+    ownsCompanionDelivery(channel, messageId, conversationId) {
+      return deps.state
+        .listTurns()
+        .some(
+          (turn) =>
+            turn.companion &&
+            turn.replyTarget?.channel === channel &&
+            ((messageId && turn.deliveryMessageId === messageId) ||
+              (turn.state === "delivery_started" &&
+                conversationId &&
+                turn.replyTarget.conversationId === conversationId)),
+        );
+    },
+    async acceptCompanion(companion, text, target) {
+      if (closing) throw new Error("Gateway is closing; retry Companion delivery.");
+      const chatKey = companionChatKey(companion.identityId, companion.metadata);
+      const candidates: DurableTurn[] = [];
+      if (companion.metadata.activation_id) {
+        candidates.push(
+          makeTurn(chatKey, "capture", "", true, undefined, {
+            id: `${chatKey}:initialization`,
+            state: "hydrating",
+            companion: { ...companion, initialization: true },
+          }),
+        );
+      }
+      if (companion.metadata.phase !== "initialization") {
+        candidates.push(
+          makeTurn(
+            chatKey,
+            "capture",
+            companionFrame(
+              text,
+              target ?? {
+                channel:
+                  companion.metadata.channel === "mail"
+                    ? "email"
+                    : companion.metadata.channel === "phone"
+                      ? "sms"
+                      : "imessage",
+                conversationId: companion.metadata.conversation_id,
+              },
+            ),
+            true,
+            target,
+            {
+              id: `${chatKey}:event:${companion.sourceId}`,
+              companion: { ...companion, initialization: false, content: text },
+              state: companion.metadata.activation_id ? "hydrating" : "queued",
+            },
+          ),
+        );
+      }
+      const reserved = deps.state.reserveTurns(candidates);
+      for (const turn of reserved)
+        if (!TERMINAL.has(turn.state) && turn.state !== "completed") enqueue(turn);
+    },
     async handleInbound(msg: InboundMessage) {
       if (closing) return;
       const target: ReplyTarget = {

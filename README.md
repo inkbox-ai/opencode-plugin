@@ -392,6 +392,16 @@ inbound events. What it does:
 Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
 identity, signing key, opencode server, tunnel/public URL).
 
+### Companion mode
+
+Version 0.2.11 requires SDK 0.7.3 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.
+
+The sponsor's qualifying group message loads all available authorized history into one input. Ordinary tracked messages and activated conversations use separate sessions, isolated from private contact conversations. Replies retain the group conversation and, for email, its approved audience and stored parent. MMS chats with identical participant sets are one logical conversation.
+
+The sponsor must pass your gateway's local sender/contact allowlists. Contact blocks, consent requirements, and host tool approvals still apply. Historical commands and group messages cannot answer remote permission prompts; approve required actions through OpenCode itself.
+
+The complete framed input is limited to 128 KiB. Oversized or unavailable initialization pauses the conversation without sending a partial input. The private gateway `state.json` journal retains the turn ID, host message ID, reply target, and failure state. A restart resumes pending hydration and reconciles known host submissions. If acceptance is uncertain, the turn and later group messages remain paused for operator investigation; webhook retries do not resubmit it. Do not delete the journal to retry an uncertain turn.
+
 ### Keep it running (boot autostart)
 
 Like the claude-code and codex bridges, the gateway can install itself as a

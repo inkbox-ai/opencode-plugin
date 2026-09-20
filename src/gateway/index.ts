@@ -1,12 +1,13 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { checkOutboundRecipient } from "../permissions.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
 import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
-import { dispatchEvent } from "./dispatch.js";
+import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
@@ -64,6 +65,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
     directory: opts.directory,
+    companionSenderAllowed: async (from, requireReply) => {
+      const contact = await contacts.resolve(from);
+      if (requireReply) {
+        const recipients = opts.config.outbound.allowedRecipients;
+        if (
+          checkOutboundRecipient(from, recipients) ||
+          ((g.outboundApproval === "allowlist" || opts.config.outbound.approval === "allowlist") &&
+            recipients.length === 0)
+        )
+          return false;
+      }
+      return senderAllowed(from, contact.contactId, g);
+    },
+    companionContactId: async (from) => (await contacts.resolve(from)).contactId,
   });
   const a2a = createA2AHandler({
     inkbox: opts.inkbox,

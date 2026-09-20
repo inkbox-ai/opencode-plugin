@@ -26,6 +26,38 @@ export async function deliverReply(
   const identity = await runtime.getIdentity();
 
   if (target.channel === "email") {
+    if (target.companion) {
+      const parent = await identity.getMessage(target.companion.replyToMessageId);
+      if (
+        parent.id !== target.companion.replyToMessageId ||
+        parent.threadId !== target.conversationId ||
+        !parent.messageId
+      ) {
+        throw new Error(
+          "Companion email parent is unavailable or belongs to another conversation.",
+        );
+      }
+      const audience = (addresses: string[]) =>
+        [...new Set(addresses.map((address) => address.trim().toLowerCase()))].sort().join("\n");
+      if (
+        !parent.replyAllRecipients ||
+        audience([...parent.replyAllRecipients.to, ...parent.replyAllRecipients.cc]) !==
+          audience([...target.companion.to, ...target.companion.cc])
+      ) {
+        throw new Error(
+          "Email reply audience differs from the Companion group; no reply was sent.",
+        );
+      }
+      const msg = await identity.sendEmail({
+        to: [...target.companion.to],
+        cc: [...target.companion.cc],
+        subject: replySubject(target.subject),
+        bodyText: trimmed,
+        inReplyToMessageId: parent.messageId,
+      });
+      logger.info("reply.sent", { channel: "email", id: msg.id });
+      return { delivered: true, reason: "sent", messageId: msg.id };
+    }
     const msg = await identity.sendEmail({
       to: [target.to ?? ""],
       subject: replySubject(target.subject),
