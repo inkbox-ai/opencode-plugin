@@ -12,6 +12,8 @@
 //
 // Env: REMOTE_INKBOX_API_KEY, INKBOX_BASE_URL, VOICE_DRIVER_STATE,
 //      VOICE_DRIVER_LINE, VOICE_DRIVER_SPEAK_AFTER (s), VOICE_DRIVER_LISTEN (s),
+//      VOICE_DRIVER_REASK (s), VOICE_DRIVER_QUIET_GAP (s), VOICE_DRIVER_MAX_REASKS,
+//      VOICE_DRIVER_ANSWER_CONTAINS,
 //      VOICE_DRIVER_AUTO_STOP (false lets the test own hangup timing)
 import { writeFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
@@ -28,12 +30,30 @@ const LINE =
 // and the call is hung up before the agent ever speaks. Answer the way a person
 // does — one word, then silence — and hold the prompt until that window closes.
 const GREETING = process.env.VOICE_DRIVER_GREETING || "Hello?";
-// Speak shortly after the pipeline is ready so the agent's greeting lands first,
-// then give the agent a turn and hang up (a dropped WS does NOT end the call — an
-// explicit stop is required or the leg lingers to the server max-duration cap).
+// Delay before the first ask. A greeting arrives as several final transcripts
+// 1.5-5s apart, so no silence threshold tells "between greeting sentences" from
+// "greeting over" — the first ask is simply allowed to land wherever it lands, and
+// runTurn re-asks once the agent is actually idle. Then give the agent a turn and
+// hang up (a dropped WS does NOT end the call — an explicit stop is required or
+// the leg lingers to the server max-duration cap).
 const SPEAK_AFTER_MS = Number(process.env.VOICE_DRIVER_SPEAK_AFTER || "5") * 1000;
 const LISTEN_MS = Number(process.env.VOICE_DRIVER_LISTEN || "12") * 1000;
+// Re-ask the question this often while the agent is idle. An ask the greeting
+// talked over is otherwise never repeated and the call idles out with the agent
+// still waiting for a request. 0 disables re-asking.
+const REASK_EVERY_MS = Number(process.env.VOICE_DRIVER_REASK || "20") * 1000;
+// Never re-ask until the agent has been silent this long, so a reply or a tool
+// round-trip in progress is never talked over.
+const QUIET_GAP_MS = Number(process.env.VOICE_DRIVER_QUIET_GAP || "6") * 1000;
+const MAX_REASKS = Number(process.env.VOICE_DRIVER_MAX_REASKS || "2");
+// The agent saying this back means the question landed; stop re-asking so a
+// question that already took effect never turns into a second one.
+const ANSWER_CONTAINS = process.env.VOICE_DRIVER_ANSWER_CONTAINS || "";
 const AUTO_STOP = process.env.VOICE_DRIVER_AUTO_STOP !== "false";
+
+// Compare speech ignoring ASR casing, spacing and punctuation.
+const speechKey = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+const ANSWER_KEY = speechKey(ANSWER_CONTAINS);
 
 if (!API_KEY) {
   console.error("REMOTE_INKBOX_API_KEY required");
@@ -57,22 +77,40 @@ async function callWsHandler(ws) {
     ],
   });
   console.log("call WS accepted");
-  let spoke = false;
+  let answered = false;
+  let lastHeardAt = 0;
   const say = async (text) => {
     await ws.send(JSON.stringify({ event: "text", delta: text }));
     await ws.send(JSON.stringify({ event: "text", done: true }));
     console.log("spoke:", text);
   };
-  const speak = async (text) => {
-    if (spoke) return;
-    spoke = true;
-    await say(text);
-  };
   const runTurn = async () => {
     await say(GREETING);
     await sleep(SPEAK_AFTER_MS);
-    await speak(LINE);
-    await sleep(LISTEN_MS);
+    await say(LINE);
+    let askedAt = Date.now();
+    lastHeardAt = askedAt;
+    // Re-ask if the agent never got the question: the greeting routinely runs
+    // several seconds past our first ask, and a lost ask leaves the agent waiting
+    // while the call idles out. Re-ask ONLY once the agent has gone quiet and has
+    // not already answered, so neither an in-progress reply nor a question that
+    // already landed is spoken over or repeated.
+    const startedAt = Date.now();
+    let reasks = 0;
+    while (Date.now() - startedAt < LISTEN_MS) {
+      await sleep(1000);
+      if (
+        REASK_EVERY_MS > 0 &&
+        !answered &&
+        reasks < MAX_REASKS &&
+        Date.now() - askedAt >= REASK_EVERY_MS &&
+        Date.now() - lastHeardAt >= QUIET_GAP_MS
+      ) {
+        await say(LINE);
+        askedAt = Date.now();
+        reasks += 1;
+      }
+    }
     if (!AUTO_STOP) return;
     try {
       await ws.send(JSON.stringify({ event: "stop" }));
@@ -92,9 +130,14 @@ async function callWsHandler(ws) {
       if (ev.event === "start") {
         console.log("call start");
         void runTurn();
-      } else if (ev.event === "transcript" && ev.is_final) {
-        console.log("heard (final):", ev.text);
-        await speak(LINE); // speak now if the greeting beat our timer
+      } else if (ev.event === "transcript") {
+        lastHeardAt = Date.now();
+        if (ev.is_final) {
+          console.log("heard (final):", ev.text);
+          if (ANSWER_KEY && speechKey(String(ev.text || "")).includes(ANSWER_KEY)) {
+            answered = true;
+          }
+        }
       } else if (ev.event === "stop") {
         console.log("call stop");
         break;

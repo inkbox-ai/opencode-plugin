@@ -1,44 +1,39 @@
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-const RADIO_WORDS = [
-  "alpha",
-  "bravo",
-  "charlie",
-  "delta",
-  "echo",
-  "foxtrot",
-  "golf",
-  "hotel",
-  "india",
-  "juliet",
-  "kilo",
-  "lima",
-  "mike",
-  "november",
-  "oscar",
-  "papa",
-  "quebec",
-  "romeo",
-  "sierra",
-  "tango",
-  "uniform",
-  "victor",
-  "whiskey",
-  "xray",
-  "yankee",
-  "zulu",
+const SPEECH_WORDS = [
+  "banana",
+  "elephant",
+  "pineapple",
+  "alligator",
+  "motorcycle",
+  "umbrella",
+  "dinosaur",
+  "potato",
+  "computer",
+  "volcano",
+  "airplane",
+  "butterfly",
+  "kangaroo",
+  "octopus",
+  "calendar",
+  "chocolate",
+  "hospital",
+  "library",
+  "sandwich",
+  "telescope",
 ];
 
 export function natoMarker(runId, runAttempt) {
-  let value = BigInt(runId) * 10n + BigInt(runAttempt);
-  const used = new Set();
+  const token = `${runId}-${runAttempt}`;
+  if (!/^\d+-\d+$/.test(token)) throw new Error("run id and attempt must be numeric");
+  let value = BigInt(`0x${createHash("sha256").update(token).digest("hex")}`);
+  const available = [...SPEECH_WORDS];
   const marker = [];
-  for (let count = 0; count < 5; count += 1) {
-    let index = Number(value % BigInt(RADIO_WORDS.length));
-    value /= BigInt(RADIO_WORDS.length);
-    while (used.has(index)) index = (index + 1) % RADIO_WORDS.length;
-    used.add(index);
-    marker.push(RADIO_WORDS[index]);
+  for (let count = 0; count < 3; count += 1) {
+    const index = Number(value % BigInt(available.length));
+    value /= BigInt(available.length);
+    marker.push(available.splice(index, 1)[0]);
   }
   return marker.join(" ");
 }

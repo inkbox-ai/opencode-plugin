@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.2.11 (unreleased)
+## 0.2.15 (unreleased)
 
 - Adds Companion mode for sponsored email, MMS, and iMessage groups with isolated conversation sessions and one complete initialization input.
 - Persists pending history loading and live messages before acknowledging delivery. Uncertain host submissions pause instead of being replayed.
 - Keeps group reply audiences and local sponsor admission checks. Historical commands and group replies cannot answer remote tool approvals.
 - Requires `@inkbox/sdk` 0.7.3. Companion mode remains opt-in through identity settings.
+
+## Unreleased
+
+- Updates Vitest and pins its Vite runtime to patched releases.
+- Stabilizes hosted voice checks by waiting for a quiet greeting and verifying the caller request on both call legs.
+- Updates transitive HTTP and development dependencies to patched versions.
+- Runs live test files sequentially to avoid interference between channel checks.
+- Adds negotiated 16 kHz PCM call audio with streaming resampling and legacy call compatibility.
+- Uses the published, pinned SDK in CI and gives periodic progress delivery time to finish before the live task ends.
+- Retries connection failures during live identity discovery without repeating task submissions.
 
 ## 0.2.9 (unreleased)
 

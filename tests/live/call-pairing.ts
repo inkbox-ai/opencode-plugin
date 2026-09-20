@@ -1,6 +1,7 @@
 export interface PairableCall {
   id: string;
   direction?: string;
+  status?: string;
   remotePhoneNumber?: string | null;
   createdAt?: Date | string | null;
   created_at?: Date | string | null;
@@ -14,11 +15,12 @@ function createdAt(call: PairableCall): number | undefined {
 }
 
 function describe(calls: PairableCall[]) {
-  return calls.map((call) => ({
-    id: call.id,
-    direction: call.direction,
-    createdAt: createdAt(call),
-  }));
+  return {
+    count: calls.length,
+    directions: calls.map((call) => call.direction ?? "unknown"),
+    statuses: calls.map((call) => call.status ?? "unknown"),
+    timestampsPresent: calls.map((call) => createdAt(call) !== undefined),
+  };
 }
 
 /** Select a call pair only when ownership is unambiguous after duplicate grace. */

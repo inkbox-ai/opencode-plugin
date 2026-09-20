@@ -1,5 +1,5 @@
 import { afterAll, beforeAll } from "vitest";
-import { AUT_KEY, client, phoneOf } from "./helpers.js";
+import { AUT_KEY, client, listCalls, phoneOf } from "./helpers.js";
 
 const ENDED_CALL_STATUSES = new Set(["completed", "failed", "canceled"]);
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -18,7 +18,7 @@ const statusOf = (call: Call) => (call.status ?? "").toLowerCase();
 
 async function ownedCalls(): Promise<Map<string, Call>> {
   if (!aut) return new Map();
-  const calls = await aut.calls.list({ limit: 100 });
+  const calls = await listCalls(aut, 100);
   return new Map(
     calls.filter((call) => call.localPhoneNumber === localPhone).map((call) => [call.id, call]),
   );
@@ -29,13 +29,13 @@ async function hangup(call: Call): Promise<string | undefined> {
   try {
     await aut.calls.hangup(call.id);
     return undefined;
-  } catch (error) {
+  } catch {
     try {
       const current = await aut.calls.get(call.id);
       if (ENDED_CALL_STATUSES.has(statusOf(current))) return undefined;
-      return `hangup=${String(error)}; status=${JSON.stringify(statusOf(current))}`;
-    } catch (getError) {
-      return `hangup=${String(error)}; get=${String(getError)}`;
+      return `status=${JSON.stringify(statusOf(current))}`;
+    } catch {
+      return "status=unknown";
     }
   }
 }
@@ -59,19 +59,18 @@ async function watchOnce(): Promise<void> {
 
 async function finishNewCalls(): Promise<void> {
   const deadline = Date.now() + 12_000;
-  const errors = new Map<string, string>();
+  const errors: string[] = [];
   for (;;) {
     const live = await newLiveCalls();
     if (live.size === 0) return;
-    for (const [callId, call] of live) {
+    for (const [, call] of live) {
       const error = await hangup(call);
-      if (error) errors.set(callId, error);
+      if (error) errors.push(error);
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `live-test calls remained active after API cleanup: states=${JSON.stringify(
-          Object.fromEntries([...live].map(([id, call]) => [id, statusOf(call)])),
-        )} errors=${JSON.stringify(Object.fromEntries(errors))}`,
+        `live-test calls remained active after cleanup: count=${live.size} ` +
+          `states=${JSON.stringify([...live.values()].map(statusOf))} errors=${errors.length}`,
       );
     }
     await delay(500);

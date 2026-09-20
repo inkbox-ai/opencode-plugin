@@ -16,6 +16,7 @@ import {
   type ResolvedContact,
 } from "../contacts.js";
 import type { GatewayLogger, SessionManager } from "../types.js";
+import { callAudioFormat } from "./audio.js";
 import { buildVoiceGreeting, buildVoiceInstructions, type CallMeta } from "./instructions.js";
 import { callEndedPrompt, createPostCallRegistry, postCallPrompt } from "./post-call.js";
 import {
@@ -58,6 +59,16 @@ export function createCallBridge(
 ) {
   const wss = new WebSocketServer({ noServer: true });
   const extraHeaders = new WeakMap<IncomingMessage, string[]>();
+  const closedSockets = new WeakSet<WebSocket>();
+  const closeSocketOnce = (ws: WebSocket | undefined) => {
+    if (!ws || closedSockets.has(ws)) return;
+    closedSockets.add(ws);
+    try {
+      ws.close();
+    } catch {
+      /* already closing */
+    }
+  };
   wss.on("headers", (headers, req) => {
     for (const h of extraHeaders.get(req) ?? []) headers.push(h);
   });
@@ -129,11 +140,7 @@ export function createCallBridge(
       void runCall(ws, ctx, meta, realtime).catch((err) => {
         deps.logger.error("call.failed", { error: String(err) });
         void realtime?.close().catch(() => {});
-        try {
-          ws.close();
-        } catch {
-          /* already closing */
-        }
+        closeSocketOnce(ws);
       });
     });
   }
@@ -258,11 +265,7 @@ export function createCallBridge(
           return describeContacts(await client.contacts.lookup(filters));
         },
         onHangup: () => {
-          try {
-            callWs?.close();
-          } catch {
-            /* already closing */
-          }
+          closeSocketOnce(callWs);
         },
         logger: deps.logger,
       },
@@ -301,7 +304,6 @@ export function createCallBridge(
 
     if (realtime) {
       (realtime as RealtimeBridge & { attach(ws: WebSocket): void }).attach(ws);
-      realtime.start(buildVoiceGreeting(meta));
     }
 
     let finishCall: () => void = () => {};
@@ -329,6 +331,19 @@ export function createCallBridge(
       if (frame.event === "media" && realtime) {
         const audio = callerAudio(frame);
         if (audio) realtime.pushAudio(audio);
+        return;
+      }
+      if (frame.event === "start" && realtime) {
+        try {
+          const format = callAudioFormat(frame.start);
+          realtime.setAudioFormat(format);
+          deps.logger.info("call.audio_format", { callId: ctx.callId, format });
+          realtime.start(buildVoiceGreeting(meta));
+        } catch {
+          deps.logger.warn("call.unsupported_audio", {});
+          closeSocketOnce(ws);
+          finishCall();
+        }
         return;
       }
       if (frame.event === "start" && !realtime) {
@@ -359,11 +374,7 @@ export function createCallBridge(
       }
       if (frame.event === "stop" || frame.event === "closed" || frame.event === "hangup") {
         finishCall();
-        try {
-          ws.close();
-        } catch {
-          /* already closing */
-        }
+        closeSocketOnce(ws);
       }
     }
 
@@ -394,11 +405,7 @@ export function createCallBridge(
 
     await callEnded;
     if (poll) clearInterval(poll);
-    try {
-      ws.close();
-    } catch {
-      /* already closing */
-    }
+    closeSocketOnce(ws);
     await realtime?.close();
 
     if (ctx.callId) {

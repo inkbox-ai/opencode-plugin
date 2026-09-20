@@ -1,6 +1,13 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
+import {
+  a2aProgressSystemPrompt,
+  a2aProgressUserPrompt,
+  a2aToolIdentifiersFromMessages,
+  cleanA2AProgress,
+  fallbackA2AProgress,
+} from "../a2a-progress.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import {
@@ -180,14 +187,20 @@ export function createSessionManager(
     const agent = turn.agent ?? g.agent;
     const system = await identitySystem();
     let tools: Record<string, boolean> | undefined;
-    if (turn.hostedCapture?.phase === "initial") {
-      tools = { task: false, inkbox_a2a_call: false };
-    } else if (turn.hostedCapture?.phase === "correction") {
+    if (turn.hostedCapture) {
+      // Hosted post-call turns expose only the tools required to complete
+      // communication commitments from the finished call.
       const listed = await deps.opencode.tool.ids({ query: { directory: deps.directory } });
       const ids = (listed as any)?.data ?? listed;
-      if (!Array.isArray(ids)) throw new Error("Could not restrict the hosted correction turn.");
+      if (!Array.isArray(ids)) throw new Error("Could not restrict the hosted post-call turn.");
       tools = Object.fromEntries(ids.map((id) => [String(id), false]));
-      tools.inkbox_send_sms = true;
+      if (turn.hostedCapture.phase === "correction") {
+        tools.inkbox_send_sms = true;
+      } else {
+        for (const id of ids.map(String)) {
+          if (id.startsWith("inkbox_") && !id.includes("_a2a_")) tools[id] = true;
+        }
+      }
     }
     return {
       messageID: turn.messageID,
@@ -504,7 +517,8 @@ export function createSessionManager(
         query: { directory: deps.directory },
       });
       const statuses = (statusRes as any)?.data ?? statusRes;
-      if (statuses?.[turn.sessionID]?.type === "busy") {
+      const status = statuses?.[turn.sessionID]?.type;
+      if (status && status !== "idle") {
         await delay(POLL_MS);
         continue;
       }
@@ -518,7 +532,10 @@ export function createSessionManager(
       if (last?.info?.error) {
         throw new Error(`OpenCode turn failed: ${JSON.stringify(last.info.error).slice(0, 300)}`);
       }
-      if (last?.info?.time?.completed || last?.info?.finish) return extractText(last);
+      // A completed assistant step can still be followed by tool work or a
+      // model retry. Keep the turn's side-effect guards until the final answer.
+      const finish = last?.info?.finish;
+      if (finish && finish !== "tool-calls" && finish !== "unknown") return extractText(last);
       await delay(POLL_MS);
     }
     throw new HostedCaptureDeferredError();
@@ -798,6 +815,86 @@ export function createSessionManager(
       .sort((a, b) => b.createdAt - a.createdAt)[0];
   }
 
+  async function summarizeA2AProgress(
+    chatKey: string,
+    taskId: string,
+    previousUpdate: string,
+  ): Promise<string> {
+    const turn = deps.state
+      .listTurns()
+      .filter(
+        (candidate) =>
+          candidate.chatKey === chatKey &&
+          candidate.a2aContext?.taskId === taskId &&
+          candidate.sessionID,
+      )
+      .sort((left, right) => right.createdAt - left.createdAt)[0];
+    const messages = turn?.sessionID ? await listMessages(turn.sessionID).catch(() => []) : [];
+    const toolIdentifiers = a2aToolIdentifiersFromMessages(messages, turn?.messageID ?? "");
+    const fallback = fallbackA2AProgress();
+    let sessionID: string | undefined;
+    try {
+      const created = await deps.opencode.session.create({
+        body: { title: "Inkbox A2A progress" },
+        query: { directory: deps.directory },
+      });
+      const createError = (created as any)?.error;
+      sessionID = (created as any)?.data?.id ?? (created as any)?.id;
+      if (createError || !sessionID) throw new Error("Could not create progress summary session.");
+      const listed = await deps.opencode.tool.ids({ query: { directory: deps.directory } });
+      const toolIds = (listed as any)?.data ?? listed;
+      if (!Array.isArray(toolIds)) throw new Error("Could not restrict progress summary tools.");
+      const g = deps.config.gateway;
+      const request = deps.opencode.session.prompt({
+        path: { id: sessionID },
+        query: { directory: deps.directory },
+        body: {
+          system: a2aProgressSystemPrompt(),
+          tools: Object.fromEntries(toolIds.map((id) => [String(id), false])),
+          ...(g.model?.includes("/")
+            ? {
+                model: {
+                  providerID: g.model.split("/")[0],
+                  modelID: g.model.split("/").slice(1).join("/"),
+                },
+              }
+            : {}),
+          parts: [
+            {
+              type: "text",
+              text: a2aProgressUserPrompt(turn?.text ?? "", toolIdentifiers, previousUpdate),
+            },
+          ],
+        },
+      });
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Progress summary timed out.")), 20_000);
+        timer.unref?.();
+      });
+      try {
+        const response = await Promise.race([request, timeout]);
+        const error = (response as any)?.error;
+        if (error) throw new Error("Progress summary request failed.");
+        return cleanA2AProgress(extractText(response), toolIdentifiers);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    } catch (error) {
+      deps.logger.warn("a2a.progress_summary_failed", { taskId, error: String(error) });
+      return fallback;
+    } finally {
+      if (sessionID) {
+        await deps.opencode.session
+          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
+        await deps.opencode.session
+          .delete({ path: { id: sessionID }, query: { directory: deps.directory } })
+          .catch(() => {});
+      }
+    }
+  }
+
   return {
     ownsCompanionDelivery(channel, messageId, conversationId) {
       return deps.state
@@ -958,6 +1055,8 @@ export function createSessionManager(
         existing ?? makeTurn(chatKey, "capture", text, false, undefined, { a2aContext: context }),
       );
     },
+
+    summarizeA2AProgress,
 
     async abortA2A(chatKey, taskId) {
       const turns = deps.state

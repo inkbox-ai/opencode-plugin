@@ -7,75 +7,61 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
-          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: python3 -m unittest tests/live/test_a2a_preflight.py
       - run: npm run build
 
   # Same contract suite canary runs on a schedule, but here it gates PRs so a
   # host bump that breaks the plugin interface is visible at review time.
   contract-latest:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
-          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: |
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
       - run: npx vitest run tests/contract
 
   loader-smoke:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 73f18a2b8c0e9dc6887c5663e6e904d54869927e
-          path: .ci/inkbox
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: |
-          npm ci --prefix .ci/inkbox/sdk/typescript
-          npm run build --prefix .ci/inkbox/sdk/typescript
-          npm install --no-save --package-lock=false \
-            ./.ci/inkbox/sdk/typescript \
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
+            @inkbox/sdk@0.5.9 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm install -g opencode-ai@latest
-      - run: INKBOX_SDK_PATH="$PWD/.ci/inkbox/sdk/typescript" bash scripts/smoke-loader.sh
+      - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
+      - run: bash scripts/smoke-loader.sh

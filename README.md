@@ -377,6 +377,11 @@ inbound events. What it does:
 - **Permission prompts** raised inside a gateway session are relayed to the
   contact on their channel ("reply 1 to allow once, 2 to always allow, 3 to
   decline") and time out to a decline.
+- **A2A worker tasks** acknowledge pickup immediately and send a short,
+  nonterminal progress update about every three minutes until they settle. Set
+  `gateway.a2aProgressIntervalSeconds` or
+  `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS`; use `0` to disable periodic updates.
+  Progress stays in task history and does not start a separate requester turn.
 - **Control commands** (whole-message): `/clear`, `/stop`, `/status`,
   `/health`, `/resume`, `/usage`.
 - **Voice** (on by default with the gateway): setup offers Inkbox Voice AI,
@@ -384,7 +389,9 @@ inbound events. What it does:
   notifies OpenCode after it ends; the two local stacks keep the call attached
   to the OpenCode gateway. Realtime uses `INKBOX_REALTIME_API_KEY` (or
   `OPENAI_API_KEY` as the backstop) and runs the call as a live raw-audio
-  conversation with in-call actions; otherwise Inkbox handles speech-to-text
+  conversation with in-call actions. Call media negotiates mono 16-bit PCM at
+  16 kHz, with streaming conversion to and from the realtime connection’s
+  24 kHz PCM. Older call streams retain 8 kHz compatibility. Otherwise Inkbox handles speech-to-text
   and text-to-speech. Opt out with `INKBOX_VOICE_ENABLED=false` (stop answering)
   or `INKBOX_REALTIME_ENABLED=false` (force Inkbox STT/TTS).
   `inkbox_place_call` dials out with a purpose loaded into the call.
@@ -394,7 +401,7 @@ identity, signing key, opencode server, tunnel/public URL).
 
 ### Companion mode
 
-Version 0.2.11 requires SDK 0.7.3 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.
+Version 0.2.15 requires SDK 0.7.3 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.
 
 The sponsor's qualifying group message loads all available authorized history into one input. Ordinary tracked messages and activated conversations use separate sessions, isolated from private contact conversations. Replies retain the group conversation and, for email, its approved audience and stored parent. MMS chats with identical participant sets are one logical conversation.
 

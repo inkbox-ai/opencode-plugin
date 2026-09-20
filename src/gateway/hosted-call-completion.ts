@@ -212,6 +212,7 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
                 "Do not execute any non-SMS post-call action in this correction turn.",
                 "Do not delegate this send to another session or agent.",
                 `Exact open SMS commitment:\n${escapePromptData(smsCommitment ?? "")}`,
+                "If the caller specified an exact message body, copy it verbatim from the action or transcript. Do not replace it with an acknowledgement or summary.",
                 `Call inkbox_send_sms exactly once with to="${escapePromptData(remote)}". Do not use conversationId, send to another number, or make a second attempt. Plain-text replies are suppressed.`,
               ].join("\n\n")
             : [
@@ -239,6 +240,7 @@ export function createHostedCallCompletion(deps: HostedCallCompletionDeps) {
                   ? `A promised SMS must use inkbox_send_sms exactly once with to="${escapePromptData(remote)}". Do not use conversationId, a contact-derived number, or delegate the send to another session or agent. Count it complete only when the tool reports success; do not retry inside this turn.`
                   : undefined,
                 "Complete every still-open commitment once. Do not repeat work already completed during the call. If nothing remains, return [SILENT]; plain text is suppressed.",
+                "If the caller specified an exact message body, copy it verbatim from the action or transcript. Do not replace it with an acknowledgement or summary.",
               ]
                 .filter(Boolean)
                 .join("\n\n");

@@ -12,7 +12,12 @@ import {
 } from "../../src/gateway/companion.js";
 import { createNotifyOnce } from "../../src/gateway/dedup.js";
 import { dispatchEvent } from "../../src/gateway/dispatch.js";
-import { getHostedCall, saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
+import {
+  beginHostedSmsAttempt,
+  getHostedCall,
+  saveHostedCall,
+  settleHostedSmsAttempt,
+} from "../../src/gateway/hosted-call-registry.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
@@ -62,7 +67,16 @@ function makeManager(existingDir?: string) {
   const opencode = {
     tool: {
       ids: vi.fn(async () => ({
-        data: ["bash", "edit", "task", "inkbox_send_sms", "inkbox_send_email"],
+        data: [
+          "bash",
+          "edit",
+          "task",
+          "inkbox_send_sms",
+          "inkbox_send_email",
+          "inkbox_a2a_call",
+          "inkbox_list_a2a_tasks",
+          "inkbox_list_a2a_messages",
+        ],
       })),
     },
     session: {
@@ -92,9 +106,16 @@ function makeManager(existingDir?: string) {
         messages.set(o.path.id, rows);
         return { data: undefined };
       }),
+      prompt: vi.fn(async (_o: any) => ({
+        data: {
+          info: { id: "progress-response", role: "assistant" },
+          parts: [{ type: "text", text: "I'm validating the requested work." }],
+        },
+      })),
       messages: vi.fn(async (o: any) => ({ data: messages.get(o.path.id) ?? [] })),
       status: vi.fn(async () => ({ data: { ...statuses } })),
       abort: vi.fn(async () => ({})),
+      delete: vi.fn(async () => ({ data: true })),
       list: vi.fn(),
     },
   };
@@ -889,7 +910,7 @@ describe("capture turns", () => {
     expect(d.identity.sendText).not.toHaveBeenCalled();
   });
 
-  it("keeps hosted initial delegation disabled", async () => {
+  it("limits hosted initial work to non-A2A Inkbox tools", async () => {
     const d = makeManager();
     prepareHostedCall(d.dir);
     await d.mgr.runHostedCapture?.("ck", "call", {
@@ -898,9 +919,36 @@ describe("capture turns", () => {
       phase: "initial",
       expectedTarget: "+14155550123",
     });
-    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toMatchObject({
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toEqual({
+      bash: false,
+      edit: false,
       task: false,
+      inkbox_send_sms: true,
+      inkbox_send_email: true,
       inkbox_a2a_call: false,
+      inkbox_list_a2a_tasks: false,
+      inkbox_list_a2a_messages: false,
+    });
+  });
+
+  it("limits a hosted correction to the SMS tool", async () => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    await d.mgr.runHostedCapture?.("ck", "call", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "correction",
+      expectedTarget: "+14155550123",
+    });
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.tools).toEqual({
+      bash: false,
+      edit: false,
+      task: false,
+      inkbox_send_sms: true,
+      inkbox_send_email: false,
+      inkbox_a2a_call: false,
+      inkbox_list_a2a_tasks: false,
+      inkbox_list_a2a_messages: false,
     });
   });
 
@@ -955,6 +1003,64 @@ describe("capture turns", () => {
     expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-old");
   });
 
+  it.each([
+    { status: "retry", finish: "stop" },
+    { status: "idle", finish: "tool-calls" },
+    { status: "idle", finish: "unknown" },
+    { status: "idle", finish: undefined },
+  ])("retains the hosted SMS guard during $status/$finish", async ({ status, finish }) => {
+    const d = makeManager();
+    prepareHostedCall(d.dir);
+    d.opencode.session.status.mockImplementation(async () => ({
+      data: { "sess-1": { type: status } },
+    }));
+    const originalPrompt = d.opencode.session.promptAsync.getMockImplementation();
+    if (!originalPrompt) throw new Error("Missing prompt fixture");
+    d.opencode.session.promptAsync.mockImplementation(async (args: any) => {
+      const result = await originalPrompt(args);
+      const last = d.messages.get("sess-1")?.at(-1);
+      last.info.finish = finish;
+      const guard = beginHostedSmsAttempt({
+        sessionID: "sess-1",
+        target: "+14155550123",
+        hasConversationId: false,
+      });
+      expect(guard).toBeDefined();
+      if (guard) settleHostedSmsAttempt(guard, "success", undefined, "sent-1");
+      return result;
+    });
+    const pending = d.mgr.runHostedCapture?.("ck", "call", {
+      identityId: "ident-1",
+      callId: "call-1",
+      phase: "initial",
+      expectedTarget: "+14155550123",
+    });
+    try {
+      await vi.waitFor(
+        () => expect(d.opencode.session.status.mock.calls.length).toBeGreaterThan(1),
+        {
+          timeout: 2_000,
+        },
+      );
+      expect(getHostedCall("ident-1", "call-1")?.active?.sessionID).toBe("sess-1");
+      expect(() =>
+        beginHostedSmsAttempt({
+          sessionID: "sess-1",
+          target: "+14155550123",
+          hasConversationId: false,
+        }),
+      ).toThrow("second SMS attempt");
+      d.opencode.session.status.mockResolvedValue({ data: {} });
+      const last = d.messages.get("sess-1")?.at(-1);
+      last.info.finish = "stop";
+      await pending;
+      expect(getHostedCall("ident-1", "call-1")?.active).toBeUndefined();
+    } finally {
+      await d.mgr.close();
+      await pending?.catch(() => {});
+    }
+  });
+
   it("reattaches A2A recovery to its durable turn", async () => {
     const d = makeManager();
     const context = {
@@ -969,6 +1075,43 @@ describe("capture turns", () => {
     await d.mgr.runA2A("a2a:context-1", "task", context);
 
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
+  });
+
+  it("builds A2A progress in an isolated tool-free side session", async () => {
+    const d = makeManager();
+    const context = {
+      taskId: "task-1",
+      messageId: "message-1",
+      contextId: "context-1",
+      replyIntentCommitted: false,
+    };
+    await d.mgr.runA2A("a2a:context-1", "private task body", context);
+    const workerTurn = d.state.listTurns().find((turn) => turn.a2aContext?.taskId === "task-1");
+    d.messages.set(workerTurn?.sessionID ?? "", [
+      { info: { id: workerTurn?.messageID, role: "user" }, parts: [] },
+      {
+        info: { id: "assistant", role: "assistant", parentID: workerTurn?.messageID },
+        parts: [
+          {
+            type: "tool",
+            tool: "run_sql_query",
+            state: { input: { query: "private-value" }, output: "private-result" },
+          },
+        ],
+      },
+    ]);
+
+    await expect(
+      d.mgr.summarizeA2AProgress?.("a2a:context-1", "task-1", "previous public update"),
+    ).resolves.toBe("I'm validating the requested work.");
+
+    const sidePrompt = d.opencode.session.prompt.mock.calls[0][0];
+    expect(sidePrompt.body.parts[0].text).toContain("run_sql_query");
+    expect(sidePrompt.body.parts[0].text).toContain("private task body");
+    expect(JSON.stringify(sidePrompt)).not.toContain("private-value");
+    expect(JSON.stringify(sidePrompt)).not.toContain("private-result");
+    expect(Object.values(sidePrompt.body.tools).every((enabled) => enabled === false)).toBe(true);
+    expect(d.opencode.session.delete).toHaveBeenCalledOnce();
   });
 });
 

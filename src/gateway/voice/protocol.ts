@@ -1,7 +1,7 @@
 import type { WebSocket } from "ws";
 
 // Frames Inkbox sends over the call media WebSocket. Raw-media audio arrives
-// as an object under `media` (base64 µ-law in `payload`), not a bare string.
+// as an object under `media` (base64 negotiated audio in `payload`), not a bare string.
 export type InkboxCallFrame =
   | { event: "start"; [k: string]: unknown }
   | { event: "transcript"; is_final?: boolean; text?: string; [k: string]: unknown }
@@ -19,7 +19,7 @@ export function parseFrame(data: unknown): InkboxCallFrame | undefined {
   return undefined;
 }
 
-// Extract the base64 µ-law payload from a caller-audio frame. Tolerates the
+// Extract the base64 negotiated audio payload from a caller-audio frame. Tolerates the
 // object shape (`media.payload`) and a bare-string shape for forward compat.
 export function callerAudio(frame: { media?: { payload?: string } | string }): string | undefined {
   const m = frame.media;
@@ -34,9 +34,9 @@ export function speak(ws: WebSocket, text: string, turnId: string): void {
   ws.send(JSON.stringify({ event: "text", done: true, turn_id: turnId }));
 }
 
-// Forward a base64 µ-law audio chunk to the caller (Realtime raw-media mode).
-export function sendMedia(ws: WebSocket, base64Ulaw: string): void {
-  ws.send(JSON.stringify({ event: "media", media: { payload: base64Ulaw, track: "outbound" } }));
+// Forward a base64 negotiated audio audio chunk to the caller (Realtime raw-media mode).
+export function sendMedia(ws: WebSocket, base64Audio: string): void {
+  ws.send(JSON.stringify({ event: "media", media: { payload: base64Audio, track: "outbound" } }));
 }
 
 // Signal the end of a spoken audio response so the far side flushes playback.
@@ -52,10 +52,11 @@ export function sendClear(ws: WebSocket): void {
 
 // Upgrade-response headers select the call mode. STT/TTS mode asks Inkbox to
 // transcribe caller audio and synthesize our text replies; raw-media mode
-// (Realtime) turns both off so µ-law frames flow untouched.
+// (Realtime) turns both off so PCM frames carry the audio.
 export function callModeHeaders(mode: "stt-tts" | "raw-media"): Record<string, string> {
   const on = mode === "stt-tts";
   return {
+    ...(on ? {} : { "x-inkbox-audio-format": "pcm_s16le_16000" }),
     "x-use-inkbox-speech-to-text": on ? "true" : "false",
     "x-use-inkbox-text-to-speech": on ? "true" : "false",
   };

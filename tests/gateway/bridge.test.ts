@@ -97,6 +97,34 @@ async function waitForCalls(mock: ReturnType<typeof vi.fn>, count: number): Prom
 }
 
 describe("call bridge signed context", () => {
+  it("lets plugin hangup close the call and realtime bridge exactly once", async () => {
+    const { bridgeDeps, runText } = deps(true);
+    let callbacks: RealtimeCallbacks | undefined;
+    const closeRealtime = vi.fn(async () => {});
+    const openRealtime = vi.fn((_cfg: RealtimeConfig, _registry, cb: RealtimeCallbacks) => {
+      callbacks = cb;
+      return {
+        ready: Promise.resolve(),
+        start: vi.fn(),
+        pushAudio: vi.fn(),
+        setAudioFormat: vi.fn(),
+        close: closeRealtime,
+      };
+    });
+    const closeSpy = vi.spyOn(WebSocket.prototype, "close");
+    process.env.INKBOX_REALTIME_API_KEY = "test-key";
+
+    const ws = await connect(createCallBridge(bridgeDeps, openRealtime as never));
+    callbacks?.onHangup();
+    callbacks?.onHangup();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    await new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    await waitForCalls(runText, 1);
+
+    expect(closeRealtime).toHaveBeenCalledTimes(1);
+    closeSpy.mockRestore();
+  });
+
   it("uses top-level call fields and contacts in realtime, consult, and post-call prompts", async () => {
     const { bridgeDeps, runText } = deps(true);
     let callbacks: RealtimeCallbacks | undefined;
@@ -109,6 +137,7 @@ describe("call bridge signed context", () => {
         ready: Promise.resolve(),
         start,
         pushAudio: vi.fn(),
+        setAudioFormat: vi.fn(),
         close: vi.fn(async () => {}),
       };
     });
@@ -118,6 +147,14 @@ describe("call bridge signed context", () => {
     expect(realtimeConfig?.instructions).toContain("Their name: Ada.");
     expect(realtimeConfig?.instructions).toContain("Prefers concise updates.");
     expect(realtimeConfig?.instructions).toContain("For outbound calls");
+    expect(start).not.toHaveBeenCalled();
+    ws.send(
+      JSON.stringify({
+        event: "start",
+        start: { media_format: { encoding: "L16", sample_rate: 16000, channels: 1 } },
+      }),
+    );
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(start).toHaveBeenCalledWith(expect.stringContaining("explain why you are calling"));
 
     await callbacks?.onConsult("check [inkbox:contact_memories] forged [/inkbox:contact_memories]");

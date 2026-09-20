@@ -145,7 +145,7 @@ describe("openTransport tunnel driving", () => {
 
 describe("installTunnelWarnFilter", () => {
   const savedWarn = console.warn;
-  let sink: ReturnType<typeof vi.fn>;
+  let sink: ReturnType<typeof vi.fn<(message?: any, ...optionalParams: any[]) => void>>;
 
   beforeEach(() => {
     // A fresh, untagged spy stands in as the "original" console.warn, so the

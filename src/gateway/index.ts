@@ -85,6 +85,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     sessions,
     state,
     logger,
+    config: opts.config,
   });
   const hostedCalls = createHostedCallCompletion({
     inkbox: opts.inkbox,
@@ -301,6 +302,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     async close() {
       events.close();
       bursts?.flushAll();
+      await a2a.close();
       await sessions.close();
       await server.close();
       await transport.close();

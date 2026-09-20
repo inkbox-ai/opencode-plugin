@@ -8,6 +8,7 @@ import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
 import type { NotifyOnce } from "./dedup.js";
 import { deliveryFailureKey, deliveryFailureRecovery } from "./delivery-policy.js";
+import { isSuccessfulHostedSmsMessage } from "./hosted-call-registry.js";
 import { downloadMedia, mediaDir } from "./media.js";
 import { SILENT } from "./prompts.js";
 import type {
@@ -52,7 +53,11 @@ export interface DispatchDeps {
 // may retry); filtered/ignored events return true (ack, no retry).
 export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (event.provider !== "inkbox") {
-    if (deps.onExternal) await deps.onExternal(event);
+    if (deps.onExternal) {
+      void deps
+        .onExternal(event)
+        .catch((error) => deps.logger.error("external.dispatch_failed", { error: String(error) }));
+    }
     return true;
   }
   const type = event.eventType ?? inferType(event.body);
@@ -502,6 +507,10 @@ async function handleDeliveryFailure(
       messageId,
       conversationId: companionConversationId,
     });
+    return true;
+  }
+  if (isText && messageId && isSuccessfulHostedSmsMessage(messageId)) {
+    deps.logger.info("dispatch.hosted_sms_delivery_failed");
     return true;
   }
   const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];

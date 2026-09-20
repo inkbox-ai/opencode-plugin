@@ -4,6 +4,7 @@ import {
   hasAfterCallSmsIntent,
   hasSmsIntent,
   normalizedVoiceTokens,
+  wasAcceptedForDelivery,
 } from "../live/voice-proof.js";
 
 describe("hosted live voice proof normalization", () => {
@@ -27,5 +28,15 @@ describe("hosted live voice proof normalization", () => {
   it("recognizes open-action SMS wording independently of timing", () => {
     expect(hasSmsIntent("Send a text message containing the marker after the call.")).toBe(true);
     expect(hasSmsIntent("Review the text-message history.")).toBe(false);
+  });
+
+  it("does not count a pre-delivery policy block as an accepted SMS", () => {
+    expect(wasAcceptedForDelivery({ deliveryStatus: "blocked_spam_filter" })).toBe(false);
+    expect(wasAcceptedForDelivery({ delivery_status: "blocked_spam_filter" })).toBe(false);
+    expect(wasAcceptedForDelivery({ deliveryStatus: "queued" })).toBe(true);
+    expect(wasAcceptedForDelivery({ deliveryStatus: "delivered" })).toBe(true);
+    expect(wasAcceptedForDelivery({ deliveryStatus: "delivery_failed" })).toBe(true);
+    expect(wasAcceptedForDelivery({ deliveryStatus: "sending_failed" })).toBe(true);
+    expect(wasAcceptedForDelivery({})).toBe(true);
   });
 });
