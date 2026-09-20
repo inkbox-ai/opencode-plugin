@@ -14,6 +14,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/inkbox-sdk
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -38,6 +39,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/inkbox-sdk
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
@@ -58,6 +60,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/inkbox-sdk
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \

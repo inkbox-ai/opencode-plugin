@@ -10,7 +10,7 @@ fi
 attempts=4
 last_status=1
 for attempt in $(seq 1 "$attempts"); do
-  if npm "$@"; then
+  if node "$(dirname "${BASH_SOURCE[0]}")/sdk-package.mjs" "$@"; then
     exit 0
   else
     last_status=$?

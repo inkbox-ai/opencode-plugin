@@ -42,6 +42,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/inkbox-sdk
       - name: Install locked dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
