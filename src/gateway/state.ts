@@ -258,7 +258,9 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
             (candidate) =>
               !candidate.hostedCapture &&
               !candidate.companion &&
-              ["completed", "delivered", "failed", "interrupted"].includes(candidate.state),
+              (["delivered", "failed", "interrupted"].includes(candidate.state) ||
+                (candidate.state === "completed" && !candidate.deliver) ||
+                (candidate.state === "context_only" && Boolean(candidate.consumedBy))),
           )
           .sort((a, b) => b.updatedAt - a.updatedAt);
         for (const stale of terminal.slice(200)) delete turns[stale.id];

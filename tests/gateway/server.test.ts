@@ -181,3 +181,21 @@ describe("POST /webhook", () => {
     expect(rollback).toHaveBeenCalledWith("req-fail");
   });
 });
+
+it.each([{ companion: null }, { data: { companion: { phase: "live" } } }])(
+  "keeps ordinary request dedup for non-authoritative Companion metadata: %o",
+  async (metadata) => {
+    const deps = baseDeps({ providers: [testProvider({ name: "inkbox" })] });
+    const url = await start(deps);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "ordinary-retry" },
+        body: JSON.stringify({ event_type: "text.received", ...metadata }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    expect(deps.onEvent).toHaveBeenCalledOnce();
+  },
+);

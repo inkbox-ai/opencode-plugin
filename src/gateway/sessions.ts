@@ -27,7 +27,7 @@ import {
   getHostedCall,
 } from "./hosted-call-registry.js";
 import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
-import { prepareReply } from "./reply.js";
+import { prepareReply, ReplyPreparationError } from "./reply.js";
 import { companionWakes, mentionsAgent, sameAuthor } from "./response-policy.js";
 import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
 import type {
@@ -89,6 +89,32 @@ const POLL_MS = 250;
 const LEASE_MS = 60_000;
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastMessageSequence = 0n;
+
+function retryableRead(error: unknown): boolean {
+  const err = error as {
+    status?: number;
+    statusCode?: number;
+    status_code?: number;
+    name?: string;
+    code?: string;
+    cause?: { code?: string };
+  } | null;
+  const status = err?.status ?? err?.statusCode ?? err?.status_code;
+  return (
+    status === 429 ||
+    (typeof status === "number" && status >= 500 && status < 600) ||
+    ["TimeoutError", "AbortError", "NetworkError"].includes(err?.name ?? "") ||
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ETIMEDOUT",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ].includes(err?.code ?? err?.cause?.code ?? "")
+  );
+}
 
 function createMessageID(): string {
   const current = BigInt(Date.now()) * 0x1000n + 1n;
@@ -524,7 +550,7 @@ export function createSessionManager(
         liveContent = `Current receipt: ${c.sourceId}; sender_access=${c.senderAccess ?? "unknown"}. Its message is in the initialization above.`;
     }
     if (!target) throw new Error("Companion reply target is unavailable.");
-    target = { ...target, sender: c.from };
+    target = { ...target, sender: c.from, companionMode: true, group: true };
     const contactId = history?.companionPolicyReady
       ? history.companionContactId
       : await deps.companionContactId?.(sponsor);
@@ -609,6 +635,19 @@ export function createSessionManager(
     throw new HostedCaptureDeferredError();
   }
 
+  function recoverReply(turn: DurableTurn, error: unknown, output: string): void {
+    const target = turn.replyTarget;
+    if (!target) return;
+    const recovery = deliveryFailureRecovery({
+      key: deliveryFailureKey(target.channel, target.to, target.conversationId),
+      channel: target.channel,
+      target: target.to,
+      failure: error,
+      failedBody: output,
+    });
+    if (recovery.prompt) enqueue(makeTurn(turn.chatKey, "normal", recovery.prompt, true, target));
+  }
+
   async function finish(turn: DurableTurn, output: string | undefined): Promise<void> {
     if (closing) return;
     if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS)) {
@@ -636,7 +675,19 @@ export function createSessionManager(
     }
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
-      const send = await prepareReply(deps.inkbox, current.replyTarget, output, deps.logger);
+      let send: Awaited<ReturnType<typeof prepareReply>>;
+      try {
+        send = await prepareReply(deps.inkbox, current.replyTarget, output, deps.logger);
+      } catch (error) {
+        if (!(error instanceof ReplyPreparationError)) throw error;
+        deps.state.updateTurn(current.id, {
+          state: current.companion ? "paused" : "failed",
+          error: String(error),
+        });
+        if (!current.companion) recoverReply(current, error, output);
+        settle(current.id, output);
+        return;
+      }
       if (closing || deps.state.getTurn(current.id)?.state === "interrupted") return;
       if (
         !deps.state.transitionTurn(
@@ -663,19 +714,7 @@ export function createSessionManager(
           settle(current.id, output);
           return;
         }
-        const recovery = deliveryFailureRecovery({
-          key: deliveryFailureKey(
-            current.replyTarget.channel,
-            current.replyTarget.to,
-            current.replyTarget.conversationId,
-          ),
-          channel: current.replyTarget.channel,
-          target: current.replyTarget.to,
-          failure: err,
-          failedBody: output,
-        });
-        if (recovery.prompt)
-          enqueue(makeTurn(current.chatKey, "normal", recovery.prompt, true, current.replyTarget));
+        recoverReply(current, err, output);
       }
     }
     if (current.deliver && output === undefined)
@@ -750,6 +789,16 @@ export function createSessionManager(
         ["hydrating", "queued", "completed", "submitted"].includes(latest.state)
       ) {
         const retryCount = (latest.retryCount ?? 0) + 1;
+        if (retryCount > 5 && !retryableRead(err)) {
+          deps.state.updateTurn(id, {
+            retryCount,
+            retryAt: undefined,
+            state: latest.companion ? "paused" : "failed",
+            error: String(err),
+          });
+          settle(id, undefined, err);
+          return;
+        }
         const retryAt = Date.now() + Math.min(60_000, POLL_MS * 2 ** Math.min(retryCount - 1, 8));
         deps.state.updateTurn(id, { retryCount, retryAt, error: String(err) });
         const timer = setTimeout(() => {
@@ -1034,17 +1083,24 @@ export function createSessionManager(
       companion = turn.companion ?? companion;
       const history = deps.state.getTurn(`${chatKey}:history`);
       if (
-        companion.metadata.phase === "live" &&
         history?.historySourceIds?.includes(companion.sourceId) &&
         history.companion?.sourceId !== companion.sourceId
       ) {
         deps.state.updateTurn(turn.id, { state: "delivered" });
         return;
       }
+      const controlTarget =
+        history?.replyTarget ?? (companion.metadata.phase === "ordinary" ? target : undefined);
       if (
-        history?.replyTarget &&
-        companion.metadata.phase === "live" &&
-        companion.mailBodyPending
+        controlTarget &&
+        companion.metadata.phase !== "initialization" &&
+        companion.mailBodyPending &&
+        deps.state
+          .listTurns()
+          .some(
+            (pending) =>
+              pending.chatKey === chatKey && ["submitted", "submitting"].includes(pending.state),
+          )
       ) {
         try {
           turn = await resolveCompanionMessage(turn);
@@ -1056,15 +1112,18 @@ export function createSessionManager(
         if (turn.state !== "hydrating") return;
       }
       if (
-        history?.replyTarget &&
-        companion.metadata.phase === "live" &&
+        controlTarget &&
+        companion.metadata.phase !== "initialization" &&
         companionWakes(companion, deps.config.gateway) &&
         deps.companionLocalAllowed?.(
-          history.replyTarget.companionSponsor ?? history.replyTarget.sender ?? companion.from,
-          history.companionContactId,
+          controlTarget.companionSponsor ?? companion.from,
+          history?.companionContactId,
           true,
         ) !== false &&
-        (await deps.companionControl?.(companion, chatKey, history.replyTarget))
+        (await deps.companionControl?.(companion, chatKey, {
+          ...controlTarget,
+          sender: companion.from,
+        }))
       ) {
         deps.state.updateTurn(turn.id, { state: "delivered", controlHandled: true });
         return;
@@ -1081,6 +1140,7 @@ export function createSessionManager(
         rfcMessageId: msg.rfcMessageId,
         messageId: msg.messageId,
         sender: msg.from,
+        group: Boolean(msg.group),
       };
 
       clearDeliveryFailures(deliveryFailureKey(msg.channel, msg.from, msg.conversationId));
@@ -1140,7 +1200,9 @@ export function createSessionManager(
 
     async runText(chatKey, text) {
       if (closing) return undefined;
-      return promiseFor(makeTurn(chatKey, "capture", text, false));
+      return promiseFor(
+        makeTurn(chatKey, "capture", text, false, deps.state.getReplyTarget(chatKey)),
+      );
     },
 
     async runHostedCapture(chatKey, text, capture) {
@@ -1155,7 +1217,9 @@ export function createSessionManager(
       }
       const turn =
         existing ??
-        makeTurn(chatKey, "capture", text, false, undefined, { hostedCapture: capture });
+        makeTurn(chatKey, "capture", text, false, deps.state.getReplyTarget(chatKey), {
+          hostedCapture: capture,
+        });
       return promiseFor(turn, true);
     },
 

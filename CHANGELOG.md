@@ -12,6 +12,7 @@
 - Isolates ordinary group/reaction sessions, binds approvals and replies to the originating sender/route, and uses canonical email reply-all.
 - Recovers transient host startup and send-preparation failures without losing sessions or regenerating completed replies.
 - Clears buffered context on session reset, reconciles accepted context after restart, and resolves incomplete email approvals without waiting behind the paused host turn.
+- Restores ordinary reply-length recovery, bounds permanent preparation retries, and preserves same-contact direct-message approval answers across channels while binding shared-group approvals to their sender.
 
 ## Unreleased
 

@@ -3,6 +3,8 @@ import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limi
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
 
+export class ReplyPreparationError extends Error {}
+
 export interface ReplyResult {
   delivered: boolean;
   reason?: "silent" | "empty" | "sent";
@@ -22,10 +24,14 @@ export async function prepareReply(
     return async () => ({ delivered: false, reason: trimmed ? "silent" : "empty" });
   const parentId = target.companion?.replyToMessageId ?? target.messageId ?? "";
   if (target.channel === "email" && !parentId)
-    throw new Error("Email reply requires the stored inbound message ID.");
+    throw new ReplyPreparationError("Email reply requires the stored inbound message ID.");
   const body = target.channel === "email" ? trimmed : stripMarkdown(trimmed);
-  if (target.channel === "sms") assertSmsTextWithinLimit(body);
-  if (target.channel === "imessage") assertIMessageTextWithinLimit(body);
+  try {
+    if (target.channel === "sms") assertSmsTextWithinLimit(body);
+    if (target.channel === "imessage") assertIMessageTextWithinLimit(body);
+  } catch (error) {
+    throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
+  }
   const identity = await runtime.getIdentity();
   return async () => {
     const message =

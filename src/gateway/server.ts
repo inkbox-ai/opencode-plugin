@@ -91,10 +91,7 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
       provider.name === "inkbox" &&
       parsed &&
       typeof parsed === "object" &&
-      (Object.hasOwn(parsed, "companion") ||
-        (parsed.data &&
-          typeof parsed.data === "object" &&
-          Object.hasOwn(parsed.data, "companion")));
+      parsed.companion != null;
     if (!companion && !deps.dedup.begin(requestId)) {
       // Already seen/in-flight — ack so the sender stops retrying.
       return send(res, 200, JSON.stringify({ deduped: true }), "application/json");

@@ -73,7 +73,8 @@ export function createEscalationBridge(deps: EscalationDeps) {
         .find(
           (turn) =>
             turn.sessionID === perm.sessionID && ["submitted", "submitting"].includes(turn.state),
-        )?.replyTarget;
+        )?.replyTarget ??
+      deps.state.getReplyTarget(chatKey);
     const deadline =
       existing?.deadline ??
       (deps.timeoutMs > 0 ? Date.now() + deps.timeoutMs : Number.MAX_SAFE_INTEGER);
@@ -110,6 +111,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
         }
       }
       deps.state.savePermission({
+        replyTarget: origin,
         permissionID: perm.permissionID,
         sessionID: perm.sessionID,
         chatKey,

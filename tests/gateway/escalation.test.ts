@@ -184,3 +184,32 @@ describe("handlePermission", () => {
     );
   });
 });
+
+it("falls back to a capture chat route and persists it with the permission", async () => {
+  const deps = makeDeps();
+  const target = {
+    channel: "email" as const,
+    sender: "person@example.com",
+    messageId: "inbound-parent",
+  };
+  deps.state.setReplyTarget("ck", target);
+  deps.state.saveTurn({
+    id: "capture",
+    messageID: "capture",
+    chatKey: "ck",
+    sessionID: perm.sessionID,
+    state: "submitted",
+    kind: "capture",
+    text: "task",
+    deliver: false,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const ask = vi.fn(async () => {
+    expect(deps.state.listPermissions()[0].replyTarget).toEqual(target);
+    return "1";
+  });
+  deps.relay.ask = ask;
+  await createEscalationBridge(deps).handlePermission(perm);
+  expect(ask).toHaveBeenCalledWith("ck", expect.any(String), target);
+});

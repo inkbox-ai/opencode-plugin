@@ -66,12 +66,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   ): boolean => {
     if (requireReply) {
       const recipients = opts.config.outbound.allowedRecipients;
-      if (
-        checkOutboundRecipient(from, recipients) ||
-        ((g.outboundApproval === "allowlist" || opts.config.outbound.approval === "allowlist") &&
-          recipients.length === 0)
-      )
-        return false;
+      if (checkOutboundRecipient(from, recipients)) return false;
     }
     return senderAllowed(from, contactId, g);
   };
@@ -93,7 +88,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       if (!companionWakes(turn, g)) return false;
       const raw = controlText(turn.rawText ?? "", turn.handle);
       if (
-        turn.metadata.phase === "live" &&
+        turn.metadata.phase !== "initialization" &&
         isPermissionReply(raw) &&
         pending.tryConsume(chatKey, raw, { sender: turn.from, channel: target.channel })
       )
@@ -198,14 +193,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
       async ask(chatKey, prompt, target) {
+        target ??= state.getReplyTarget(chatKey);
         if (!target?.sender) return undefined;
-        const answer = pending.await(chatKey, g.permissionTimeoutS * 1000, {
-          sender: target.sender,
-          channel: target.channel,
-        });
+        const answer = pending.await(
+          chatKey,
+          g.permissionTimeoutS * 1000,
+          target.group || target.companionMode || target.companionSponsor
+            ? { sender: target.sender, channel: target.channel }
+            : undefined,
+        );
         const hint =
-          target.companionSponsor && g.groupReplyMode === "mention"
-            ? "\nInclude @agent in your answer (for example, @agent allow)."
+          (target.companionMode || target.companionSponsor) && g.groupReplyMode === "mention"
+            ? target.channel === "email"
+              ? "\nKeep the agent in To, or include @agent in your answer (for example, @agent allow)."
+              : "\nInclude @agent in your answer (for example, @agent allow)."
             : "";
         await deliverReply(opts.inkbox, target, prompt + hint, logger);
         return answer;
@@ -296,11 +297,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           subject: msg.subject,
           rfcMessageId: msg.rfcMessageId,
           messageId: msg.messageId,
+          group: Boolean(msg.group),
         };
         const raw = msg.rawText ?? msg.text;
         if (
           !msg.reaction &&
-          isPermissionReply(raw) &&
+          (!msg.group || msg.channel === "email" || isPermissionReply(raw)) &&
           pending.tryConsume(msg.chatKey, raw, { sender: msg.from, channel: msg.channel })
         )
           return;

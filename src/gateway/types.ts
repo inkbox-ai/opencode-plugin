@@ -87,6 +87,8 @@ export interface ReplyTarget {
   messageId?: string;
   sender?: string;
   companionSponsor?: string;
+  group?: boolean;
+  companionMode?: boolean;
   companion?: { replyToMessageId: string; to: string[]; cc: string[] };
 }
 

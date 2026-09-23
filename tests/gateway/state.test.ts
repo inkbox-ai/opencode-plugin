@@ -197,3 +197,52 @@ it("orders later Companion turns after a checkpointed reply even when its lease 
   state.updateTurn("turn-1", { state: "delivered" });
   expect(state.claimTurn("turn-2", "new-owner", 10000)).toBeDefined();
 });
+
+it("bounds consumed ordinary quiet context while retaining Companion dedup and unconsumed context", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  dirs.push(dir);
+  const state = createStateStore(dir);
+  const base = {
+    messageID: "context",
+    chatKey: "group",
+    state: "context_only" as const,
+    kind: "normal" as const,
+    text: "history",
+    deliver: false,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  state.saveTurn({ ...base, id: "unconsumed" });
+  state.saveTurn({
+    ...base,
+    id: "pending-delivery",
+    state: "completed",
+    deliver: true,
+    output: "saved answer",
+  });
+  state.saveTurn({
+    ...base,
+    id: "companion-source",
+    consumedBy: "prior",
+    companion: {
+      identityId: "identity",
+      handle: "agent",
+      sourceId: "source",
+      from: "person@example.com",
+      initialization: false,
+      metadata: {
+        channel: "mail",
+        phase: "ordinary",
+        sequence: 1,
+        scope_id: "scope",
+        conversation_id: "conversation",
+      },
+    },
+  });
+  for (let i = 0; i < 205; i++)
+    state.saveTurn({ ...base, id: `ordinary-${i}`, consumedBy: "previous-turn", updatedAt: i + 2 });
+  expect(state.listTurns().filter((turn) => turn.id.startsWith("ordinary-"))).toHaveLength(200);
+  expect(state.getTurn("unconsumed")).toBeDefined();
+  expect(state.getTurn("pending-delivery")?.output).toBe("saved answer");
+  expect(state.getTurn("companion-source")).toBeDefined();
+});
