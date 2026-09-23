@@ -103,7 +103,9 @@ function retryableRead(error: unknown): boolean {
   return (
     status === 429 ||
     (typeof status === "number" && status >= 500 && status < 600) ||
-    ["TimeoutError", "AbortError", "NetworkError"].includes(err?.name ?? "") ||
+    ["TimeoutError", "AbortError", "NetworkError", "InkboxConnectionError"].includes(
+      err?.name ?? "",
+    ) ||
     [
       "ECONNRESET",
       "ECONNREFUSED",
@@ -1117,7 +1119,10 @@ export function createSessionManager(
         companionWakes(companion, deps.config.gateway) &&
         deps.companionLocalAllowed?.(
           controlTarget.companionSponsor ?? companion.from,
-          history?.companionContactId,
+          history?.companionContactId ??
+            (companion.metadata.phase === "ordinary"
+              ? await deps.companionContactId?.(companion.from)
+              : undefined),
           true,
         ) !== false &&
         (await deps.companionControl?.(companion, chatKey, {
@@ -1140,7 +1145,7 @@ export function createSessionManager(
         rfcMessageId: msg.rfcMessageId,
         messageId: msg.messageId,
         sender: msg.from,
-        group: Boolean(msg.group),
+        group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
       };
 
       clearDeliveryFailures(deliveryFailureKey(msg.channel, msg.from, msg.conversationId));

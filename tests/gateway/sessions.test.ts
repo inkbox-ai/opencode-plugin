@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Inkbox } from "@inkbox/sdk";
+import { Inkbox, InkboxConnectionError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
@@ -129,6 +129,7 @@ function makeManager(existingDir?: string) {
   const companionControl = vi.fn(
     async (_turn: CompanionTurn, _key: string, _target: unknown) => false,
   );
+  const companionContactId = vi.fn(async (_from: string): Promise<string | undefined> => undefined);
   const mgr = createSessionManager({
     opencode: opencode as never,
     inkbox: inkbox as never,
@@ -139,6 +140,7 @@ function makeManager(existingDir?: string) {
     companionSenderAllowed,
     companionLocalAllowed,
     companionControl,
+    companionContactId,
   });
   return {
     mgr,
@@ -146,6 +148,7 @@ function makeManager(existingDir?: string) {
     companionSenderAllowed,
     companionLocalAllowed,
     companionControl,
+    companionContactId,
     config,
     logger,
     opencode,
@@ -1426,21 +1429,26 @@ describe("Companion recovery ordering and current-message controls", () => {
 });
 
 describe("context consumption boundaries", () => {
-  it("keeps ordinary multi-recipient email outside the group mention gate", async () => {
-    const d = makeManager();
-    d.config.gateway.groupReplyMode = "mention";
-    await d.mgr.handleInbound(
-      sms("normal email without mention", {
-        channel: "email",
-        from: "sender@example.com",
-        messageId: "stored-email",
-        group: { participantCount: 3 },
-      }),
-    );
-    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
-    expect(d.identity.replyAllEmail).toHaveBeenCalledWith("stored-email", { bodyText: "reply" });
-    await d.mgr.close();
-  });
+  it.each([undefined, "contact-1"])(
+    "keeps ordinary multi-recipient email with contact=%s outside the group mention gate",
+    async (contactId) => {
+      const d = makeManager();
+      d.config.gateway.groupReplyMode = "mention";
+      await d.mgr.handleInbound(
+        sms("normal email without mention", {
+          channel: "email",
+          contactId,
+          from: "sender@example.com",
+          messageId: "stored-email",
+          group: { participantCount: 3 },
+        }),
+      );
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+      expect(d.identity.replyAllEmail).toHaveBeenCalledWith("stored-email", { bodyText: "reply" });
+      expect(d.state.getReplyTarget("ck")?.group).toBe(!contactId);
+      await d.mgr.close();
+    },
+  );
   it("does not resurrect buffered ordinary context after a reset and restart", async () => {
     const d = makeManager();
     d.config.gateway.groupReplyMode = "mention";
@@ -1647,6 +1655,8 @@ describe("reviewed recovery and approval boundaries", () => {
   it("answers an ordinary-phase Companion approval before its host turn completes", async () => {
     const d = makeManager();
     d.setAutoComplete(false);
+    d.companionContactId.mockResolvedValue("contact-1");
+    d.companionLocalAllowed.mockImplementation((_from, contactId) => contactId === "contact-1");
     const target = {
       channel: "sms" as const,
       conversationId: "conversation-1",
@@ -1659,15 +1669,20 @@ describe("reviewed recovery and approval boundaries", () => {
     d.companionControl.mockImplementation(async (turn) => turn.rawText === "allow");
     await d.mgr.acceptCompanion({ ...companion("ordinary", 2), rawText: "allow" }, "allow", target);
     expect(d.companionControl).toHaveBeenCalledOnce();
+    expect(d.companionLocalAllowed).toHaveBeenLastCalledWith(
+      "sponsor@example.com",
+      "contact-1",
+      true,
+    );
     expect(
       d.state.listTurns().find((turn) => turn.companion?.sourceId === "source-2")?.controlHandled,
     ).toBe(true);
     expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
     await d.mgr.close();
   });
-  it.each([false, true])(
-    "bounds permanent hydration failures while transport=%s remains retryable",
-    async (transport) => {
+  it.each(["permanent", "http", "sdk"])(
+    "bounds permanent hydration failures while %s reads retain their retry policy",
+    async (kind) => {
       const d = makeManager();
       const c = companion();
       const chatKey = companionChatKey(c.identityId, c.metadata);
@@ -1684,13 +1699,23 @@ describe("reviewed recovery and approval boundaries", () => {
         createdAt: 1,
         updatedAt: 1,
       });
-      d.inkbox.getClient.mockRejectedValue(
-        Object.assign(new Error("snapshot unavailable"), transport ? { status: 503 } : {}),
-      );
+      const error =
+        kind === "sdk"
+          ? new InkboxConnectionError(
+              "API unreachable",
+              new TypeError("fetch failed", {
+                cause: Object.assign(new Error("Connection refused"), { code: "ECONNREFUSED" }),
+              }),
+            )
+          : Object.assign(
+              new Error("snapshot unavailable"),
+              kind === "http" ? { status: 503 } : {},
+            );
+      d.inkbox.getClient.mockRejectedValue(error);
       await d.mgr.catchUp();
       await vi.waitFor(() => expect(d.state.getTurn("pending")?.retryCount).toBe(6));
-      expect(d.state.getTurn("pending")?.state).toBe(transport ? "hydrating" : "paused");
-      expect(Boolean(d.state.getTurn("pending")?.retryAt)).toBe(transport);
+      expect(d.state.getTurn("pending")?.state).toBe(kind === "permanent" ? "paused" : "hydrating");
+      expect(Boolean(d.state.getTurn("pending")?.retryAt)).toBe(kind !== "permanent");
       expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
       await d.mgr.close();
     },

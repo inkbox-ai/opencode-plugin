@@ -13,6 +13,7 @@ const hooks = vi.hoisted(() => ({
   server: undefined as any,
   inbound: vi.fn(async () => {}),
   abort: vi.fn(async () => true),
+  reset: vi.fn(async (_key: string) => {}),
 }));
 vi.mock("../../src/gateway/sessions.js", () => ({
   createSessionManager: (deps: any) => {
@@ -20,6 +21,7 @@ vi.mock("../../src/gateway/sessions.js", () => ({
     return {
       handleInbound: hooks.inbound,
       abortTurn: hooks.abort,
+      resetSession: hooks.reset,
       catchUp: async () => {},
       close: async () => {},
     };
@@ -64,6 +66,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   hooks.inbound.mockClear();
   hooks.abort.mockClear();
+  hooks.reset.mockClear();
 });
 async function start() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
@@ -82,7 +85,10 @@ async function start() {
     getIdentity: async () => identity,
     getClient: async () => ({ contacts: { lookup: async () => [] } }),
   };
-  const opencode = { event: { subscribe: () => new Promise(() => {}) } };
+  const opencode = {
+    event: { subscribe: () => new Promise(() => {}) },
+    session: { list: vi.fn(async () => ({ data: [{ id: "session-a" }, { id: "session-b" }] })) },
+  };
   gateways.push(
     await startGateway({
       inkbox: inkbox as never,
@@ -225,4 +231,50 @@ it("only treats exact supported sponsor commands as Companion controls", async (
     await hooks.manager.companionControl({ ...turn, rawText: "@agent /stop" }, "contact-1", target),
   ).toBe(true);
   expect(hooks.abort).toHaveBeenCalledOnce();
+});
+
+it("resumes a selected Companion session only for its addressed eligible sponsor in the same scope", async () => {
+  const d = await start();
+  d.config.gateway.groupReplyMode = "mention";
+  const target: ReplyTarget = {
+    channel: "sms",
+    conversationId: "group-1",
+    companionSponsor: "+15550000001",
+    sender: "+15550000002",
+    companionMode: true,
+  };
+  const turn: CompanionTurn = {
+    identityId: "identity",
+    handle: "agent",
+    sourceId: "source",
+    from: "+15550000001",
+    rawText: "@agent /resume",
+    senderAccess: "direct",
+    initialization: false,
+    metadata: {
+      phase: "live",
+      channel: "phone",
+      scope_id: "scope",
+      activation_id: "activation",
+      conversation_id: "group-1",
+      sequence: 2,
+    },
+  };
+  expect(await hooks.manager.companionControl(turn, "companion-scope", target)).toBe(true);
+  const selection = { ...turn, rawText: "@agent 2" };
+  for (const changed of [
+    { ...selection, from: "+15550000002" },
+    { ...selection, senderAccess: "sponsored" },
+    { ...selection, rawText: "2" },
+    { ...selection, rawText: "@agent 2 extra" },
+  ])
+    expect(await hooks.manager.companionControl(changed, "companion-scope", target)).toBe(false);
+  expect(await hooks.manager.companionControl(selection, "other-scope", target)).toBe(false);
+  expect(hooks.reset).not.toHaveBeenCalled();
+  expect(await hooks.manager.companionControl(selection, "companion-scope", target)).toBe(true);
+  expect(hooks.reset).toHaveBeenCalledExactlyOnceWith("companion-scope");
+  expect(hooks.manager.state.getSession("companion-scope")).toBe("session-b");
+  expect(hooks.manager.state.getSession("other-scope")).toBeUndefined();
+  expect(await hooks.manager.companionControl(selection, "companion-scope", target)).toBe(false);
+  expect(d.identity.sendText).toHaveBeenCalledTimes(2);
 });

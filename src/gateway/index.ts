@@ -49,6 +49,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
+  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
 
   const deps: GatewayDeps = {
     inkbox: opts.inkbox,
@@ -93,13 +94,31 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.tryConsume(chatKey, raw, { sender: turn.from, channel: target.channel })
       )
         return true;
+      if (!sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? ""))
+        return false;
+      const candidates = resumeCandidates.get(chatKey);
+      if (
+        candidates &&
+        candidates.channel === target.channel &&
+        sameAuthor(target.channel, candidates.sender, turn.from) &&
+        /^\d+$/.test(raw.trim())
+      ) {
+        resumeCandidates.delete(chatKey);
+        const chosen = candidates.ids[Number(raw.trim()) - 1];
+        if (chosen) {
+          await sessions.resetSession(chatKey);
+          state.setSession(chatKey, chosen);
+          await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
+          return true;
+        }
+      }
       if (
         !["/clear", "/new", "/stop", "/cancel", "/status", "/health", "/usage", "/resume"].includes(
           raw.trim().toLowerCase(),
-        ) ||
-        !sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? "")
+        )
       )
         return false;
+      resumeCandidates.delete(chatKey);
       const result = await handleCommand(
         {
           opencode: opts.opencode,
@@ -113,6 +132,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         raw,
       );
       if (result === null) return false;
+      if (typeof result !== "string" && result.resume?.length)
+        resumeCandidates.set(chatKey, {
+          ids: result.resume,
+          sender: turn.from,
+          channel: target.channel,
+        });
       const reply = typeof result === "string" ? result : result.reply;
       await deliverReply(opts.inkbox, target, reply, logger);
       return true;
@@ -281,9 +306,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     }
   }
 
-  // Session ids a /resume awaits a numeric selection from, per contact.
-  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
-
   // Intercept inbound before it becomes a turn: (1) a pending escalation
   // answer consumes the message; (2) a /resume selection; (3) a control
   // command replies directly.
@@ -299,7 +321,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           subject: msg.subject,
           rfcMessageId: msg.rfcMessageId,
           messageId: msg.messageId,
-          group: Boolean(msg.group),
+          group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
         };
         const raw = msg.rawText ?? msg.text;
         if (
