@@ -75,7 +75,11 @@ describe("handlePermission", () => {
 
     await bridge.handlePermission(perm);
 
-    expect(deps.relay.ask).toHaveBeenCalledWith("ck", expect.stringContaining("Delete 3 files"));
+    expect(deps.relay.ask).toHaveBeenCalledWith(
+      "ck",
+      expect.stringContaining("Delete 3 files"),
+      undefined,
+    );
     expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledWith({
       path: { id: "sess-1", permissionID: "perm-1" },
       query: { directory: "/proj" },

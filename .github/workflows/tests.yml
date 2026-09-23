@@ -14,14 +14,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: ./.github/actions/inkbox-sdk
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.3 \
+            @inkbox/sdk@0.7.7 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
@@ -39,15 +38,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: ./.github/actions/inkbox-sdk
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.3 \
+            @inkbox/sdk@0.7.7 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.3 \
+            @inkbox/sdk@0.7.7 \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
       - run: npx vitest run tests/contract
@@ -60,11 +58,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: ./.github/actions/inkbox-sdk
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.3 \
+            @inkbox/sdk@0.7.7 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - run: bash scripts/smoke-loader.sh

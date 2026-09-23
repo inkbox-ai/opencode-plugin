@@ -3,7 +3,7 @@ import type { ReplyTarget } from "./types.js";
 
 export type { CompanionMetadata } from "@inkbox/sdk";
 
-export const COMPANION_MAX_BYTES = 128 * 1024;
+export const COMPANION_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface CompanionTurn {
   metadata: CompanionMetadata;
@@ -15,6 +15,12 @@ export interface CompanionTurn {
   content?: string;
   mailBodyPending?: boolean;
   subject?: string;
+  environment?: string;
+  rawText?: string;
+  senderAccess?: string;
+  emailAddress?: string;
+  toAddresses?: string[];
+  hydrated?: boolean;
 }
 
 export function companionMetadata(value: unknown): CompanionMetadata {
@@ -47,14 +53,20 @@ export function companionMetadata(value: unknown): CompanionMetadata {
   };
 }
 
-export function companionChatKey(identityId: string, m: CompanionMetadata): string {
-  return `companion:${identityId}:${m.channel}:${m.conversation_id}:${m.scope_id}:${m.activation_id ?? "ordinary"}`;
+export function companionChatKey(
+  identityId: string,
+  m: CompanionMetadata,
+  environment = "https://inkbox.ai",
+): string {
+  const base = new URL(environment);
+  const namespace = `${base.origin}${base.pathname.replace(/\/+$/, "")}`;
+  return `companion:${encodeURIComponent(namespace)}:${identityId}:${m.channel}:${m.conversation_id}:${m.scope_id}:${m.activation_id ?? "ordinary"}`;
 }
 
 export function assertCompanionSize(text: string): void {
   if (Buffer.byteLength(text, "utf8") > COMPANION_MAX_BYTES) {
     throw new Error(
-      "Companion initialization exceeds the 128 KiB host input limit; no input was submitted.",
+      "Companion initialization exceeds the 8 MiB host input limit; no input was submitted.",
     );
   }
 }

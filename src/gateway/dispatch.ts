@@ -209,16 +209,15 @@ async function handleInbound(
   event: VerifiedEvent,
 ): Promise<boolean> {
   const info = extractInbound(channel, event.body);
-  const companion = Object.hasOwn(event.body, "companion")
-    ? event.body.companion
-    : record(event.body.data)?.companion;
-  if (companion !== undefined) {
+  const companion = event.body.companion;
+  if (companion != null) {
     if (!event.verified || !deps.sessions.acceptCompanion) {
       throw new Error("Companion mode requires verified delivery and a compatible receiver.");
     }
     const metadata = companionMetadata(companion);
     const expectedChannel = channel === "email" ? "mail" : channel === "sms" ? "phone" : channel;
     if (
+      (info.resource?.direction !== undefined && info.resource.direction !== "inbound") ||
       metadata.channel !== expectedChannel ||
       !info.from ||
       !info.messageId ||
@@ -233,34 +232,28 @@ async function handleInbound(
     if (metadata.phase === "ordinary") {
       const contact = await deps.contacts.resolve(info.from);
       if (!senderAllowed(info.from, contact.contactId, deps.config.gateway)) {
-        throw new Error("Companion conversation sender is not locally permitted.");
+        return true;
       }
-      target =
-        channel === "email"
-          ? {
-              channel,
-              conversationId: metadata.conversation_id,
-              subject: info.subject,
-              companion: {
-                replyToMessageId: info.messageId,
-                to: [
-                  info.from,
-                  ...(Array.isArray(info.resource?.to_addresses)
-                    ? (info.resource.to_addresses as string[])
-                    : []),
-                ].filter((address) => address !== identity.emailAddress),
-                cc: (Array.isArray(info.resource?.cc_addresses)
-                  ? (info.resource.cc_addresses as string[])
-                  : []
-                ).filter((address) => address !== identity.emailAddress),
-              },
-            }
-          : { channel, conversationId: metadata.conversation_id };
+      target = {
+        channel,
+        conversationId: metadata.conversation_id,
+        subject: info.subject,
+        messageId: info.messageId,
+        sender: info.from,
+        to: info.from,
+      };
     }
     await deps.sessions.acceptCompanion(
       {
         metadata,
         identityId: identity.id,
+        environment: deps.config.baseUrl,
+        rawText: info.text,
+        senderAccess: str(info.resource?.sender_access),
+        emailAddress: identity.emailAddress ?? undefined,
+        toAddresses: Array.isArray(info.resource?.to_addresses)
+          ? info.resource.to_addresses.filter((value): value is string => typeof value === "string")
+          : [],
         handle: identity.agentHandle,
         sourceId: info.messageId,
         from: info.from,
@@ -277,7 +270,9 @@ async function handleInbound(
       `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
       target,
     );
-    deps.logger.info("companion.accepted", { chatKey: companionChatKey(identity.id, metadata) });
+    deps.logger.info("companion.accepted", {
+      chatKey: companionChatKey(identity.id, metadata, deps.config.baseUrl),
+    });
     return true;
   }
   const from = info.from;
@@ -298,7 +293,16 @@ async function handleInbound(
     return true;
   }
 
-  const participants = countParticipants(event.body);
+  const participants = await conversationParticipants(
+    deps,
+    channel,
+    info.conversationId,
+    event.body,
+  );
+  if (channel !== "email" && participants > 1 && !info.conversationId) {
+    deps.logger.warn("dispatch.group_missing_conversation", { channel });
+    return true;
+  }
   const chatKey = deps.contacts.chatKeyFor({
     // A group is one shared context for everyone in it, so the conversation -
     // not the sender's contact - keys the chat. 1:1 keeps its per-contact chat.
@@ -346,6 +350,7 @@ async function handleInbound(
     ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
     text: info.text,
+    rawText: info.text,
     mediaPaths,
     ...(participants > 1
       ? { group: { participantCount: participants, participants: participantNames(event.body) } }
@@ -360,7 +365,7 @@ async function handleInbound(
 
   // Batch phone-channel fragments when enabled; slash commands bypass the
   // window so control replies stay immediate.
-  if (deps.bursts && channel !== "email" && !msg.text.trim().startsWith("/")) {
+  if (deps.bursts && channel !== "email" && !msg.group && !msg.text.trim().startsWith("/")) {
     deps.bursts.add(msg);
     return true;
   }
@@ -381,7 +386,7 @@ function countParticipants(body: Record<string, unknown>): number {
   const identities = Array.isArray(data?.agent_identities) ? data?.agent_identities.length : 0;
   // Phone-channel events can name their participants inline, and a conversation
   // flagged as a group is one even when only the sender resolved.
-  const resource = record(data?.message) ?? record(data?.text_message);
+  const resource = record(data?.message) ?? record(data?.text_message) ?? record(data?.reaction);
   const inline = Array.isArray(resource?.participants) ? resource.participants.length : 0;
   const flagged = Boolean(resource?.is_group ?? resource?.isGroup);
   return Math.max(contacts, identities, inline, flagged ? 2 : 0);
@@ -441,8 +446,10 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   if (!from) return true;
   const resolved = await deps.contacts.resolve(from);
   if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
+  const participants = await conversationParticipants(deps, "imessage", conversationId, event.body);
+  if (participants > 1 && !conversationId) return true;
   const chatKey = deps.contacts.chatKeyFor({
-    contactId: resolved.contactId,
+    contactId: participants > 1 ? undefined : resolved.contactId,
     channel: "imessage",
     conversationId,
     from,
@@ -453,7 +460,6 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   // Reactions carry reply-restraint guidance: a tapback is a lightweight
   // signal, and most warrant no visible reply at all.
   const who = resolved.contactName ?? senderAgent?.displayName ?? senderAgent?.handle ?? from;
-  const participants = countParticipants(event.body);
   const contactMemories = deps.config.gateway.contactMemories
     ? matchedContactMemories(event.body, {
         channel: "imessage",
@@ -479,6 +485,8 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       ...(contactMemories.length ? { contactMemories } : {}),
       ...(senderAgent ? { senderAgent } : {}),
       text,
+      reaction: true,
+      ...(participants > 1 ? { group: { participantCount: participants } } : {}),
       mediaPaths: [],
       messageId: str(r?.id),
     })
@@ -527,8 +535,16 @@ async function handleDeliveryFailure(
   if (!from) return true;
   if (messageId && !deps.notify.shouldNotify(`${type}:${messageId}`)) return true;
   const { contactId } = await deps.contacts.resolve(from);
+  const participants = await conversationParticipants(
+    deps,
+    channel,
+    companionConversationId,
+    event.body,
+  );
   const chatKey = deps.contacts.chatKeyFor({
-    contactId,
+    contactId: participants > 1 ? undefined : contactId,
+    conversationId: companionConversationId,
+    threadId: channel === "email" ? companionConversationId : undefined,
     channel: (type.startsWith("imessage")
       ? "imessage"
       : type.startsWith("text")
@@ -560,4 +576,44 @@ async function handleDeliveryFailure(
     .runCapture(chatKey, recovery.prompt)
     .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
+}
+
+const conversationKinds = new WeakMap<InkboxRuntime, Map<string, number>>();
+async function conversationParticipants(
+  deps: DispatchDeps,
+  channel: Exclude<Channel, "voice">,
+  id: string | undefined,
+  body: Record<string, unknown>,
+): Promise<number> {
+  const inline = countParticipants(body);
+  if (channel === "email" || !id || inline > 1) return inline;
+  let cache = conversationKinds.get(deps.inkbox);
+  if (!cache) {
+    cache = new Map();
+    conversationKinds.set(deps.inkbox, cache);
+  }
+  const key = `${channel}:${id}`;
+  const known = cache.get(key);
+  if (known !== undefined) return Math.max(inline, known);
+  try {
+    const identity = await deps.inkbox.getIdentity();
+    let summary: { isGroup?: boolean; participants?: unknown[] | null } | undefined;
+    if (channel === "imessage" && typeof identity.getIMessageConversation === "function")
+      summary = await identity.getIMessageConversation(id);
+    else if (channel === "sms" && typeof identity.listTextConversations === "function") {
+      for (let offset = 0; offset < 1500; offset += 100) {
+        const page = await identity.listTextConversations({ limit: 100, offset });
+        summary = page.find((entry) => entry.id === id);
+        if (summary || page.length < 100) break;
+      }
+    }
+    if (summary) {
+      const count = Math.max(summary.isGroup ? 2 : 0, summary.participants?.length ?? 0);
+      cache.set(key, count);
+      return Math.max(inline, count);
+    }
+  } catch (error) {
+    deps.logger.warn("conversation.lookup_failed", { channel, error: String(error) });
+  }
+  return inline;
 }

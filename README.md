@@ -401,13 +401,19 @@ identity, signing key, opencode server, tunnel/public URL).
 
 ### Companion mode
 
-Version 0.2.15 requires SDK 0.7.3 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.
+Version 0.2.15 requires SDK 0.7.7 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.
 
 The sponsor's qualifying group message loads all available authorized history into one input. Ordinary tracked messages and activated conversations use separate sessions, isolated from private contact conversations. Replies retain the group conversation and, for email, its approved audience and stored parent. MMS chats with identical participant sets are one logical conversation.
 
-The sponsor must pass your gateway's local sender/contact allowlists. Contact blocks, consent requirements, and host tool approvals still apply. Historical commands and group messages cannot answer remote permission prompts; approve required actions through OpenCode itself.
+The sponsor must pass your gateway's local sender/contact allowlists. Contact blocks, consent requirements, and host tool approvals still apply. Historical commands and answers never execute. Only the prompted sender can answer an ordinary approval. Companion approval answers must come from the sender whose turn raised the prompt; local commands remain sponsor-only. Both must pass the current-message response gates. In mention mode, use `@agent allow` or `@agent /stop`.
 
-The complete framed input is limited to 128 KiB. Oversized or unavailable initialization pauses the conversation without sending a partial input. The private gateway `state.json` journal retains the turn ID, host message ID, reply target, and failure state. A restart resumes pending hydration and reconciles known host submissions. If acceptance is uncertain, the turn and later group messages remain paused for operator investigation; webhook retries do not resubmit it. Do not delete the journal to retry an uncertain turn.
+The complete framed input is limited to 8 MiB. Oversized or unavailable initialization pauses the conversation without sending a partial input. The private gateway `state.json` journal retains the turn ID, host message ID, reply target, and failure state. A restart resumes pending hydration and reconciles known host submissions. If acceptance is uncertain, the turn and later group messages remain paused for operator investigation; webhook retries do not resubmit it. Do not delete the journal to retry an uncertain turn.
+
+`INKBOX_GROUP_REPLY_MODE=auto|mention` defaults to `auto`. Mention mode requires a whole `@agent` or `@your-handle` in the current message. For Companion email, the agent's mailbox in the current To recipients also counts; Cc/Bcc and quoted headers do not. Unaddressed group messages are saved as context without running the model or interrupting a reply.
+
+`INKBOX_COMPANION_RESPONSE_MODE=safe|relaxed` defaults to `safe`. Safe mode wakes only on the current message's `sender_access="direct"`; sponsored or unknown access stays context-only. Relaxed allows any delivered participant to wake the agent, subject to the independent mention setting. Direct means receipt-time contact-rule admission, not permanent trust or permission to run tools. Both settings are available in the setup wizard.
+
+Group SMS and iMessage use one session per conversation, including reactions; separate groups and direct messages stay separate. Automatic email replies use the SDK's stored-message reply-all operation, preserving To/Cc and threading. A complete model answer is journaled before delivery. Transient pre-submission or send-preparation failures retry with capped backoff without regenerating a completed answer. Signed live receipts use the saved initialization and sponsor reply anchor without repeated activation lookups.
 
 ### Keep it running (boot autostart)
 

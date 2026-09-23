@@ -55,6 +55,7 @@ function scriptedIO(answers: Array<string | boolean | number>) {
     },
     confirm: async () => Boolean(next()),
     choose: async (question, _options, def) => {
+      if (question.includes("Group replies") || question.includes("Companion replies")) return def;
       choiceDefaults.push(def);
       const answer = next();
       if (question.includes("Choose how this agent should handle phone calls")) {
@@ -1058,3 +1059,34 @@ describe("start confirmation", () => {
     expect(calls).toBeGreaterThan(2); // polled, did not probe once
   });
 });
+
+it.each([false, true])(
+  "saves and preserves group/Companion settings for existing and new setup (configured=%s)",
+  async (configured) => {
+    const world = fakeWorld();
+    const scripted = scriptedIO([...(configured ? [true] : []), ...toAutostart(false, false)]);
+    const choices: [string, number][] = [];
+    const choose = scripted.io.choose;
+    scripted.io.choose = async (question, options, def) => {
+      if (question.includes("Group replies") || question.includes("Companion replies")) {
+        choices.push([question, def]);
+        return 1;
+      }
+      return choose(question, options, def);
+    };
+    const d = deps(world, scripted.io);
+    const config = makeConfig({
+      ...(configured ? { apiKey: "test-key", identity: "test-agent" } : {}),
+      gateway: {
+        ...defaultGatewayConfig(),
+        groupReplyMode: configured ? "mention" : "auto",
+        companionResponseMode: configured ? "relaxed" : "safe",
+      },
+    });
+    expect(await runWizard(config, d)).toBe(0);
+    const saved = savedEnv(d.envFilePath);
+    expect(saved.INKBOX_GROUP_REPLY_MODE).toBe("mention");
+    expect(saved.INKBOX_COMPANION_RESPONSE_MODE).toBe("relaxed");
+    expect(choices.map(([, def]) => def)).toEqual(configured ? [1, 1] : [0, 0]);
+  },
+);

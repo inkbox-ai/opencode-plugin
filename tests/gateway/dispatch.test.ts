@@ -245,7 +245,7 @@ describe("dispatchEvent inbound", () => {
       phase: "ordinary",
       sequence: 1,
     };
-    await expect(dispatchEvent(deps, received)).rejects.toThrow("not locally permitted");
+    await expect(dispatchEvent(deps, received)).resolves.toBe(true);
     expect(deps.sessions.acceptCompanion).not.toHaveBeenCalled();
   });
   it("routes an email message.received to a session on the email channel", async () => {

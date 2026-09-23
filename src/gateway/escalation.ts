@@ -1,6 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { StateStore } from "./state.js";
-import type { GatewayLogger } from "./types.js";
+import type { GatewayLogger, ReplyTarget } from "./types.js";
 
 // A permission request raised inside a gateway session, waiting on a human.
 export interface PendingPermission {
@@ -14,7 +14,7 @@ export interface PendingPermission {
 export interface EscalationRelay {
   // Ask the human on their channel; returns their raw reply text, or
   // undefined on timeout. The relay owns delivery + capturing the reply.
-  ask(chatKey: string, prompt: string): Promise<string | undefined>;
+  ask(chatKey: string, prompt: string, target?: ReplyTarget): Promise<string | undefined>;
 }
 
 export interface EscalationDeps {
@@ -66,10 +66,19 @@ export function createEscalationBridge(deps: EscalationDeps) {
       .listPermissions()
       .find((candidate) => candidate.permissionID === perm.permissionID);
     if (existing && !recovering) return;
+    const origin =
+      existing?.replyTarget ??
+      deps.state
+        .listTurns()
+        .find(
+          (turn) =>
+            turn.sessionID === perm.sessionID && ["submitted", "submitting"].includes(turn.state),
+        )?.replyTarget;
     const deadline =
       existing?.deadline ??
       (deps.timeoutMs > 0 ? Date.now() + deps.timeoutMs : Number.MAX_SAFE_INTEGER);
     deps.state.savePermission({
+      replyTarget: origin,
       permissionID: perm.permissionID,
       sessionID: perm.sessionID,
       chatKey,
@@ -84,6 +93,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
       let response = existing?.state === "responding" ? existing.response : undefined;
       if (!response) {
         deps.state.savePermission({
+          replyTarget: origin,
           permissionID: perm.permissionID,
           sessionID: perm.sessionID,
           chatKey,
@@ -93,7 +103,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
         });
         const reply = expired
           ? undefined
-          : await withTimeout(deps.relay.ask(chatKey, menu(perm.title)), remaining);
+          : await withTimeout(deps.relay.ask(chatKey, menu(perm.title), origin), remaining);
         response = reply === undefined ? "reject" : parsePermissionReply(reply);
         if (reply === undefined) {
           deps.logger.info("escalation.timeout", { permissionID: perm.permissionID, chatKey });

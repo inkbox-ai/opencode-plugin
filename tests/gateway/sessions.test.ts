@@ -39,6 +39,7 @@ function makeIdentity() {
     phoneNumber: { number: "+15559990000" },
     imessageEnabled: true,
     sendEmail: vi.fn(async () => ({ id: "email-1" })),
+    replyAllEmail: vi.fn(async (_id: string, _opts: unknown) => ({ id: "email-1" })),
     getMessage: vi.fn(async () => ({
       id: "parent-1",
       threadId: "conversation-1",
@@ -199,7 +200,10 @@ describe("durable async turns", () => {
   it("drops a stale persisted session before submission", async () => {
     const d = makeManager();
     d.state.setSession("ck", "stale");
-    d.opencode.session.get.mockResolvedValueOnce({ error: { name: "NotFound" } } as any);
+    d.opencode.session.get.mockResolvedValueOnce({
+      error: { name: "NotFound" },
+      response: { status: 404 },
+    } as any);
 
     await d.mgr.handleInbound(sms("hello"));
 
@@ -421,7 +425,11 @@ describe("durable async turns", () => {
     await d.mgr.handleInbound(sms("second"));
 
     expect(d.identity.sendText).toHaveBeenCalledTimes(2);
-    expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true);
+    expect(
+      d.state
+        .listTurns()
+        .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+    ).toBe(true);
   });
 });
 
@@ -430,6 +438,8 @@ function companion(
   sequence = 1,
 ): CompanionTurn {
   return {
+    senderAccess: "direct",
+    rawText: "hello",
     identityId: "identity-1",
     handle: "test-agent",
     sourceId: `source-${sequence}`,
@@ -512,7 +522,7 @@ describe("Companion durable host boundary", () => {
           cc: [],
         },
       });
-      await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("paused"));
+      await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
       expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
       await d.mgr.close();
     },
@@ -550,7 +560,11 @@ describe("Companion durable host boundary", () => {
     live.sourceId = "source-1";
     await d.mgr.acceptCompanion(live, "duplicate trigger");
     await vi.waitFor(() =>
-      expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true),
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
     );
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
     await d.mgr.close();
@@ -594,7 +608,11 @@ describe("Companion durable host boundary", () => {
     } as never);
     await d.mgr.acceptCompanion(live, "truncated prefix");
     await vi.waitFor(() =>
-      expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true),
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
     );
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
     const text = d.opencode.session.promptAsync.mock.calls[1][0].body.parts[0].text;
@@ -603,7 +621,7 @@ describe("Companion durable host boundary", () => {
     expect(text).not.toContain("truncated prefix");
     await d.mgr.close();
   });
-  it("revalidates after host session creation before submitting context", async () => {
+  it("does not perform a second authorization read after host session creation", async () => {
     const d = makeManager();
     let revoked = false;
     d.opencode.session.create.mockImplementationOnce(async () => {
@@ -620,9 +638,9 @@ describe("Companion durable host boundary", () => {
       },
     });
     await d.mgr.acceptCompanion(companion(), "trigger");
-    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("paused"));
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
     expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
-    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
     await d.mgr.close();
   });
   it.each(["mail", "phone", "imessage"] as const)(
@@ -637,6 +655,13 @@ describe("Companion durable host boundary", () => {
         reply_context: { ...page.reply_context, channel },
       }));
       const first = pages[0];
+      if (channel !== "mail")
+        for (const page of pages)
+          for (const entry of page.items) {
+            if (entry.is_trigger) entry.author = "+15551110000";
+          }
+      if (channel !== "mail")
+        d.companionSenderAllowed.mockImplementation(async (from) => from === "+15551110000");
       const c = companion();
       c.metadata = {
         ...c.metadata,
@@ -671,6 +696,7 @@ describe("Companion durable host boundary", () => {
           companion: c.metadata,
           data: {
             [channel === "phone" ? "text_message" : "message"]: {
+              sender_access: "direct",
               id: c.sourceId,
               thread_id: c.metadata.conversation_id,
               conversation_id: c.metadata.conversation_id,
@@ -697,7 +723,7 @@ describe("Companion durable host boundary", () => {
       };
       await dispatchEvent(deps, received);
       await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
-      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(fetch).toHaveBeenCalledTimes(3);
       expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
       const text = d.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
       const entries = [first.items[0], first.items[1], pages[1].items[1]];
@@ -747,14 +773,9 @@ describe("Companion durable host boundary", () => {
       expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
       expect(d.opencode.session.promptAsync.mock.calls[0][0].body.parts).toHaveLength(1);
       if (channel === "mail") {
-        expect(d.identity.getMessage).toHaveBeenCalledWith("parent-1");
-        expect(d.identity.sendEmail).toHaveBeenCalledWith({
-          to: ["sponsor@example.com"],
-          cc: ["fred@example.com", "nancy@example.com"],
-          subject: "Re:",
-          bodyText: "reply",
-          inReplyToMessageId: "<parent@example.com>",
-        });
+        expect(d.identity.getMessage).not.toHaveBeenCalled();
+        expect(d.identity.sendEmail).not.toHaveBeenCalled();
+        expect(d.identity.replyAllEmail).toHaveBeenCalledWith("parent-1", { bodyText: "reply" });
       } else
         expect(
           channel === "phone" ? d.identity.sendText : d.identity.sendIMessage,
@@ -782,7 +803,11 @@ describe("Companion durable host boundary", () => {
     expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
     release();
     await vi.waitFor(() =>
-      expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true),
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
     );
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
     const calls = d.opencode.session.promptAsync.mock.calls;
@@ -868,7 +893,7 @@ describe("Companion durable host boundary", () => {
         },
       });
       await d.mgr.acceptCompanion(companion(), "trigger");
-      await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("paused"));
+      await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
       expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
       await d.mgr.close();
     },
@@ -1170,5 +1195,74 @@ describe("extractText", () => {
   it("ignores empty and non-text parts", () => {
     expect(extractText({ data: { parts: [{ type: "tool" }] } })).toBeUndefined();
     expect(extractText(undefined)).toBeUndefined();
+  });
+});
+
+describe("quiet context and startup recovery", () => {
+  it("persists quiet group messages without opening or interrupting a host session", async () => {
+    const d = makeManager();
+    d.config.gateway.groupReplyMode = "mention";
+    await d.mgr.handleInbound(sms("unaddressed history", { group: { participantCount: 2 } }));
+    expect(d.opencode.session.create).not.toHaveBeenCalled();
+    expect(d.opencode.session.abort).not.toHaveBeenCalled();
+    expect(d.state.getReplyTarget("ck")).toBeUndefined();
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    restarted.config.gateway.groupReplyMode = "mention";
+    await restarted.mgr.handleInbound(sms("@agent answer", { group: { participantCount: 2 } }));
+    expect(restarted.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    const prompt = restarted.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
+    expect(prompt).toContain("unaddressed history");
+    expect(prompt).toContain("@agent answer");
+    await restarted.mgr.close();
+  });
+  it("does not wake a historical sponsor when a sponsored live receipt arrives first", async () => {
+    const d = makeManager();
+    const loadInitialization = vi.fn(async () => snapshot());
+    d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+    await d.mgr.acceptCompanion(
+      { ...companion("live", 2), senderAccess: "sponsored", rawText: "@agent quiet" },
+      "quiet live body",
+    );
+    await vi.waitFor(() =>
+      expect(d.state.listTurns().filter((turn) => turn.state === "context_only")).toHaveLength(2),
+    );
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    await restarted.mgr.acceptCompanion(
+      { ...companion("live", 3), rawText: "@agent help" },
+      "current direct body",
+    );
+    await vi.waitFor(() => expect(restarted.identity.sendText).toHaveBeenCalledTimes(1));
+    expect(restarted.inkbox.getClient).not.toHaveBeenCalled();
+    const text = restarted.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
+    expect(text).toContain(snapshot().text);
+    expect(text).toContain("quiet live body");
+    await restarted.mgr.close();
+  });
+  it("retries a transient resume error without losing the saved session", async () => {
+    const d = makeManager();
+    d.state.setSession("ck", "saved-session");
+    d.opencode.session.get.mockRejectedValueOnce(new Error("temporary connection failure"));
+    await d.mgr.handleInbound(sms("hello"));
+    expect(d.opencode.session.create).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].path.id).toBe("saved-session");
+    await d.mgr.close();
+  });
+  it("retries send preparation using the checkpointed answer, without generating twice", async () => {
+    const d = makeManager();
+    const prompt = d.opencode.session.promptAsync.getMockImplementation();
+    if (!prompt) throw new Error("Missing host test implementation");
+    d.opencode.session.promptAsync.mockImplementationOnce(async (input) => {
+      const result = await prompt(input);
+      d.inkbox.getIdentity.mockRejectedValueOnce(new Error("temporary identity failure"));
+      return result;
+    });
+    await d.mgr.handleInbound(sms("hello"));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.identity.sendText).toHaveBeenCalledTimes(1);
+    await d.mgr.close();
   });
 });

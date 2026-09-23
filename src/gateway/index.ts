@@ -12,6 +12,7 @@ import { createEscalationBridge } from "./escalation.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
 import { deliverReply } from "./reply.js";
+import { companionWakes, controlText, isPermissionReply, sameAuthor } from "./response-policy.js";
 import { createWebhookServer } from "./server.js";
 import { createSessionManager } from "./sessions.js";
 import { createStateStore } from "./state.js";
@@ -79,6 +80,37 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       return senderAllowed(from, contact.contactId, g);
     },
     companionContactId: async (from) => (await contacts.resolve(from)).contactId,
+    companionControl: async (turn, chatKey, target) => {
+      if (!companionWakes(turn, g)) return false;
+      const raw = controlText(turn.rawText ?? "", turn.handle);
+      if (
+        turn.metadata.phase === "live" &&
+        isPermissionReply(raw) &&
+        pending.tryConsume(chatKey, raw, { sender: turn.from, channel: target.channel })
+      )
+        return true;
+      if (
+        !raw.trim().startsWith("/") ||
+        !sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? "")
+      )
+        return false;
+      const result = await handleCommand(
+        {
+          opencode: opts.opencode,
+          inkbox: opts.inkbox,
+          sessions,
+          logger,
+          directory: opts.directory,
+          health: () => health(opts, transport.publicUrl),
+        },
+        chatKey,
+        raw,
+      );
+      if (result === null) return false;
+      const reply = typeof result === "string" ? result : result.reply;
+      await deliverReply(opts.inkbox, target, reply, logger);
+      return true;
+    },
   });
   const a2a = createA2AHandler({
     inkbox: opts.inkbox,
@@ -156,12 +188,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
-      async ask(chatKey, prompt) {
-        const target = state.getReplyTarget(chatKey);
-        if (target) {
-          await deliverReply(opts.inkbox, target, prompt, logger).catch(() => {});
-        }
-        return pending.await(chatKey, g.permissionTimeoutS * 1000);
+      async ask(chatKey, prompt, target) {
+        if (!target?.sender) return undefined;
+        const answer = pending.await(chatKey, g.permissionTimeoutS * 1000, {
+          sender: target.sender,
+          channel: target.channel,
+        });
+        const hint =
+          target.companionSponsor && g.groupReplyMode === "mention"
+            ? "\nInclude @agent in your answer (for example, @agent allow)."
+            : "";
+        await deliverReply(opts.inkbox, target, prompt + hint, logger);
+        return answer;
       },
     },
   });
@@ -232,12 +270,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   }
 
   // Session ids a /resume awaits a numeric selection from, per contact.
-  const resumeCandidates = new Map<string, string[]>();
-
-  async function say(chatKey: string, text: string): Promise<void> {
-    const target = state.getReplyTarget(chatKey);
-    if (target) await deliverReply(opts.inkbox, target, text, logger).catch(() => {});
-  }
+  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
 
   // Intercept inbound before it becomes a turn: (1) a pending escalation
   // answer consumes the message; (2) a /resume selection; (3) a control
@@ -246,47 +279,61 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     return {
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage) => {
-        state.setReplyTarget(msg.chatKey, {
+        const target = {
           channel: msg.channel,
           to: msg.from,
+          sender: msg.from,
           conversationId: msg.conversationId,
           subject: msg.subject,
           rfcMessageId: msg.rfcMessageId,
-        });
-        if (pending.tryConsume(msg.chatKey, msg.text)) return;
+          messageId: msg.messageId,
+        };
+        const raw = msg.rawText ?? msg.text;
+        if (
+          !msg.reaction &&
+          isPermissionReply(raw) &&
+          pending.tryConsume(msg.chatKey, raw, { sender: msg.from, channel: msg.channel })
+        )
+          return;
 
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
-        if (candidates) {
+        if (candidates && !msg.reaction && sameAuthor(msg.channel, candidates.sender, msg.from)) {
           resumeCandidates.delete(msg.chatKey);
-          const pick = Number.parseInt(msg.text.trim(), 10);
-          const chosen = Number.isInteger(pick) ? candidates[pick - 1] : undefined;
+          const pick = Number.parseInt(raw.trim(), 10);
+          const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
             state.setSession(msg.chatKey, chosen);
-            await say(msg.chatKey, "Resumed that conversation. Go ahead.");
+            await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
           }
           // Not a valid pick — fall through and treat as a normal message.
         }
 
-        const commandReply = await handleCommand(
-          {
-            opencode: opts.opencode,
-            inkbox: opts.inkbox,
-            sessions,
-            logger,
-            directory: opts.directory,
-            health: () => health(opts, transport.publicUrl),
-          },
-          msg.chatKey,
-          msg.text,
-        );
+        const commandReply = msg.reaction
+          ? null
+          : await handleCommand(
+              {
+                opencode: opts.opencode,
+                inkbox: opts.inkbox,
+                sessions,
+                logger,
+                directory: opts.directory,
+                health: () => health(opts, transport.publicUrl),
+              },
+              msg.chatKey,
+              raw,
+            );
         if (commandReply !== null) {
           const result = typeof commandReply === "string" ? { reply: commandReply } : commandReply;
           if (result.resume && result.resume.length > 0) {
-            resumeCandidates.set(msg.chatKey, result.resume);
+            resumeCandidates.set(msg.chatKey, {
+              ids: result.resume,
+              sender: msg.from,
+              channel: msg.channel,
+            });
           }
-          await say(msg.chatKey, result.reply);
+          await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
         await sessions.handleInbound(msg);

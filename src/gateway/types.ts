@@ -65,6 +65,8 @@ export interface InboundMessage {
   // matched and the identity is unambiguous.
   senderAgent?: SenderAgentIdentity;
   text: string;
+  rawText?: string;
+  reaction?: boolean;
   // Local paths of downloaded attachments/media, appended to the framed
   // message so the agent can read them.
   mediaPaths: string[];
@@ -82,6 +84,9 @@ export interface ReplyTarget {
   conversationId?: string;
   subject?: string;
   rfcMessageId?: string;
+  messageId?: string;
+  sender?: string;
+  companionSponsor?: string;
   companion?: { replyToMessageId: string; to: string[]; cc: string[] };
 }
 

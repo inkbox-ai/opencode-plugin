@@ -6,6 +6,18 @@ import { isPhoneVoiceStack, type PhoneVoiceStack } from "./voice-stack.js";
 export type OutboundApproval = "ask" | "allowlist" | "auto";
 export type VoiceAiAuthorityMode = "contact_scoped" | "yolo";
 
+function responseMode<T extends string>(
+  value: unknown,
+  allowed: T[],
+  fallback: T,
+  name: string,
+): T {
+  if (value === undefined || value === "") return fallback;
+  if (typeof value === "string" && allowed.includes(value.trim().toLowerCase() as T))
+    return value.trim().toLowerCase() as T;
+  throw new Error(`${name} must be ${allowed.join(" or ")}.`);
+}
+
 // Options passed to InkboxPlugin(input, { ...options }) from your
 // .opencode/plugins/inkbox.ts wrapper. Every credential also resolves from env
 // vars, so options are never required.
@@ -66,6 +78,8 @@ export interface GatewayOptions {
   requireSignature?: boolean;
   /** Leave webhook subscriptions untouched at boot; they must already point here. */
   skipWebhookReconcile?: boolean;
+  groupReplyMode?: "auto" | "mention";
+  companionResponseMode?: "safe" | "relaxed";
   // Deliver verified non-Inkbox webhooks (and unverified ones) to the agent.
   externalEvents?: boolean;
   // Outbound sends from gateway sessions never prompt interactively:
@@ -127,6 +141,8 @@ export interface ResolvedGatewayConfig {
   allowedInboundContactIds: string[];
   requireSignature: boolean;
   skipWebhookReconcile: boolean;
+  groupReplyMode: "auto" | "mention";
+  companionResponseMode: "safe" | "relaxed";
   externalEvents: boolean;
   outboundApproval: "allowlist" | "auto";
   permissionTimeoutS: number;
@@ -410,6 +426,18 @@ function resolveGatewayConfig(
     requireSignature: opts.requireSignature ?? boolEnv(env.INKBOX_REQUIRE_SIGNATURE) ?? true,
     skipWebhookReconcile:
       opts.skipWebhookReconcile ?? boolEnv(env.INKBOX_SKIP_WEBHOOK_RECONCILE) ?? false,
+    groupReplyMode: responseMode(
+      opts.groupReplyMode ?? env.INKBOX_GROUP_REPLY_MODE,
+      ["auto", "mention"],
+      "auto",
+      "INKBOX_GROUP_REPLY_MODE",
+    ),
+    companionResponseMode: responseMode(
+      opts.companionResponseMode ?? env.INKBOX_COMPANION_RESPONSE_MODE,
+      ["safe", "relaxed"],
+      "safe",
+      "INKBOX_COMPANION_RESPONSE_MODE",
+    ),
     externalEvents: opts.externalEvents ?? boolEnv(env.INKBOX_EXTERNAL_EVENTS_ENABLED) ?? false,
     outboundApproval: opts.outboundApproval === "auto" ? "auto" : "allowlist",
     permissionTimeoutS:

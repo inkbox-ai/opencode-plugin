@@ -13,6 +13,7 @@ export interface DurableHostedCapture {
 }
 
 export type DurableTurnState =
+  | "context_only"
   | "hydrating"
   | "paused"
   | "queued"
@@ -25,6 +26,13 @@ export type DurableTurnState =
   | "interrupted";
 
 export interface DurableTurn {
+  contextIds?: string[];
+  consumedBy?: string;
+  historySourceIds?: string[];
+  retryAt?: number;
+  retryCount?: number;
+  wake?: boolean;
+  controlHandled?: boolean;
   companion?: CompanionTurn;
   id: string;
   messageID: string;
@@ -48,6 +56,7 @@ export interface DurableTurn {
 }
 
 export interface DurablePermission {
+  replyTarget?: ReplyTarget;
   permissionID: string;
   sessionID: string;
   chatKey: string;
@@ -299,7 +308,9 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               candidate.chatKey === current.chatKey &&
               candidate.companion &&
               (candidate.state === "paused" ||
-                (!["completed", "delivered", "failed", "interrupted"].includes(candidate.state) &&
+                (!["context_only", "completed", "delivered", "failed", "interrupted"].includes(
+                  candidate.state,
+                ) &&
                   (candidate.companion.initialization ||
                     (!companion.initialization &&
                       candidate.companion.metadata.sequence < companion.metadata.sequence)))),

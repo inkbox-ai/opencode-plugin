@@ -72,6 +72,7 @@ export function mergeBurst(msgs: InboundMessage[]): InboundMessage {
   const last = msgs[msgs.length - 1];
   return {
     ...last,
+    rawText: last.rawText ?? last.text,
     contactMemories: normalizeContactMemories(msgs.flatMap((msg) => msg.contactMemories ?? [])),
     text: msgs
       .map((m) => m.text)
