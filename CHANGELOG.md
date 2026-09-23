@@ -3,7 +3,7 @@
 ## 0.2.15 (unreleased)
 
 - Adds Companion mode for sponsored email, MMS, and iMessage groups with isolated conversation sessions and one complete initialization input.
-- Persists pending history loading and live messages before acknowledging delivery. Uncertain host submissions pause instead of being replayed.
+- Persists pending history loading and live messages before acknowledging delivery. Uncertain host submissions and sends pause the conversation instead of being replayed.
 - Keeps group reply audiences and local sponsor admission checks. Historical commands and group replies cannot answer remote tool approvals.
 - Requires published `@inkbox/sdk` 0.7.7. Companion mode remains opt-in through identity settings.
 
@@ -11,6 +11,7 @@
 - Keeps quiet context across restarts without a model turn; live-first history never invokes a historical sponsor separately.
 - Isolates ordinary group/reaction sessions, binds approvals and replies to the originating sender/route, and uses canonical email reply-all.
 - Recovers transient host startup and send-preparation failures without losing sessions or regenerating completed replies.
+- Clears buffered context on session reset, reconciles accepted context after restart, and resolves incomplete email approvals without waiting behind the paused host turn.
 
 ## Unreleased
 

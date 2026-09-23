@@ -59,6 +59,23 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     directory: opts.directory,
   };
 
+  const companionLocalAllowed = (
+    from: string,
+    contactId: string | undefined,
+    requireReply: boolean,
+  ): boolean => {
+    if (requireReply) {
+      const recipients = opts.config.outbound.allowedRecipients;
+      if (
+        checkOutboundRecipient(from, recipients) ||
+        ((g.outboundApproval === "allowlist" || opts.config.outbound.approval === "allowlist") &&
+          recipients.length === 0)
+      )
+        return false;
+    }
+    return senderAllowed(from, contactId, g);
+  };
+
   const sessions = createSessionManager({
     opencode: opts.opencode,
     inkbox: opts.inkbox,
@@ -68,17 +85,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     directory: opts.directory,
     companionSenderAllowed: async (from, requireReply) => {
       const contact = await contacts.resolve(from);
-      if (requireReply) {
-        const recipients = opts.config.outbound.allowedRecipients;
-        if (
-          checkOutboundRecipient(from, recipients) ||
-          ((g.outboundApproval === "allowlist" || opts.config.outbound.approval === "allowlist") &&
-            recipients.length === 0)
-        )
-          return false;
-      }
-      return senderAllowed(from, contact.contactId, g);
+      return companionLocalAllowed(from, contact.contactId, Boolean(requireReply));
     },
+    companionLocalAllowed,
     companionContactId: async (from) => (await contacts.resolve(from)).contactId,
     companionControl: async (turn, chatKey, target) => {
       if (!companionWakes(turn, g)) return false;

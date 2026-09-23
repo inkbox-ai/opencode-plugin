@@ -33,6 +33,7 @@ export function companionMetadata(value: unknown): CompanionMetadata {
     ) ||
     !["mail", "phone", "imessage"].includes(m.channel) ||
     !["ordinary", "initialization", "live"].includes(m.phase) ||
+    (m.phase === "live" && "history" in m && m.history != null) ||
     !Number.isSafeInteger(m.sequence) ||
     m.sequence < 1 ||
     (m.phase !== "ordinary" &&

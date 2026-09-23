@@ -29,6 +29,9 @@ export interface DurableTurn {
   contextIds?: string[];
   consumedBy?: string;
   historySourceIds?: string[];
+  historyTriggerId?: string;
+  companionContactId?: string;
+  companionPolicyReady?: boolean;
   retryAt?: number;
   retryCount?: number;
   wake?: boolean;
@@ -308,7 +311,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               candidate.chatKey === current.chatKey &&
               candidate.companion &&
               (candidate.state === "paused" ||
-                (!["context_only", "completed", "delivered", "failed", "interrupted"].includes(
+                (!["context_only", "delivered", "failed", "interrupted"].includes(
                   candidate.state,
                 ) &&
                   (candidate.companion.initialization ||
@@ -322,9 +325,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           (candidate) =>
             candidate.id !== id &&
             candidate.chatKey === current.chatKey &&
-            ["hydrating", "queued", "submitting", "submitted", "delivery_started"].includes(
-              candidate.state,
-            ) &&
+            [
+              "hydrating",
+              "queued",
+              "submitting",
+              "submitted",
+              "completed",
+              "delivery_started",
+            ].includes(candidate.state) &&
+            (candidate.state !== "completed" || candidate.deliver) &&
             Boolean(candidate.ownerId) &&
             candidate.ownerId !== ownerId &&
             (candidate.leaseUntil ?? 0) > Date.now(),

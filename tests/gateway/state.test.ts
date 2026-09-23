@@ -159,3 +159,41 @@ describe("gateway state", () => {
     expect(state.getTurn("msg_1")?.state).toBe("interrupted");
   });
 });
+
+it("orders later Companion turns after a checkpointed reply even when its lease expires", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  dirs.push(dir);
+  const state = createStateStore(dir);
+  for (const sequence of [1, 2])
+    state.saveTurn({
+      id: `turn-${sequence}`,
+      messageID: `turn-${sequence}`,
+      chatKey: "companion-group",
+      state: sequence === 1 ? "completed" : "hydrating",
+      kind: "capture",
+      text: "input",
+      output: sequence === 1 ? "answer" : undefined,
+      deliver: true,
+      companion: {
+        identityId: "identity",
+        handle: "agent",
+        from: "+15550000001",
+        sourceId: `source-${sequence}`,
+        initialization: false,
+        metadata: {
+          scope_id: "scope",
+          conversation_id: "conversation",
+          activation_id: "activation",
+          channel: "phone",
+          phase: "live",
+          sequence,
+        },
+      },
+      createdAt: sequence,
+      updatedAt: sequence,
+    });
+  expect(state.claimTurn("turn-2", "new-owner", 10000)).toBeUndefined();
+  expect(state.claimTurn("turn-1", "new-owner", 10000)).toBeDefined();
+  state.updateTurn("turn-1", { state: "delivered" });
+  expect(state.claimTurn("turn-2", "new-owner", 10000)).toBeDefined();
+});

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
-import type { CompanionTurn } from "../../src/gateway/companion.js";
+import { type CompanionTurn, companionMetadata } from "../../src/gateway/companion.js";
 import {
   companionWakes,
   controlText,
@@ -98,4 +98,11 @@ describe("current-message response policy", () => {
     expect(sameAuthor("sms", "ABC", "abc")).toBe(false);
     expect(controlText("@test-agent, /stop", "test-agent")).toBe("/stop");
   });
+});
+
+it("rejects history attached to a live Companion receipt", () => {
+  expect(() => companionMetadata({ ...current.metadata, history: [] })).toThrow(
+    "Invalid Companion",
+  );
+  expect(companionMetadata(current.metadata).phase).toBe("live");
 });
