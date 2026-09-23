@@ -12,11 +12,17 @@ const hooks = vi.hoisted(() => ({
   escalation: undefined as any,
   server: undefined as any,
   inbound: vi.fn(async () => {}),
+  abort: vi.fn(async () => true),
 }));
 vi.mock("../../src/gateway/sessions.js", () => ({
   createSessionManager: (deps: any) => {
     hooks.manager = deps;
-    return { handleInbound: hooks.inbound, catchUp: async () => {}, close: async () => {} };
+    return {
+      handleInbound: hooks.inbound,
+      abortTurn: hooks.abort,
+      catchUp: async () => {},
+      close: async () => {},
+    };
   },
 }));
 vi.mock("../../src/gateway/escalation.js", () => ({
@@ -57,6 +63,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   hooks.inbound.mockClear();
+  hooks.abort.mockClear();
 });
 async function start() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
@@ -181,4 +188,41 @@ it("allows ordinary Companion answers under the current sender and mention gates
   expect(await hooks.manager.companionControl(turn, "contact-1", target)).toBe(true);
   expect(await answer).toBe("allow");
   expect(d.identity.sendText.mock.calls[0][0].text).toContain("@agent");
+});
+
+it("only treats exact supported sponsor commands as Companion controls", async () => {
+  await start();
+  const target: ReplyTarget = {
+    channel: "sms",
+    conversationId: "group",
+    companionSponsor: "+15550000001",
+    sender: "+15550000002",
+    companionMode: true,
+  };
+  const turn: CompanionTurn = {
+    identityId: "identity",
+    handle: "agent",
+    sourceId: "source",
+    from: "+15550000001",
+    rawText: "@agent /stop extra",
+    senderAccess: "direct",
+    initialization: false,
+    metadata: {
+      phase: "live",
+      channel: "phone",
+      scope_id: "scope",
+      activation_id: "activation",
+      conversation_id: "group",
+      sequence: 2,
+    },
+  };
+  for (const rawText of ["@agent /stop extra", "@agent /approve", "@agent /status check"])
+    expect(await hooks.manager.companionControl({ ...turn, rawText }, "contact-1", target)).toBe(
+      false,
+    );
+  expect(hooks.abort).not.toHaveBeenCalled();
+  expect(
+    await hooks.manager.companionControl({ ...turn, rawText: "@agent /stop" }, "contact-1", target),
+  ).toBe(true);
+  expect(hooks.abort).toHaveBeenCalledOnce();
 });

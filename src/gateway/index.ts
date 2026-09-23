@@ -94,7 +94,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       )
         return true;
       if (
-        !raw.trim().startsWith("/") ||
+        !["/clear", "/new", "/stop", "/cancel", "/status", "/health", "/usage", "/resume"].includes(
+          raw.trim().toLowerCase(),
+        ) ||
         !sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? "")
       )
         return false;
