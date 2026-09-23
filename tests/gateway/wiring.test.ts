@@ -111,7 +111,7 @@ function inbound(text: string, sender: string, channel = "sms", group = false) {
         text,
         rawText: text,
         mediaPaths: [],
-        ...(group ? { group: { participantCount: 2 } } : {}),
+        ...(group ? { group: { participantCount: 2 }, conversationId: "group-1" } : {}),
       },
     },
   });
@@ -277,4 +277,24 @@ it("resumes a selected Companion session only for its addressed eligible sponsor
   expect(hooks.manager.state.getSession("other-scope")).toBeUndefined();
   expect(await hooks.manager.companionControl(selection, "companion-scope", target)).toBe(false);
   expect(d.identity.sendText).toHaveBeenCalledTimes(2);
+});
+
+it("resets the old ordinary group turn before a valid asked-author resume selection", async () => {
+  await start();
+  hooks.manager.state.setSession("contact-1", "old-active-session");
+  const sender = "+15550000001";
+  await inbound("/resume", sender, "sms", true);
+  await inbound("2", "+15550000002", "sms", true);
+  expect(hooks.reset).not.toHaveBeenCalled();
+  await inbound("2 words", sender, "sms", true);
+  expect(hooks.reset).not.toHaveBeenCalled();
+  expect(hooks.manager.state.getSession("contact-1")).toBe("old-active-session");
+  await inbound("/resume", sender, "sms", true);
+  hooks.reset.mockImplementationOnce(async (key) => {
+    expect(key).toBe("contact-1");
+    expect(hooks.manager.state.getSession(key)).toBe("old-active-session");
+  });
+  await inbound("2", sender, "sms", true);
+  expect(hooks.reset).toHaveBeenCalledExactlyOnceWith("contact-1");
+  expect(hooks.manager.state.getSession("contact-1")).toBe("session-b");
 });

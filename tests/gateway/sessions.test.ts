@@ -1221,6 +1221,43 @@ describe("extractText", () => {
 });
 
 describe("quiet context and startup recovery", () => {
+  it("ignores an old group's late completion after resetting and selecting another host session", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const oldRequest = d.mgr.handleInbound(sms("old work", { group: { participantCount: 2 } }));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    const oldTurn = d.state.listTurns().find((turn) => turn.state === "submitted");
+    if (!oldTurn?.sessionID) throw new Error("Old turn was not submitted");
+    await d.mgr.resetSession("ck");
+    d.state.setSession("ck", "selected-session");
+    const messages = d.messages.get(oldTurn.sessionID);
+    messages?.push({
+      info: {
+        id: "late-old-answer",
+        role: "assistant",
+        parentID: oldTurn.messageID,
+        time: { completed: Date.now() },
+        finish: "stop",
+      },
+      parts: [{ type: "text", text: "stale answer must not send" }],
+    });
+    delete d.statuses[oldTurn.sessionID];
+    d.setAutoComplete(true);
+    await d.mgr.handleInbound(sms("new work", { group: { participantCount: 2 } }));
+    await oldRequest;
+    expect(d.opencode.session.abort).toHaveBeenCalledWith({
+      path: { id: oldTurn.sessionID },
+      query: { directory: "/proj" },
+    });
+    expect(d.opencode.session.promptAsync.mock.calls[1][0].path.id).toBe("selected-session");
+    expect(d.identity.sendText).toHaveBeenCalledExactlyOnceWith({
+      conversationId: "conv-1",
+      text: "reply",
+    });
+    expect(d.state.getTurn(oldTurn.id)?.state).toBe("interrupted");
+    await d.mgr.close();
+  });
+
   it("persists quiet group messages without opening or interrupting a host session", async () => {
     const d = makeManager();
     d.config.gateway.groupReplyMode = "mention";

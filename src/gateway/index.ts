@@ -335,9 +335,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         const candidates = resumeCandidates.get(msg.chatKey);
         if (candidates && !msg.reaction && sameAuthor(msg.channel, candidates.sender, msg.from)) {
           resumeCandidates.delete(msg.chatKey);
-          const pick = Number.parseInt(raw.trim(), 10);
+          const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
+            await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);
             await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
