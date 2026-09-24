@@ -2,6 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { ActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { CompanionTurn } from "./companion.js";
 import type { HostedSmsAttempt } from "./hosted-call-registry.js";
 import type { StateStore } from "./state.js";
 
@@ -64,6 +65,8 @@ export interface InboundMessage {
   // matched and the identity is unambiguous.
   senderAgent?: SenderAgentIdentity;
   text: string;
+  rawText?: string;
+  reaction?: boolean;
   // Local paths of downloaded attachments/media, appended to the framed
   // message so the agent can read them.
   mediaPaths: string[];
@@ -81,6 +84,12 @@ export interface ReplyTarget {
   conversationId?: string;
   subject?: string;
   rfcMessageId?: string;
+  messageId?: string;
+  sender?: string;
+  companionSponsor?: string;
+  group?: boolean;
+  companionMode?: boolean;
+  companion?: { replyToMessageId: string; to: string[]; cc: string[] };
 }
 
 // "normal" turns are interruptible by newer inbound messages; "capture"
@@ -105,6 +114,8 @@ export interface TurnRequest {
 }
 
 export interface SessionManager {
+  acceptCompanion?(turn: CompanionTurn, text: string, target?: ReplyTarget): Promise<void>;
+  ownsCompanionDelivery?(channel: Channel, messageId?: string, conversationId?: string): boolean;
   // Enqueue a normal turn for this message's chatKey (interrupts an
   // in-flight normal turn per the interrupt semantics).
   handleInbound(msg: InboundMessage): Promise<void>;

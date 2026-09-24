@@ -1,28 +1,39 @@
+import { sameAuthor } from "./response-policy.js";
 // Coordinates escalation with inbound routing: when a session is waiting on
 // a human's answer (a relayed permission question), the contact's NEXT
 // inbound message is consumed as that answer instead of starting a new turn.
 export interface PendingReplies {
   // Wait for the next inbound message for this chatKey. Resolves with the
   // message text, or undefined on timeout.
-  await(chatKey: string, timeoutMs: number): Promise<string | undefined>;
+  await(
+    chatKey: string,
+    timeoutMs: number,
+    author?: { sender: string; channel: string },
+  ): Promise<string | undefined>;
   // Called by dispatch for every inbound message. Returns true if the
   // message was consumed as a pending answer (so no turn should start).
-  tryConsume(chatKey: string, text: string): boolean;
+  tryConsume(chatKey: string, text: string, author?: { sender: string; channel: string }): boolean;
   pending(chatKey: string): boolean;
 }
 
 export function createPendingReplies(): PendingReplies {
+  const authors = new Map<string, { sender: string; channel: string }>();
   const waiters = new Map<string, (text: string | undefined) => void>();
 
   return {
-    await(chatKey, timeoutMs) {
+    await(chatKey, timeoutMs, author) {
       // A second escalation for the same chatKey supersedes the first.
       waiters.get(chatKey)?.(undefined);
+      if (author) authors.set(chatKey, author);
+      else authors.delete(chatKey);
       return new Promise<string | undefined>((resolve) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const done = (text: string | undefined) => {
           if (timer) clearTimeout(timer);
-          if (waiters.get(chatKey) === done) waiters.delete(chatKey);
+          if (waiters.get(chatKey) === done) {
+            waiters.delete(chatKey);
+            authors.delete(chatKey);
+          }
           resolve(text);
         };
         waiters.set(chatKey, done);
@@ -32,7 +43,15 @@ export function createPendingReplies(): PendingReplies {
         }
       });
     },
-    tryConsume(chatKey, text) {
+    tryConsume(chatKey, text, author) {
+      const expected = authors.get(chatKey);
+      if (
+        expected &&
+        (!author ||
+          author.channel !== expected.channel ||
+          !sameAuthor(expected.channel, expected.sender, author.sender))
+      )
+        return false;
       const waiter = waiters.get(chatKey);
       if (!waiter) return false;
       waiter(text);

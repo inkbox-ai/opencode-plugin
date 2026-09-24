@@ -11,6 +11,40 @@ afterEach(() => {
 });
 
 describe("gateway state", () => {
+  it("fences stale host session creation from replacing the initialized mapping", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    state.saveTurn({
+      id: "init",
+      messageID: "msg_init",
+      chatKey: "group",
+      state: "queued",
+      kind: "capture",
+      text: "context",
+      deliver: false,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    state.claimTurn("init", "first", 10000);
+    state.updateTurn("init", { leaseUntil: 0 });
+    state.claimTurn("init", "second", 10000);
+    state.setSession("group", "initialized", { turnId: "init", ownerId: "second" });
+    expect(() => state.setSession("group", "stale", { turnId: "init", ownerId: "first" })).toThrow(
+      "lease was lost",
+    );
+    expect(() => state.clearSession("group", { turnId: "init", ownerId: "first" })).toThrow(
+      "lease was lost",
+    );
+    expect(state.getSession("group")).toBe("initialized");
+  });
+  it("does not reset a damaged journal and replay accepted work", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    fs.writeFileSync(state.filePath, "{");
+    expect(() => state.read()).toThrow();
+  });
   it("persists turns, reply targets, and permissions", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
     dirs.push(dir);
@@ -124,4 +158,91 @@ describe("gateway state", () => {
     expect(state.transitionTurn("msg_1", ["queued"], { state: "submitting" })).toBeUndefined();
     expect(state.getTurn("msg_1")?.state).toBe("interrupted");
   });
+});
+
+it("orders later Companion turns after a checkpointed reply even when its lease expires", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  dirs.push(dir);
+  const state = createStateStore(dir);
+  for (const sequence of [1, 2])
+    state.saveTurn({
+      id: `turn-${sequence}`,
+      messageID: `turn-${sequence}`,
+      chatKey: "companion-group",
+      state: sequence === 1 ? "completed" : "hydrating",
+      kind: "capture",
+      text: "input",
+      output: sequence === 1 ? "answer" : undefined,
+      deliver: true,
+      companion: {
+        identityId: "identity",
+        handle: "agent",
+        from: "+15550000001",
+        sourceId: `source-${sequence}`,
+        initialization: false,
+        metadata: {
+          scope_id: "scope",
+          conversation_id: "conversation",
+          activation_id: "activation",
+          channel: "phone",
+          phase: "live",
+          sequence,
+        },
+      },
+      createdAt: sequence,
+      updatedAt: sequence,
+    });
+  expect(state.claimTurn("turn-2", "new-owner", 10000)).toBeUndefined();
+  expect(state.claimTurn("turn-1", "new-owner", 10000)).toBeDefined();
+  state.updateTurn("turn-1", { state: "delivered" });
+  expect(state.claimTurn("turn-2", "new-owner", 10000)).toBeDefined();
+});
+
+it("bounds consumed ordinary quiet context while retaining Companion dedup and unconsumed context", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+  dirs.push(dir);
+  const state = createStateStore(dir);
+  const base = {
+    messageID: "context",
+    chatKey: "group",
+    state: "context_only" as const,
+    kind: "normal" as const,
+    text: "history",
+    deliver: false,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  state.saveTurn({ ...base, id: "unconsumed" });
+  state.saveTurn({
+    ...base,
+    id: "pending-delivery",
+    state: "completed",
+    deliver: true,
+    output: "saved answer",
+  });
+  state.saveTurn({
+    ...base,
+    id: "companion-source",
+    consumedBy: "prior",
+    companion: {
+      identityId: "identity",
+      handle: "agent",
+      sourceId: "source",
+      from: "person@example.com",
+      initialization: false,
+      metadata: {
+        channel: "mail",
+        phase: "ordinary",
+        sequence: 1,
+        scope_id: "scope",
+        conversation_id: "conversation",
+      },
+    },
+  });
+  for (let i = 0; i < 205; i++)
+    state.saveTurn({ ...base, id: `ordinary-${i}`, consumedBy: "previous-turn", updatedAt: i + 2 });
+  expect(state.listTurns().filter((turn) => turn.id.startsWith("ordinary-"))).toHaveLength(200);
+  expect(state.getTurn("unconsumed")).toBeDefined();
+  expect(state.getTurn("pending-delivery")?.output).toBe("saved answer");
+  expect(state.getTurn("companion-source")).toBeDefined();
 });

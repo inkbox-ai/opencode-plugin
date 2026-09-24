@@ -2,6 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import type { BurstBuffer } from "./burst.js";
+import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
 import type { ContactResolver } from "./contacts.js";
 import { normalizeAddress } from "./contacts.js";
@@ -14,6 +15,7 @@ import type {
   Channel,
   GatewayLogger,
   InboundMessage,
+  ReplyTarget,
   SenderAgentIdentity,
   SessionManager,
   VerifiedEvent,
@@ -140,7 +142,7 @@ async function selfAddresses(inkbox: InkboxRuntime): Promise<Set<string>> {
   }
 }
 
-function senderAllowed(
+export function senderAllowed(
   from: string,
   contactId: string | undefined,
   g: ResolvedGatewayConfig,
@@ -185,7 +187,7 @@ function extractInbound(
     const r = resourceOf(body, "text_message");
     return {
       resource: r,
-      from: str(r?.remote_phone_number),
+      from: str(r?.sender_phone_number) ?? str(r?.remote_phone_number),
       text: str(r?.text) ?? "",
       conversationId: str(r?.conversation_id),
       messageId: str(r?.id),
@@ -194,7 +196,7 @@ function extractInbound(
   const r = resourceOf(body, "message");
   return {
     resource: r,
-    from: str(r?.remote_number),
+    from: str(r?.sender_number) ?? str(r?.remote_number),
     text: str(r?.content) ?? "",
     conversationId: str(r?.conversation_id),
     messageId: str(r?.id),
@@ -207,6 +209,72 @@ async function handleInbound(
   event: VerifiedEvent,
 ): Promise<boolean> {
   const info = extractInbound(channel, event.body);
+  const companion = event.body.companion;
+  if (companion != null) {
+    if (!event.verified || !deps.sessions.acceptCompanion) {
+      throw new Error("Companion mode requires verified delivery and a compatible receiver.");
+    }
+    const metadata = companionMetadata(companion);
+    const expectedChannel = channel === "email" ? "mail" : channel === "sms" ? "phone" : channel;
+    if (
+      (info.resource?.direction !== undefined && info.resource.direction !== "inbound") ||
+      metadata.channel !== expectedChannel ||
+      !info.from ||
+      !info.messageId ||
+      (info.conversationId ?? info.threadId) !== metadata.conversation_id
+    ) {
+      throw new Error("Companion conversation does not match the received message.");
+    }
+    const identity = await deps.inkbox.getIdentity();
+    if (!identity.id || !identity.agentHandle)
+      throw new Error("Companion identity is unavailable.");
+    let target: ReplyTarget | undefined;
+    if (metadata.phase === "ordinary") {
+      const contact = await deps.contacts.resolve(info.from);
+      if (!senderAllowed(info.from, contact.contactId, deps.config.gateway)) {
+        return true;
+      }
+      target = {
+        channel,
+        conversationId: metadata.conversation_id,
+        subject: info.subject,
+        messageId: info.messageId,
+        sender: info.from,
+        to: info.from,
+      };
+    }
+    await deps.sessions.acceptCompanion(
+      {
+        metadata,
+        identityId: identity.id,
+        environment: deps.config.baseUrl,
+        rawText: info.text,
+        senderAccess: str(info.resource?.sender_access),
+        emailAddress: identity.emailAddress ?? undefined,
+        toAddresses: Array.isArray(info.resource?.to_addresses)
+          ? info.resource.to_addresses.filter((value): value is string => typeof value === "string")
+          : [],
+        handle: identity.agentHandle,
+        sourceId: info.messageId,
+        from: info.from,
+        initialization: metadata.phase === "initialization",
+        mailBodyPending:
+          channel === "email" &&
+          (info.resource?.body_truncated === true ||
+            ["truncated", "unavailable"].includes(String(info.resource?.body_state)) ||
+            (info.resource?.has_attachments === true &&
+              !Array.isArray(info.resource?.attachments)) ||
+            typeof info.resource?.body !== "string"),
+        subject: info.subject,
+      },
+      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
+      target,
+    );
+    deps.logger.info("companion.accepted", {
+      chatKey: companionChatKey(identity.id, metadata, deps.config.baseUrl),
+    });
+    return true;
+  }
   const from = info.from;
   if (!from) {
     deps.logger.warn("dispatch.no_sender", { channel });
@@ -225,7 +293,16 @@ async function handleInbound(
     return true;
   }
 
-  const participants = countParticipants(event.body);
+  const participants = await conversationParticipants(
+    deps,
+    channel,
+    info.conversationId,
+    event.body,
+  );
+  if (channel !== "email" && participants > 1 && !info.conversationId) {
+    deps.logger.warn("dispatch.group_missing_conversation", { channel });
+    return true;
+  }
   const chatKey = deps.contacts.chatKeyFor({
     // A group is one shared context for everyone in it, so the conversation -
     // not the sender's contact - keys the chat. 1:1 keeps its per-contact chat.
@@ -273,6 +350,7 @@ async function handleInbound(
     ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
     text: info.text,
+    rawText: info.text,
     mediaPaths,
     ...(participants > 1
       ? { group: { participantCount: participants, participants: participantNames(event.body) } }
@@ -287,7 +365,7 @@ async function handleInbound(
 
   // Batch phone-channel fragments when enabled; slash commands bypass the
   // window so control replies stay immediate.
-  if (deps.bursts && channel !== "email" && !msg.text.trim().startsWith("/")) {
+  if (deps.bursts && channel !== "email" && !msg.group && !msg.text.trim().startsWith("/")) {
     deps.bursts.add(msg);
     return true;
   }
@@ -308,7 +386,7 @@ function countParticipants(body: Record<string, unknown>): number {
   const identities = Array.isArray(data?.agent_identities) ? data?.agent_identities.length : 0;
   // Phone-channel events can name their participants inline, and a conversation
   // flagged as a group is one even when only the sender resolved.
-  const resource = record(data?.message) ?? record(data?.text_message);
+  const resource = record(data?.message) ?? record(data?.text_message) ?? record(data?.reaction);
   const inline = Array.isArray(resource?.participants) ? resource.participants.length : 0;
   const flagged = Boolean(resource?.is_group ?? resource?.isGroup);
   return Math.max(contacts, identities, inline, flagged ? 2 : 0);
@@ -368,8 +446,10 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   if (!from) return true;
   const resolved = await deps.contacts.resolve(from);
   if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
+  const participants = await conversationParticipants(deps, "imessage", conversationId, event.body);
+  if (participants > 1 && !conversationId) return true;
   const chatKey = deps.contacts.chatKeyFor({
-    contactId: resolved.contactId,
+    contactId: participants > 1 ? undefined : resolved.contactId,
     channel: "imessage",
     conversationId,
     from,
@@ -380,7 +460,6 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
   // Reactions carry reply-restraint guidance: a tapback is a lightweight
   // signal, and most warrant no visible reply at all.
   const who = resolved.contactName ?? senderAgent?.displayName ?? senderAgent?.handle ?? from;
-  const participants = countParticipants(event.body);
   const contactMemories = deps.config.gateway.contactMemories
     ? matchedContactMemories(event.body, {
         channel: "imessage",
@@ -406,6 +485,8 @@ async function handleReaction(deps: DispatchDeps, event: VerifiedEvent): Promise
       ...(contactMemories.length ? { contactMemories } : {}),
       ...(senderAgent ? { senderAgent } : {}),
       text,
+      reaction: true,
+      ...(participants > 1 ? { group: { participantCount: participants } } : {}),
       mediaPaths: [],
       messageId: str(r?.id),
     })
@@ -426,6 +507,16 @@ async function handleDeliveryFailure(
   const r = resourceOf(event.body, isText ? "text_message" : "message");
   if (str(r?.direction)?.toLowerCase() === "inbound") return true;
   const messageId = str(r?.id);
+  const companionConversationId = str(r?.conversation_id) ?? str(r?.thread_id);
+  const channel = isImessage ? "imessage" : isText ? "sms" : "email";
+  if (deps.sessions.ownsCompanionDelivery?.(channel, messageId, companionConversationId)) {
+    deps.logger.warn("companion.reply_failed", {
+      type,
+      messageId,
+      conversationId: companionConversationId,
+    });
+    return true;
+  }
   if (isText && messageId && isSuccessfulHostedSmsMessage(messageId)) {
     deps.logger.info("dispatch.hosted_sms_delivery_failed");
     return true;
@@ -444,8 +535,16 @@ async function handleDeliveryFailure(
   if (!from) return true;
   if (messageId && !deps.notify.shouldNotify(`${type}:${messageId}`)) return true;
   const { contactId } = await deps.contacts.resolve(from);
+  const participants = await conversationParticipants(
+    deps,
+    channel,
+    companionConversationId,
+    event.body,
+  );
   const chatKey = deps.contacts.chatKeyFor({
-    contactId,
+    contactId: participants > 1 ? undefined : contactId,
+    conversationId: companionConversationId,
+    threadId: channel === "email" ? companionConversationId : undefined,
     channel: (type.startsWith("imessage")
       ? "imessage"
       : type.startsWith("text")
@@ -477,4 +576,44 @@ async function handleDeliveryFailure(
     .runCapture(chatKey, recovery.prompt)
     .catch((err) => deps.logger.error("turn.dispatch_failed", { error: String(err) }));
   return true;
+}
+
+const conversationKinds = new WeakMap<InkboxRuntime, Map<string, number>>();
+async function conversationParticipants(
+  deps: DispatchDeps,
+  channel: Exclude<Channel, "voice">,
+  id: string | undefined,
+  body: Record<string, unknown>,
+): Promise<number> {
+  const inline = countParticipants(body);
+  if (channel === "email" || !id || inline > 1) return inline;
+  let cache = conversationKinds.get(deps.inkbox);
+  if (!cache) {
+    cache = new Map();
+    conversationKinds.set(deps.inkbox, cache);
+  }
+  const key = `${channel}:${id}`;
+  const known = cache.get(key);
+  if (known !== undefined) return Math.max(inline, known);
+  try {
+    const identity = await deps.inkbox.getIdentity();
+    let summary: { isGroup?: boolean; participants?: unknown[] | null } | undefined;
+    if (channel === "imessage" && typeof identity.getIMessageConversation === "function")
+      summary = await identity.getIMessageConversation(id);
+    else if (channel === "sms" && typeof identity.listTextConversations === "function") {
+      for (let offset = 0; offset < 1500; offset += 100) {
+        const page = await identity.listTextConversations({ limit: 100, offset });
+        summary = page.find((entry) => entry.id === id);
+        if (summary || page.length < 100) break;
+      }
+    }
+    if (summary) {
+      const count = Math.max(summary.isGroup ? 2 : 0, summary.participants?.length ?? 0);
+      cache.set(key, count);
+      return Math.max(inline, count);
+    }
+  } catch (error) {
+    deps.logger.warn("conversation.lookup_failed", { channel, error: String(error) });
+  }
+  return inline;
 }

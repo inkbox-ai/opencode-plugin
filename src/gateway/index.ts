@@ -1,16 +1,18 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { checkOutboundRecipient } from "../permissions.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
 import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
-import { dispatchEvent } from "./dispatch.js";
+import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
 import { deliverReply } from "./reply.js";
+import { companionWakes, controlText, isPermissionReply, sameAuthor } from "./response-policy.js";
 import { createWebhookServer } from "./server.js";
 import { createSessionManager } from "./sessions.js";
 import { createStateStore } from "./state.js";
@@ -47,6 +49,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
+  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
 
   const deps: GatewayDeps = {
     inkbox: opts.inkbox,
@@ -57,6 +60,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     directory: opts.directory,
   };
 
+  const companionLocalAllowed = (
+    from: string,
+    contactId: string | undefined,
+    requireReply: boolean,
+  ): boolean => {
+    if (requireReply) {
+      const recipients = opts.config.outbound.allowedRecipients;
+      if (checkOutboundRecipient(from, recipients)) return false;
+    }
+    return senderAllowed(from, contactId, g);
+  };
+
   const sessions = createSessionManager({
     opencode: opts.opencode,
     inkbox: opts.inkbox,
@@ -64,6 +79,69 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
     directory: opts.directory,
+    companionSenderAllowed: async (from, requireReply) => {
+      const contact = await contacts.resolve(from);
+      return companionLocalAllowed(from, contact.contactId, Boolean(requireReply));
+    },
+    companionLocalAllowed,
+    companionContactId: async (from) => (await contacts.resolve(from)).contactId,
+    companionControl: async (turn, chatKey, target) => {
+      if (!companionWakes(turn, g)) return false;
+      const raw = controlText(turn.rawText ?? "", turn.handle);
+      if (
+        turn.metadata.phase !== "initialization" &&
+        isPermissionReply(raw) &&
+        pending.tryConsume(chatKey, raw, { sender: turn.from, channel: target.channel })
+      )
+        return true;
+      if (!sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? ""))
+        return false;
+      const candidates = resumeCandidates.get(chatKey);
+      if (
+        candidates &&
+        candidates.channel === target.channel &&
+        sameAuthor(target.channel, candidates.sender, turn.from) &&
+        /^\d+$/.test(raw.trim())
+      ) {
+        resumeCandidates.delete(chatKey);
+        const chosen = candidates.ids[Number(raw.trim()) - 1];
+        if (chosen) {
+          await sessions.resetSession(chatKey);
+          state.setSession(chatKey, chosen);
+          await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
+          return true;
+        }
+      }
+      if (
+        !["/clear", "/new", "/stop", "/cancel", "/status", "/health", "/usage", "/resume"].includes(
+          raw.trim().toLowerCase(),
+        )
+      )
+        return false;
+      resumeCandidates.delete(chatKey);
+      const result = await handleCommand(
+        {
+          opencode: opts.opencode,
+          inkbox: opts.inkbox,
+          sessions,
+          logger,
+          directory: opts.directory,
+          health: () => health(opts, transport.publicUrl),
+        },
+        chatKey,
+        raw,
+      );
+      if (result === null) return false;
+      if (typeof result !== "string" && result.resume?.length)
+        resumeCandidates.set(chatKey, {
+          ids: result.resume,
+          sender: turn.from,
+          channel: target.channel,
+        });
+      const reply = typeof result === "string" ? result : result.reply;
+      await deliverReply(opts.inkbox, target, reply, logger);
+      return true;
+    },
   });
   const a2a = createA2AHandler({
     inkbox: opts.inkbox,
@@ -141,12 +219,24 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
-      async ask(chatKey, prompt) {
-        const target = state.getReplyTarget(chatKey);
-        if (target) {
-          await deliverReply(opts.inkbox, target, prompt, logger).catch(() => {});
-        }
-        return pending.await(chatKey, g.permissionTimeoutS * 1000);
+      async ask(chatKey, prompt, target) {
+        target ??= state.getReplyTarget(chatKey);
+        if (!target?.sender) return undefined;
+        const answer = pending.await(
+          chatKey,
+          g.permissionTimeoutS * 1000,
+          target.group || target.companionMode || target.companionSponsor
+            ? { sender: target.sender, channel: target.channel }
+            : undefined,
+        );
+        const hint =
+          (target.companionMode || target.companionSponsor) && g.groupReplyMode === "mention"
+            ? target.channel === "email"
+              ? "\nKeep the agent in To, or include @agent in your answer (for example, @agent allow)."
+              : "\nInclude @agent in your answer (for example, @agent allow)."
+            : "";
+        await deliverReply(opts.inkbox, target, prompt + hint, logger);
+        return answer;
       },
     },
   });
@@ -216,14 +306,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     }
   }
 
-  // Session ids a /resume awaits a numeric selection from, per contact.
-  const resumeCandidates = new Map<string, string[]>();
-
-  async function say(chatKey: string, text: string): Promise<void> {
-    const target = state.getReplyTarget(chatKey);
-    if (target) await deliverReply(opts.inkbox, target, text, logger).catch(() => {});
-  }
-
   // Intercept inbound before it becomes a turn: (1) a pending escalation
   // answer consumes the message; (2) a /resume selection; (3) a control
   // command replies directly.
@@ -231,47 +313,63 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     return {
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage) => {
-        state.setReplyTarget(msg.chatKey, {
+        const target = {
           channel: msg.channel,
           to: msg.from,
+          sender: msg.from,
           conversationId: msg.conversationId,
           subject: msg.subject,
           rfcMessageId: msg.rfcMessageId,
-        });
-        if (pending.tryConsume(msg.chatKey, msg.text)) return;
+          messageId: msg.messageId,
+          group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
+        };
+        const raw = msg.rawText ?? msg.text;
+        if (
+          !msg.reaction &&
+          (!msg.group || msg.channel === "email" || isPermissionReply(raw)) &&
+          pending.tryConsume(msg.chatKey, raw, { sender: msg.from, channel: msg.channel })
+        )
+          return;
 
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
-        if (candidates) {
+        if (candidates && !msg.reaction && sameAuthor(msg.channel, candidates.sender, msg.from)) {
           resumeCandidates.delete(msg.chatKey);
-          const pick = Number.parseInt(msg.text.trim(), 10);
-          const chosen = Number.isInteger(pick) ? candidates[pick - 1] : undefined;
+          const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+          const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
+            await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);
-            await say(msg.chatKey, "Resumed that conversation. Go ahead.");
+            await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
           }
           // Not a valid pick — fall through and treat as a normal message.
         }
 
-        const commandReply = await handleCommand(
-          {
-            opencode: opts.opencode,
-            inkbox: opts.inkbox,
-            sessions,
-            logger,
-            directory: opts.directory,
-            health: () => health(opts, transport.publicUrl),
-          },
-          msg.chatKey,
-          msg.text,
-        );
+        const commandReply = msg.reaction
+          ? null
+          : await handleCommand(
+              {
+                opencode: opts.opencode,
+                inkbox: opts.inkbox,
+                sessions,
+                logger,
+                directory: opts.directory,
+                health: () => health(opts, transport.publicUrl),
+              },
+              msg.chatKey,
+              raw,
+            );
         if (commandReply !== null) {
           const result = typeof commandReply === "string" ? { reply: commandReply } : commandReply;
           if (result.resume && result.resume.length > 0) {
-            resumeCandidates.set(msg.chatKey, result.resume);
+            resumeCandidates.set(msg.chatKey, {
+              ids: result.resume,
+              sender: msg.from,
+              channel: msg.channel,
+            });
           }
-          await say(msg.chatKey, result.reply);
+          await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
         await sessions.handleInbound(msg);

@@ -56,3 +56,22 @@ describe("createPendingReplies", () => {
     expect(pending.pending("ck")).toBe(false);
   });
 });
+
+it("only consumes the prompted sender, with case-insensitive email authors", async () => {
+  const pending = createPendingReplies();
+  const answer = pending.await("group", 10_000, {
+    sender: "Sponsor@Example.com",
+    channel: "email",
+  });
+  expect(
+    pending.tryConsume("group", "allow", { sender: "other@example.com", channel: "email" }),
+  ).toBe(false);
+  expect(
+    pending.tryConsume("group", "allow", { sender: "sponsor@example.com", channel: "sms" }),
+  ).toBe(false);
+  expect(pending.pending("group")).toBe(true);
+  expect(
+    pending.tryConsume("group", "allow", { sender: "sponsor@example.com", channel: "email" }),
+  ).toBe(true);
+  await expect(answer).resolves.toBe("allow");
+});

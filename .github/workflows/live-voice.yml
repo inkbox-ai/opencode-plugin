@@ -65,7 +65,7 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.5.9 \
+            @inkbox/sdk@0.7.7 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
 

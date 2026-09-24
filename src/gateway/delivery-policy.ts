@@ -21,6 +21,7 @@ const retryable = [
   "content violation",
   "too_long",
   "too long",
+  "characters; maximum",
   "markdown",
   "emoji",
   "profanity",

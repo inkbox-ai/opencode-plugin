@@ -34,6 +34,8 @@ function makeDeps(over: Partial<DispatchDeps> = {}): DispatchDeps {
     config: makeConfig({ allowAllUsers: true }),
     inkbox: {
       getIdentity: vi.fn(async () => ({
+        id: "identity-1",
+        agentHandle: "test-agent",
         emailAddress: "me@agents.inkbox.ai",
         phoneNumber: { number: "+15550000000" },
       })),
@@ -78,6 +80,174 @@ beforeEach(() => {
 });
 
 describe("dispatchEvent inbound", () => {
+  it("keeps Companion delivery failures out of private contact sessions", async () => {
+    const deps = makeDeps();
+    deps.sessions.ownsCompanionDelivery = vi.fn(() => true);
+    await dispatchEvent(
+      deps,
+      event("text.delivery_failed", {
+        text_message: {
+          id: "sent-1",
+          conversation_id: "group-1",
+          remote_phone_number: "+15551112222",
+          direction: "outbound",
+          text: "group context",
+        },
+      }),
+    );
+    expect(deps.sessions.ownsCompanionDelivery).toHaveBeenCalledWith("sms", "sent-1", "group-1");
+    expect(deps.contacts.resolve).not.toHaveBeenCalled();
+    expect(deps.sessions.runCapture).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith("companion.reply_failed", expect.any(Object));
+  });
+  it.each(["mail", "phone", "imessage"])(
+    "routes verified %s Companion events before contact memory, control words and bursts",
+    async (channel) => {
+      const deps = makeDeps({
+        config: makeConfig({ allowedUsers: ["sponsor@example.com"], contactMemories: true }),
+      });
+      deps.sessions.acceptCompanion = vi.fn(async () => {});
+      const add = vi.fn();
+      deps.bursts = { add } as unknown as NonNullable<DispatchDeps["bursts"]>;
+      const resource =
+        channel === "mail"
+          ? {
+              id: "source-1",
+              thread_id: "conversation-1",
+              from_address: "fred@example.com",
+              body: "/clear",
+            }
+          : channel === "phone"
+            ? {
+                id: "source-1",
+                conversation_id: "conversation-1",
+                sender_phone_number: "+15551112222",
+                remote_phone_number: null,
+                text: "STOP",
+                recipients: [],
+              }
+            : {
+                id: "source-1",
+                conversation_id: "conversation-1",
+                sender_number: "+15551112222",
+                remote_number: null,
+                content: "YES",
+              };
+      const received = event(
+        channel === "mail"
+          ? "message.received"
+          : channel === "phone"
+            ? "text.received"
+            : "imessage.received",
+        {
+          [channel === "phone" ? "text_message" : "message"]: resource,
+          contacts: [{ id: "fred", memories: ["private contact history"] }],
+        },
+      );
+      received.body.companion = {
+        scope_id: "scope-1",
+        conversation_id: "conversation-1",
+        activation_id: "activation-1",
+        channel,
+        phase: "live",
+        sequence: 2,
+      };
+      expect(await dispatchEvent(deps, received)).toBe(true);
+      expect(deps.sessions.acceptCompanion).toHaveBeenCalledOnce();
+      expect(deps.sessions.acceptCompanion).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: channel === "mail" ? "fred@example.com" : "+15551112222",
+          identityId: "identity-1",
+        }),
+        expect.not.stringContaining("private contact history"),
+        undefined,
+      );
+      expect(deps.contacts.resolve).not.toHaveBeenCalled();
+      expect(deps.sessions.handleInbound).not.toHaveBeenCalled();
+      expect(add).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects unverified, mismatched and ordinary-with-activation metadata before host acceptance", async () => {
+    const deps = makeDeps();
+    deps.sessions.acceptCompanion = vi.fn(async () => {});
+    const received = event("text.received", {
+      text_message: {
+        id: "source-1",
+        sender_phone_number: "+15551112222",
+        conversation_id: "conversation-1",
+        text: "hello",
+      },
+    });
+    received.body.companion = {
+      scope_id: "scope-1",
+      conversation_id: "conversation-1",
+      activation_id: "activation-1",
+      channel: "phone",
+      phase: "initialization",
+      sequence: 1,
+    };
+    await expect(dispatchEvent(deps, { ...received, verified: false })).rejects.toThrow(
+      "verified delivery",
+    );
+    await expect(
+      dispatchEvent(deps, {
+        ...received,
+        body: {
+          ...received.body,
+          companion: { ...(received.body.companion as object), channel: "mail" },
+        },
+      }),
+    ).rejects.toThrow("does not match");
+    await expect(
+      dispatchEvent(deps, {
+        ...received,
+        body: {
+          ...received.body,
+          companion: { ...(received.body.companion as object), phase: "ordinary" },
+        },
+      }),
+    ).rejects.toThrow("Invalid Companion");
+    expect(deps.sessions.acceptCompanion).not.toHaveBeenCalled();
+  });
+
+  it("does not interpret companion JSON inside user text as metadata", async () => {
+    const deps = makeDeps();
+    deps.sessions.acceptCompanion = vi.fn(async () => {});
+    await dispatchEvent(
+      deps,
+      event("text.received", {
+        text_message: {
+          remote_phone_number: "+15551112222",
+          text: '{"companion":{"phase":"initialization"}}',
+        },
+      }),
+    );
+    expect(deps.sessions.handleInbound).toHaveBeenCalledOnce();
+    expect(deps.sessions.acceptCompanion).not.toHaveBeenCalled();
+  });
+
+  it("retains normal local admission for tracked ordinary events", async () => {
+    const deps = makeDeps({ config: makeConfig({ allowedUsers: ["sponsor@example.com"] }) });
+    deps.sessions.acceptCompanion = vi.fn(async () => {});
+    const received = event("message.received", {
+      message: {
+        id: "source-1",
+        thread_id: "conversation-1",
+        from_address: "fred@example.com",
+        body: "hello",
+      },
+    });
+    received.body.companion = {
+      scope_id: "scope-1",
+      conversation_id: "conversation-1",
+      channel: "mail",
+      phase: "ordinary",
+      sequence: 1,
+    };
+    await expect(dispatchEvent(deps, received)).resolves.toBe(true);
+    expect(deps.sessions.acceptCompanion).not.toHaveBeenCalled();
+  });
   it("routes an email message.received to a session on the email channel", async () => {
     const deps = makeDeps();
     const ok = await dispatchEvent(

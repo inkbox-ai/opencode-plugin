@@ -1,9 +1,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Inkbox, InkboxConnectionError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
+import {
+  COMPANION_MAX_BYTES,
+  type CompanionTurn,
+  companionChatKey,
+} from "../../src/gateway/companion.js";
+import { createNotifyOnce } from "../../src/gateway/dedup.js";
+import { dispatchEvent } from "../../src/gateway/dispatch.js";
 import {
   beginHostedSmsAttempt,
   getHostedCall,
@@ -13,21 +21,34 @@ import {
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
+import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete process.env.INKBOX_OPENCODE_HOME;
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 function makeIdentity() {
   return {
+    id: "identity-1",
     agentHandle: "test-agent",
     emailAddress: "test-agent@inkboxmail.com",
     phoneNumber: { number: "+15559990000" },
     imessageEnabled: true,
     sendEmail: vi.fn(async () => ({ id: "email-1" })),
+    replyAllEmail: vi.fn(async (_id: string, _opts: unknown) => ({ id: "email-1" })),
+    getMessage: vi.fn(async () => ({
+      id: "parent-1",
+      threadId: "conversation-1",
+      messageId: "<parent@example.com>",
+      replyAllRecipients: {
+        to: ["sponsor@example.com"],
+        cc: ["fred@example.com", "nancy@example.com"],
+      },
+    })),
     sendText: vi.fn(async () => ({ id: "sms-1" })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
   };
@@ -101,6 +122,14 @@ function makeManager(existingDir?: string) {
   };
   const config = { gateway: { ...defaultGatewayConfig() } } as unknown as ResolvedConfig;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const companionSenderAllowed = vi.fn(async (from: string) => from === "sponsor@example.com");
+  const companionLocalAllowed = vi.fn(
+    (_from: string, _contactId: string | undefined, _requireReply: boolean) => true,
+  );
+  const companionControl = vi.fn(
+    async (_turn: CompanionTurn, _key: string, _target: unknown) => false,
+  );
+  const companionContactId = vi.fn(async (_from: string): Promise<string | undefined> => undefined);
   const mgr = createSessionManager({
     opencode: opencode as never,
     inkbox: inkbox as never,
@@ -108,9 +137,20 @@ function makeManager(existingDir?: string) {
     state,
     logger,
     directory: "/proj",
+    companionSenderAllowed,
+    companionLocalAllowed,
+    companionControl,
+    companionContactId,
   });
   return {
     mgr,
+    inkbox,
+    companionSenderAllowed,
+    companionLocalAllowed,
+    companionControl,
+    companionContactId,
+    config,
+    logger,
     opencode,
     identity,
     state,
@@ -173,7 +213,10 @@ describe("durable async turns", () => {
   it("drops a stale persisted session before submission", async () => {
     const d = makeManager();
     d.state.setSession("ck", "stale");
-    d.opencode.session.get.mockResolvedValueOnce({ error: { name: "NotFound" } } as any);
+    d.opencode.session.get.mockResolvedValueOnce({
+      error: { name: "NotFound" },
+      response: { status: 404 },
+    } as any);
 
     await d.mgr.handleInbound(sms("hello"));
 
@@ -395,7 +438,514 @@ describe("durable async turns", () => {
     await d.mgr.handleInbound(sms("second"));
 
     expect(d.identity.sendText).toHaveBeenCalledTimes(2);
-    expect(d.state.listTurns().every((turn) => turn.state === "delivered")).toBe(true);
+    expect(
+      d.state
+        .listTurns()
+        .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+    ).toBe(true);
+  });
+});
+
+function companion(
+  phase: "initialization" | "live" | "ordinary" = "initialization",
+  sequence = 1,
+): CompanionTurn {
+  return {
+    senderAccess: "direct",
+    rawText: "hello",
+    identityId: "identity-1",
+    handle: "test-agent",
+    sourceId: `source-${sequence}`,
+    from: "sponsor@example.com",
+    initialization: phase === "initialization",
+    metadata: {
+      scope_id: "scope-1",
+      conversation_id: "conversation-1",
+      channel: "phone",
+      phase,
+      sequence,
+      ...(phase === "ordinary" ? {} : { activation_id: "activation-1" }),
+    },
+  };
+}
+
+function snapshot() {
+  return {
+    scopeId: "scope-1",
+    conversationId: "conversation-1",
+    activationId: "activation-1",
+    channel: "phone",
+    entries: [
+      { id: "fred", author: "fred@example.com", isTrigger: false, historical: true },
+      { id: "nancy", author: "nancy@example.com", isTrigger: false, historical: true },
+      { id: "source-1", author: "sponsor@example.com", isTrigger: true, historical: false },
+    ],
+    text: "Historical Fred: /clear\nHistorical Nancy: YES\nSponsor trigger: hello",
+    replyContext: { channel: "phone", conversationId: "conversation-1" },
+    notices: [],
+  };
+}
+
+describe("Companion durable host boundary", () => {
+  it("pauses uncertain sends and later Companion turns without regenerating after restart", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    d.identity.sendText.mockRejectedValueOnce(new Error("Send outcome unknown"));
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("paused"));
+    await d.mgr.acceptCompanion(companion("live", 2), "next group message");
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    await restarted.mgr.catchUp();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.identity.sendText).toHaveBeenCalledTimes(1);
+    expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(restarted.identity.sendText).not.toHaveBeenCalled();
+    await restarted.mgr.close();
+  });
+  it("tracks successful Companion deliveries by the original channel and message", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    expect(d.mgr.ownsCompanionDelivery?.("sms", "sms-1", "conversation-1")).toBe(true);
+    expect(d.mgr.ownsCompanionDelivery?.("sms", "unknown", "other-group")).toBe(false);
+    expect(d.mgr.ownsCompanionDelivery?.("sms", "unknown", "conversation-1")).toBe(false);
+    expect(d.mgr.ownsCompanionDelivery?.("email", "sms-1", "conversation-1")).toBe(false);
+    await d.mgr.close();
+  });
+  it.each(["body", "attachments"])(
+    "pauses unavailable ordinary mail %s before host input",
+    async (missing) => {
+      const d = makeManager();
+      const received = companion("ordinary");
+      received.metadata.channel = "mail";
+      received.mailBodyPending = true;
+      d.identity.getMessage.mockResolvedValue({
+        id: received.sourceId,
+        threadId: "conversation-1",
+        fromAddress: received.from,
+        bodyText: missing === "body" ? null : "complete text",
+        bodyHtml: null,
+        hasAttachments: missing === "attachments",
+        attachmentMetadata: [],
+      } as never);
+      await d.mgr.acceptCompanion(received, "incomplete webhook", {
+        channel: "email",
+        conversationId: "conversation-1",
+        companion: {
+          replyToMessageId: received.sourceId,
+          to: [received.from, "fred@example.com"],
+          cc: [],
+        },
+      });
+      await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await d.mgr.close();
+    },
+  );
+  it("fences a hydration worker after another owner takes its lease", async () => {
+    const d = makeManager();
+    let release!: () => void;
+    const loadInitialization = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return snapshot();
+    });
+    d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(loadInitialization).toHaveBeenCalledTimes(1));
+    const turn = d.state.listTurns()[0];
+    d.state.updateTurn(turn.id, { ownerId: "replacement", leaseUntil: Date.now() + 60000 });
+    release();
+    await vi.waitFor(() => expect(d.logger.error).toHaveBeenCalled());
+    expect(d.state.getTurn(turn.id)?.ownerId).toBe("replacement");
+    expect(d.state.getTurn(turn.id)?.state).toBe("hydrating");
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    await d.mgr.close();
+  });
+  it("does not dispatch a live source already included in initialization", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: {
+        loadInitialization: vi.fn(async () => snapshot()),
+        activationMessages: vi.fn(async () => snapshot()),
+      },
+    });
+    const live = companion("live", 2);
+    live.sourceId = "source-1";
+    await d.mgr.acceptCompanion(live, "duplicate trigger");
+    await vi.waitFor(() =>
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
+    );
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    await d.mgr.close();
+  });
+  it("hydrates a truncated live email with attachments into one later input", async () => {
+    const d = makeManager();
+    d.setReply("[SILENT]");
+    const loaded = {
+      ...snapshot(),
+      channel: "mail",
+      replyContext: {
+        channel: "mail",
+        conversationId: "conversation-1",
+        replyToMessageId: "source-1",
+        to: ["sponsor@example.com", "fred@example.com"],
+        cc: [],
+      },
+    };
+    d.inkbox.getClient.mockResolvedValue({
+      companion: {
+        loadInitialization: vi.fn(async () => loaded),
+        activationMessages: vi.fn(async () => loaded),
+      },
+    });
+    const first = companion();
+    first.metadata.channel = "mail";
+    await d.mgr.acceptCompanion(first, "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    const live = companion("live", 2);
+    live.metadata.channel = "mail";
+    live.from = "fred@example.com";
+    live.mailBodyPending = true;
+    d.identity.getMessage.mockResolvedValue({
+      id: "source-2",
+      threadId: "conversation-1",
+      fromAddress: live.from,
+      bodyText: "complete live body",
+      bodyHtml: null,
+      attachmentMetadata: [{ index: 0, content_type: "text/plain" }],
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+    } as never);
+    await d.mgr.acceptCompanion(live, "truncated prefix");
+    await vi.waitFor(() =>
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
+    );
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    const text = d.opencode.session.promptAsync.mock.calls[1][0].body.parts[0].text;
+    expect(text).toContain("complete live body");
+    expect(text).toContain("text/plain");
+    expect(text).not.toContain("truncated prefix");
+    await d.mgr.close();
+  });
+  it("does not perform a second authorization read after host session creation", async () => {
+    const d = makeManager();
+    let revoked = false;
+    d.opencode.session.create.mockImplementationOnce(async () => {
+      revoked = true;
+      return { data: { id: "sess-1" } };
+    });
+    d.inkbox.getClient.mockResolvedValue({
+      companion: {
+        loadInitialization: vi.fn(async () => snapshot()),
+        activationMessages: vi.fn(async () => {
+          if (revoked) throw new Error("activation revoked");
+          return snapshot();
+        }),
+      },
+    });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    await d.mgr.close();
+  });
+  it.each(["mail", "phone", "imessage"] as const)(
+    "exhausts real SDK v1 pages into exactly one %s promptAsync input",
+    async (channel) => {
+      const d = makeManager();
+      d.setReply("[SILENT]");
+      expect(fixture.version).toBe(1);
+      const pages = structuredClone(fixture.pages).map((page) => ({
+        ...page,
+        channel,
+        reply_context: { ...page.reply_context, channel },
+      }));
+      const first = pages[0];
+      if (channel !== "mail")
+        for (const page of pages)
+          for (const entry of page.items) {
+            if (entry.is_trigger) entry.author = "+15551110000";
+          }
+      if (channel !== "mail")
+        d.companionSenderAllowed.mockImplementation(async (from) => from === "+15551110000");
+      const c = companion();
+      c.metadata = {
+        ...c.metadata,
+        channel,
+        scope_id: first.scope_id,
+        activation_id: first.activation_id,
+        conversation_id: first.conversation_id,
+      };
+      c.sourceId = pages[1].items[1].id;
+      const fetch = vi.fn(async (input: string | URL | Request) => {
+        const last = new URL(String(input)).searchParams.has("cursor");
+        return new Response(JSON.stringify(pages[last ? 1 : 0]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      vi.stubGlobal("fetch", fetch);
+      d.inkbox.getClient.mockResolvedValue(
+        new Inkbox({ apiKey: "synthetic-test-key", baseUrl: "https://api.example.com" }),
+      );
+      const received = {
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        eventType:
+          channel === "mail"
+            ? "message.received"
+            : channel === "phone"
+              ? "text.received"
+              : "imessage.received",
+        body: {
+          companion: c.metadata,
+          data: {
+            [channel === "phone" ? "text_message" : "message"]: {
+              sender_access: "direct",
+              id: c.sourceId,
+              thread_id: c.metadata.conversation_id,
+              conversation_id: c.metadata.conversation_id,
+              from_address: "sponsor@example.com",
+              sender_phone_number: "+15551110000",
+              sender_number: "+15551110000",
+              remote_number: null,
+              body: "trigger only must not be used",
+              text: "trigger only must not be used",
+              content: "trigger only must not be used",
+            },
+          },
+        },
+      };
+      const contacts = { resolve: vi.fn(), chatKeyFor: vi.fn() };
+      const handleInbound = vi.fn(async () => {});
+      const deps = {
+        inkbox: d.inkbox as never,
+        config: d.config,
+        logger: d.logger,
+        sessions: { ...d.mgr, handleInbound },
+        contacts,
+        notify: createNotifyOnce(),
+      };
+      await dispatchEvent(deps, received);
+      await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+      const text = d.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
+      const entries = [first.items[0], first.items[1], pages[1].items[1]];
+      for (const entry of entries) expect(text.split(`"id":"${entry.id}"`)).toHaveLength(2);
+      expect(text.indexOf(`"id":"${entries[0].id}"`)).toBeLessThan(
+        text.indexOf(`"id":"${entries[1].id}"`),
+      );
+      expect(text.indexOf(`"id":"${entries[1].id}"`)).toBeLessThan(
+        text.indexOf(`"id":"${entries[2].id}"`),
+      );
+      expect(text).toContain("source_message_id");
+      expect(text).toContain("future_history_notice");
+      expect(text).toContain("café.");
+      expect(d.opencode.session.abort).not.toHaveBeenCalled();
+      expect(handleInbound).not.toHaveBeenCalled();
+      expect(contacts.resolve).not.toHaveBeenCalled();
+      await dispatchEvent(deps, received);
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+      await d.mgr.close();
+    },
+  );
+  it.each(["mail", "phone", "imessage"] as const)(
+    "submits one %s initialization and retains its immutable group reply",
+    async (channel) => {
+      const d = makeManager();
+      const c = companion();
+      c.metadata.channel = channel;
+      const loaded = {
+        ...snapshot(),
+        channel,
+        replyContext: {
+          channel,
+          conversationId: "conversation-1",
+          replyToMessageId: "source-1",
+          to: ["sponsor@example.com"],
+          cc: ["fred@example.com", "nancy@example.com"],
+        },
+      };
+      d.inkbox.getClient.mockResolvedValue({
+        companion: {
+          loadInitialization: vi.fn(async () => loaded),
+          activationMessages: vi.fn(async () => loaded),
+        },
+      });
+      await d.mgr.acceptCompanion(c, "trigger");
+      await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+      expect(d.opencode.session.promptAsync.mock.calls[0][0].body.parts).toHaveLength(1);
+      if (channel === "mail") {
+        expect(d.identity.getMessage).not.toHaveBeenCalled();
+        expect(d.identity.sendEmail).not.toHaveBeenCalled();
+        expect(d.identity.replyAllEmail).toHaveBeenCalledWith("source-1", { bodyText: "reply" });
+      } else
+        expect(
+          channel === "phone" ? d.identity.sendText : d.identity.sendIMessage,
+        ).toHaveBeenCalledWith({ conversationId: "conversation-1", text: "reply" });
+      await d.mgr.close();
+    },
+  );
+  it("persists before hydration, submits one initializer, and orders live followups without interrupting", async () => {
+    const d = makeManager();
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const loadInitialization = vi.fn(async () => {
+      await barrier;
+      return snapshot();
+    });
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization, activationMessages: vi.fn(async () => snapshot()) },
+    });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await d.mgr.acceptCompanion(companion("live", 2), "sponsor followup");
+    await d.mgr.acceptCompanion(companion(), "duplicate");
+    expect(d.state.listTurns()).toHaveLength(2);
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() =>
+      expect(
+        d.state
+          .listTurns()
+          .every((turn) => turn.state === "delivered" || turn.state === "context_only"),
+      ).toBe(true),
+    );
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    const calls = d.opencode.session.promptAsync.mock.calls;
+    expect(calls[0][0].body.parts[0].text).toContain(snapshot().text);
+    expect(calls[1][0].body.parts[0].text).toContain("sponsor followup");
+    expect(d.opencode.session.abort).not.toHaveBeenCalled();
+    expect(d.identity.sendText.mock.calls).toEqual([
+      [{ text: "reply", conversationId: "conversation-1" }],
+      [{ text: "reply", conversationId: "conversation-1" }],
+    ]);
+    await d.mgr.acceptCompanion(companion(), "duplicate after completion");
+    await d.mgr.catchUp();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    await d.mgr.close();
+  });
+
+  it("recovers pending hydration with the same host message ID", async () => {
+    const d = makeManager();
+    const c = companion();
+    const chatKey = companionChatKey(c.identityId, c.metadata);
+    d.state.saveTurn({
+      id: `${chatKey}:initialization`,
+      messageID: "msg_saved",
+      chatKey,
+      state: "hydrating",
+      kind: "capture",
+      text: "",
+      deliver: true,
+      companion: c,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    d.inkbox.getClient.mockResolvedValue({
+      companion: {
+        loadInitialization: vi.fn(async () => snapshot()),
+        activationMessages: vi.fn(async () => snapshot()),
+      },
+    });
+    await d.mgr.catchUp();
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1));
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.messageID).toBe("msg_saved");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    await d.mgr.close();
+  });
+
+  it("pauses an uncertain accepted turn and its live queue across restart", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: {
+        loadInitialization: vi.fn(async () => snapshot()),
+        activationMessages: vi.fn(async () => snapshot()),
+      },
+    });
+    d.opencode.session.promptAsync.mockRejectedValueOnce(new Error("outcome unknown"));
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await d.mgr.acceptCompanion(companion("live", 2), "followup");
+    await vi.waitFor(() =>
+      expect(d.state.listTurns().some((turn) => turn.state === "paused")).toBe(true),
+    );
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    await restarted.mgr.catchUp();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+    await restarted.mgr.close();
+  });
+
+  it.each(["oversize", "revoked", "sponsor denied", "wrong scope"])(
+    "pauses %s before any host input",
+    async (failure) => {
+      const d = makeManager();
+      const loaded = snapshot();
+      if (failure === "oversize") loaded.text = "x".repeat(COMPANION_MAX_BYTES);
+      if (failure === "wrong scope") loaded.scopeId = "other";
+      if (failure === "sponsor denied") d.companionSenderAllowed.mockResolvedValue(false);
+      d.inkbox.getClient.mockResolvedValue({
+        companion: {
+          loadInitialization: vi.fn(async () => {
+            if (failure === "revoked") throw new Error("activation unavailable");
+            return loaded;
+          }),
+        },
+      });
+      await d.mgr.acceptCompanion(companion(), "trigger");
+      await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await d.mgr.close();
+    },
+  );
+
+  it("keeps ordinary, new cohorts and private contact sessions separate", async () => {
+    const d = makeManager();
+    const loadInitialization = vi.fn(async (_handle: string, activation: string) => ({
+      ...snapshot(),
+      activationId: activation,
+    }));
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization, activationMessages: loadInitialization },
+    });
+    await d.mgr.acceptCompanion(companion("ordinary"), "normal sponsor message", {
+      channel: "sms",
+      conversationId: "conversation-1",
+    });
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1));
+    expect(loadInitialization).not.toHaveBeenCalled();
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    const next = companion();
+    next.metadata.activation_id = "activation-2";
+    await d.mgr.acceptCompanion(next, "new cohort trigger");
+    await d.mgr.handleInbound(sms("private", { chatKey: "contact:sponsor" }));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(4));
+    expect(
+      new Set(d.opencode.session.promptAsync.mock.calls.map(([input]) => input.path.id)).size,
+    ).toBe(4);
+    await d.mgr.close();
   });
 });
 
@@ -667,5 +1217,596 @@ describe("extractText", () => {
   it("ignores empty and non-text parts", () => {
     expect(extractText({ data: { parts: [{ type: "tool" }] } })).toBeUndefined();
     expect(extractText(undefined)).toBeUndefined();
+  });
+});
+
+describe("quiet context and startup recovery", () => {
+  it("ignores an old group's late completion after resetting and selecting another host session", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const oldRequest = d.mgr.handleInbound(sms("old work", { group: { participantCount: 2 } }));
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    const oldTurn = d.state.listTurns().find((turn) => turn.state === "submitted");
+    if (!oldTurn?.sessionID) throw new Error("Old turn was not submitted");
+    await d.mgr.resetSession("ck");
+    d.state.setSession("ck", "selected-session");
+    const messages = d.messages.get(oldTurn.sessionID);
+    messages?.push({
+      info: {
+        id: "late-old-answer",
+        role: "assistant",
+        parentID: oldTurn.messageID,
+        time: { completed: Date.now() },
+        finish: "stop",
+      },
+      parts: [{ type: "text", text: "stale answer must not send" }],
+    });
+    delete d.statuses[oldTurn.sessionID];
+    d.setAutoComplete(true);
+    await d.mgr.handleInbound(sms("new work", { group: { participantCount: 2 } }));
+    await oldRequest;
+    expect(d.opencode.session.abort).toHaveBeenCalledWith({
+      path: { id: oldTurn.sessionID },
+      query: { directory: "/proj" },
+    });
+    expect(d.opencode.session.promptAsync.mock.calls[1][0].path.id).toBe("selected-session");
+    expect(d.identity.sendText).toHaveBeenCalledExactlyOnceWith({
+      conversationId: "conv-1",
+      text: "reply",
+    });
+    expect(d.state.getTurn(oldTurn.id)?.state).toBe("interrupted");
+    await d.mgr.close();
+  });
+
+  it("persists quiet group messages without opening or interrupting a host session", async () => {
+    const d = makeManager();
+    d.config.gateway.groupReplyMode = "mention";
+    await d.mgr.handleInbound(sms("unaddressed history", { group: { participantCount: 2 } }));
+    expect(d.opencode.session.create).not.toHaveBeenCalled();
+    expect(d.opencode.session.abort).not.toHaveBeenCalled();
+    expect(d.state.getReplyTarget("ck")).toBeUndefined();
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    restarted.config.gateway.groupReplyMode = "mention";
+    await restarted.mgr.handleInbound(sms("@agent answer", { group: { participantCount: 2 } }));
+    expect(restarted.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    const prompt = restarted.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
+    expect(prompt).toContain("unaddressed history");
+    expect(prompt).toContain("@agent answer");
+    await restarted.mgr.close();
+  });
+  it("does not wake a historical sponsor when a sponsored live receipt arrives first", async () => {
+    const d = makeManager();
+    const loadInitialization = vi.fn(async () => snapshot());
+    d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+    await d.mgr.acceptCompanion(
+      { ...companion("live", 2), senderAccess: "sponsored", rawText: "@agent quiet" },
+      "quiet live body",
+    );
+    await vi.waitFor(() =>
+      expect(d.state.listTurns().filter((turn) => turn.state === "context_only")).toHaveLength(2),
+    );
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    await restarted.mgr.acceptCompanion(
+      { ...companion("live", 3), rawText: "@agent help" },
+      "current direct body",
+    );
+    await vi.waitFor(() => expect(restarted.identity.sendText).toHaveBeenCalledTimes(1));
+    expect(restarted.inkbox.getClient).not.toHaveBeenCalled();
+    const text = restarted.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text;
+    expect(text).toContain(snapshot().text);
+    expect(text).toContain("quiet live body");
+    await restarted.mgr.close();
+  });
+  it("retries a transient resume error without losing the saved session", async () => {
+    const d = makeManager();
+    d.state.setSession("ck", "saved-session");
+    d.opencode.session.get.mockRejectedValueOnce(new Error("temporary connection failure"));
+    await d.mgr.handleInbound(sms("hello"));
+    expect(d.opencode.session.create).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.opencode.session.promptAsync.mock.calls[0][0].path.id).toBe("saved-session");
+    await d.mgr.close();
+  });
+  it("retries send preparation using the checkpointed answer, without generating twice", async () => {
+    const d = makeManager();
+    const prompt = d.opencode.session.promptAsync.getMockImplementation();
+    if (!prompt) throw new Error("Missing host test implementation");
+    d.opencode.session.promptAsync.mockImplementationOnce(async (input) => {
+      const result = await prompt(input);
+      d.inkbox.getIdentity.mockRejectedValueOnce(new Error("temporary identity failure"));
+      return result;
+    });
+    await d.mgr.handleInbound(sms("hello"));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(d.identity.sendText).toHaveBeenCalledTimes(1);
+    await d.mgr.close();
+  });
+});
+
+describe("Companion recovery ordering and current-message controls", () => {
+  it("hydrates a truncated email approval before the blocked host turn can finish", async () => {
+    const d = makeManager();
+    const received = companion("live", 2);
+    received.metadata.channel = "mail";
+    received.mailBodyPending = true;
+    received.rawText = "";
+    received.toAddresses = ["test-agent@inkboxmail.com"];
+    received.emailAddress = "test-agent@inkboxmail.com";
+    d.config.gateway.groupReplyMode = "mention";
+    const chatKey = companionChatKey(received.identityId, received.metadata);
+    d.state.saveTurn({
+      id: `${chatKey}:history`,
+      messageID: "history",
+      chatKey,
+      kind: "capture",
+      state: "context_only",
+      text: "history",
+      deliver: false,
+      consumedBy: "active",
+      historyTriggerId: "source-1",
+      companion: {
+        ...companion(),
+        metadata: { ...received.metadata, phase: "initialization", sequence: 1 },
+      },
+      replyTarget: {
+        channel: "email",
+        companionSponsor: received.from,
+        companion: { replyToMessageId: "source-1", to: [received.from], cc: [] },
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    d.state.saveTurn({
+      id: "active",
+      messageID: "active",
+      chatKey,
+      kind: "capture",
+      state: "submitted",
+      text: "waiting for approval",
+      deliver: true,
+      companion: {
+        ...received,
+        sourceId: "source-1",
+        metadata: { ...received.metadata, sequence: 1 },
+      },
+      ownerId: "blocked-host",
+      leaseUntil: Date.now() + 60000,
+      createdAt: 2,
+      updatedAt: 2,
+    });
+    d.identity.getMessage.mockResolvedValue({
+      id: received.sourceId,
+      threadId: "conversation-1",
+      fromAddress: "Sponsor@Example.com",
+      bodyText: "allow",
+      attachmentMetadata: [],
+    } as never);
+    d.companionControl.mockImplementation(async (turn) => turn.rawText === "allow");
+    await d.mgr.acceptCompanion(received, "truncated");
+    expect(d.companionControl).toHaveBeenCalledOnce();
+    expect(d.companionControl.mock.calls[0][0].rawText).toBe("allow");
+    expect(d.state.getTurn(`${chatKey}:event:source-2`)?.controlHandled).toBe(true);
+    expect(d.state.getTurn("active")?.state).toBe("submitted");
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    await d.mgr.close();
+  });
+  it("does not run initialization text as a sponsor command", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    d.companionControl.mockResolvedValue(true);
+    await d.mgr.acceptCompanion(
+      { ...companion(), rawText: "/clear" },
+      "current initialization command-shaped text",
+    );
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    expect(d.companionControl).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it("requires a new activation for a different initialization trigger", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    await d.mgr.acceptCompanion(companion("initialization", 2), "different trigger");
+    await vi.waitFor(() =>
+      expect(
+        d.state.listTurns().find((turn) => turn.companion?.sourceId === "source-2")?.error,
+      ).toContain("new activation"),
+    );
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it("pauses a send interrupted by process exit without admitting the next group turn", async () => {
+    const d = makeManager();
+    const c = companion();
+    const chatKey = companionChatKey(c.identityId, c.metadata);
+    d.state.saveTurn({
+      id: "sending",
+      messageID: "sending",
+      chatKey,
+      state: "delivery_started",
+      kind: "capture",
+      text: "input",
+      output: "answer",
+      deliver: true,
+      companion: c,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await d.mgr.catchUp();
+    expect(d.state.getTurn("sending")?.state).toBe("paused");
+    await d.mgr.acceptCompanion(companion("live", 2), "followup");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(d.identity.sendText).not.toHaveBeenCalled();
+    await d.mgr.close();
+  });
+  it("does not leave an empty completed model response blocking its conversation", async () => {
+    const d = makeManager();
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    d.setReply("");
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    d.setReply("next answer");
+    await d.mgr.acceptCompanion(companion("live", 2), "next message");
+    await vi.waitFor(() => expect(d.identity.sendText).toHaveBeenCalledTimes(1));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    await d.mgr.close();
+  });
+});
+
+describe("context consumption boundaries", () => {
+  it.each([undefined, "contact-1"])(
+    "keeps ordinary multi-recipient email with contact=%s outside the group mention gate",
+    async (contactId) => {
+      const d = makeManager();
+      d.config.gateway.groupReplyMode = "mention";
+      await d.mgr.handleInbound(
+        sms("normal email without mention", {
+          channel: "email",
+          contactId,
+          from: "sender@example.com",
+          messageId: "stored-email",
+          group: { participantCount: 3 },
+        }),
+      );
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+      expect(d.identity.replyAllEmail).toHaveBeenCalledWith("stored-email", { bodyText: "reply" });
+      expect(d.state.getReplyTarget("ck")?.group).toBe(!contactId);
+      await d.mgr.close();
+    },
+  );
+  it("does not resurrect buffered ordinary context after a reset and restart", async () => {
+    const d = makeManager();
+    d.config.gateway.groupReplyMode = "mention";
+    await d.mgr.handleInbound(sms("discard this old context", { group: { participantCount: 2 } }));
+    await d.mgr.resetSession("ck");
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    restarted.config.gateway.groupReplyMode = "mention";
+    await restarted.mgr.handleInbound(sms("@agent current", { group: { participantCount: 2 } }));
+    expect(
+      restarted.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text,
+    ).not.toContain("discard this old context");
+    await restarted.mgr.close();
+  });
+  it.each(["submitting", "submitted"] as const)(
+    "consumes context after recovering an accepted %s turn",
+    async (state) => {
+      const d = makeManager();
+      d.config.gateway.groupReplyMode = "mention";
+      await d.mgr.handleInbound(
+        sms("already accepted history", { group: { participantCount: 2 } }),
+      );
+      const context = d.state.listTurns()[0];
+      d.state.saveTurn({
+        id: "accepted",
+        messageID: "accepted",
+        chatKey: "ck",
+        sessionID: "existing",
+        state,
+        kind: "normal",
+        text: "previous question",
+        deliver: true,
+        replyTarget: { channel: "sms", conversationId: "conv-1" },
+        contextIds: [context.id],
+        createdAt: 2,
+        updatedAt: 2,
+      });
+      d.messages.set("existing", [
+        { info: { id: "accepted", role: "user" }, parts: [] },
+        {
+          info: {
+            id: "answer",
+            role: "assistant",
+            parentID: "accepted",
+            finish: "stop",
+            time: { completed: Date.now() },
+          },
+          parts: [{ type: "text", text: "old answer" }],
+        },
+      ]);
+      await d.mgr.catchUp();
+      await vi.waitFor(() => expect(d.state.getTurn("accepted")?.state).toBe("delivered"));
+      expect(d.state.getTurn(context.id)?.consumedBy).toBe("accepted");
+      await d.mgr.handleInbound(sms("@agent new question", { group: { participantCount: 2 } }));
+      expect(d.opencode.session.promptAsync.mock.calls[0][0].body.parts[0].text).not.toContain(
+        "already accepted history",
+      );
+      await d.mgr.close();
+    },
+  );
+});
+
+describe("local Companion policy and historical receipt boundaries", () => {
+  it("does not consume an approval from a late historical webhook", async () => {
+    const d = makeManager();
+    const loadInitialization = vi.fn(async () => snapshot());
+    d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
+    d.companionControl.mockClear();
+    d.companionControl.mockResolvedValue(true);
+    await d.mgr.acceptCompanion(
+      { ...companion("live", 2), sourceId: "fred", from: "fred@example.com", rawText: "allow" },
+      "historical permission-looking message",
+    );
+    expect(d.companionControl).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(loadInitialization).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it("retains local send policy changes without reloading activation history", async () => {
+    const d = makeManager();
+    const loadInitialization = vi.fn(async () => snapshot());
+    d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+    const prompt = d.opencode.session.promptAsync.getMockImplementation();
+    if (!prompt) throw new Error("Missing test host implementation");
+    d.opencode.session.promptAsync.mockImplementationOnce(async (input) => {
+      const result = await prompt(input);
+      d.companionLocalAllowed.mockReturnValue(false);
+      return result;
+    });
+    await d.mgr.acceptCompanion(companion(), "trigger");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
+    expect(d.identity.sendText).not.toHaveBeenCalled();
+    expect(d.state.listTurns()[0].output).toBe("reply");
+    d.companionLocalAllowed.mockReturnValue(true);
+    await vi.waitFor(() => expect(d.identity.sendText).toHaveBeenCalledOnce());
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(loadInitialization).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+});
+
+it("rejects an email reply anchor that is not the stored sponsor trigger", async () => {
+  const d = makeManager();
+  const received = companion();
+  received.metadata.channel = "mail";
+  d.inkbox.getClient.mockResolvedValue({
+    companion: {
+      loadInitialization: vi.fn(async () => ({
+        ...snapshot(),
+        channel: "mail",
+        replyContext: {
+          channel: "mail",
+          conversationId: "conversation-1",
+          replyToMessageId: "another-message",
+          to: [received.from],
+          cc: [],
+        },
+      })),
+    },
+  });
+  await d.mgr.acceptCompanion(received, "trigger");
+  await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
+  expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+  expect(d.identity.replyAllEmail).not.toHaveBeenCalled();
+  await d.mgr.close();
+});
+
+it("retains the first persisted receipt's sender access on webhook retries", async () => {
+  const d = makeManager();
+  const c = companion("live", 2);
+  const chatKey = companionChatKey(c.identityId, c.metadata);
+  d.state.saveTurn({
+    id: `${chatKey}:history`,
+    messageID: "history",
+    chatKey,
+    state: "context_only",
+    kind: "capture",
+    text: "snapshot",
+    deliver: false,
+    historyTriggerId: "source-1",
+    companion: { ...companion(), hydrated: true },
+    replyTarget: { channel: "sms", conversationId: "conversation-1", companionSponsor: c.from },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  d.state.saveTurn({
+    id: `${chatKey}:event:${c.sourceId}`,
+    messageID: "persisted",
+    chatKey,
+    state: "hydrating",
+    kind: "capture",
+    text: "allow",
+    deliver: true,
+    companion: { ...c, rawText: "allow", senderAccess: "sponsored" },
+    createdAt: 2,
+    updatedAt: 2,
+  });
+  d.companionControl.mockResolvedValue(true);
+  await d.mgr.acceptCompanion({ ...c, rawText: "allow", senderAccess: "direct" }, "allow");
+  await vi.waitFor(() =>
+    expect(d.state.getTurn(`${chatKey}:event:${c.sourceId}`)?.state).toBe("context_only"),
+  );
+  expect(d.companionControl).not.toHaveBeenCalled();
+  expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+  expect(d.state.getTurn(`${chatKey}:event:${c.sourceId}`)?.companion?.senderAccess).toBe(
+    "sponsored",
+  );
+  await d.mgr.close();
+});
+
+describe("reviewed recovery and approval boundaries", () => {
+  it("ignores a late initializer already included by a running live-first turn", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    await d.mgr.acceptCompanion(companion("live", 2), "current live message");
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    const live = d.state.listTurns().find((turn) => turn.state === "submitted");
+    if (!live?.sessionID) throw new Error("Expected submitted live turn");
+    await d.mgr.acceptCompanion(companion(), "late trigger webhook");
+    expect(d.state.listTurns().find((turn) => turn.companion?.sourceId === "source-1")?.state).toBe(
+      "delivered",
+    );
+    const messages = d.messages.get(live.sessionID);
+    messages?.push({
+      info: {
+        id: "answer",
+        role: "assistant",
+        parentID: live.messageID,
+        finish: "stop",
+        time: { completed: Date.now() },
+      },
+      parts: [{ type: "text", text: "live answer" }],
+    });
+    delete d.statuses[live.sessionID];
+    await vi.waitFor(() => expect(d.identity.sendText).toHaveBeenCalledOnce());
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it("answers an ordinary-phase Companion approval before its host turn completes", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    d.companionContactId.mockResolvedValue("contact-1");
+    d.companionLocalAllowed.mockImplementation((_from, contactId) => contactId === "contact-1");
+    const target = {
+      channel: "sms" as const,
+      conversationId: "conversation-1",
+      sender: "sponsor@example.com",
+      companionMode: true,
+    };
+    await d.mgr.acceptCompanion(companion("ordinary"), "request", target);
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    d.companionControl.mockClear();
+    d.companionControl.mockImplementation(async (turn) => turn.rawText === "allow");
+    await d.mgr.acceptCompanion({ ...companion("ordinary", 2), rawText: "allow" }, "allow", target);
+    expect(d.companionControl).toHaveBeenCalledOnce();
+    expect(d.companionLocalAllowed).toHaveBeenLastCalledWith(
+      "sponsor@example.com",
+      "contact-1",
+      true,
+    );
+    expect(
+      d.state.listTurns().find((turn) => turn.companion?.sourceId === "source-2")?.controlHandled,
+    ).toBe(true);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it.each(["permanent", "http", "sdk"])(
+    "bounds permanent hydration failures while %s reads retain their retry policy",
+    async (kind) => {
+      const d = makeManager();
+      const c = companion();
+      const chatKey = companionChatKey(c.identityId, c.metadata);
+      d.state.saveTurn({
+        id: "pending",
+        messageID: "pending",
+        chatKey,
+        state: "hydrating",
+        kind: "capture",
+        text: "input",
+        deliver: true,
+        companion: c,
+        retryCount: 5,
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      const error =
+        kind === "sdk"
+          ? new InkboxConnectionError(
+              "API unreachable",
+              new TypeError("fetch failed", {
+                cause: Object.assign(new Error("Connection refused"), { code: "ECONNREFUSED" }),
+              }),
+            )
+          : Object.assign(
+              new Error("snapshot unavailable"),
+              kind === "http" ? { status: 503 } : {},
+            );
+      d.inkbox.getClient.mockRejectedValue(error);
+      await d.mgr.catchUp();
+      await vi.waitFor(() => expect(d.state.getTurn("pending")?.retryCount).toBe(6));
+      expect(d.state.getTurn("pending")?.state).toBe(kind === "permanent" ? "paused" : "hydrating");
+      expect(Boolean(d.state.getTurn("pending")?.retryAt)).toBe(kind !== "permanent");
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await d.mgr.close();
+    },
+  );
+  it.each(["sms", "imessage"] as const)(
+    "recovers an over-length ordinary %s reply without a send or infinite retry",
+    async (channel) => {
+      const d = makeManager();
+      d.setReply("x".repeat(channel === "sms" ? 1601 : 18996));
+      const prompt = d.opencode.session.promptAsync.getMockImplementation();
+      if (!prompt) throw new Error("Missing test host implementation");
+      d.opencode.session.promptAsync.mockImplementationOnce(async (input) => {
+        const result = await prompt(input);
+        d.setReply("short correction");
+        return result;
+      });
+      await d.mgr.handleInbound(sms("question", { channel }));
+      const send = channel === "sms" ? d.identity.sendText : d.identity.sendIMessage;
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+      expect(d.opencode.session.promptAsync.mock.calls[1][0].body.parts[0].text).toContain(
+        "MUST send exactly one safe",
+      );
+      expect(d.state.listTurns()[0].retryAt).toBeUndefined();
+      await d.mgr.close();
+    },
+  );
+  it("pauses an over-length Companion result without rerunning or sending", async () => {
+    const d = makeManager();
+    d.setReply("x".repeat(1601));
+    d.inkbox.getClient.mockResolvedValue({
+      companion: { loadInitialization: vi.fn(async () => snapshot()) },
+    });
+    await d.mgr.acceptCompanion(companion(), "request");
+    await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("paused"));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(d.identity.sendText).not.toHaveBeenCalled();
+    expect(d.state.listTurns()[0].retryAt).toBeUndefined();
+    await d.mgr.close();
+  });
+  it("captures an existing contact reply route before a later inbound changes it", async () => {
+    const d = makeManager();
+    d.state.setReplyTarget("ck", {
+      channel: "email",
+      sender: "person@example.com",
+      messageId: "original-message",
+    });
+    const capture = d.mgr.runCapture("ck", "follow-up task");
+    d.state.setReplyTarget("ck", { channel: "sms", sender: "+15550000001" });
+    await capture;
+    expect(d.state.listTurns()[0].replyTarget).toMatchObject({
+      channel: "email",
+      messageId: "original-message",
+    });
+    await d.mgr.close();
   });
 });

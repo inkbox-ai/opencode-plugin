@@ -203,6 +203,22 @@ async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {
   io.print("Inkbox authorization lives server-side via contact rules:");
   io.print("  https://inkbox.ai/console/contact-rules");
 
+  const groupMode = await io.choose(
+    "  Group replies",
+    ["Automatic", "Only when explicitly mentioned"],
+    config.gateway.groupReplyMode === "mention" ? 1 : 0,
+  );
+  save(c, "INKBOX_GROUP_REPLY_MODE", groupMode === 1 ? "mention" : "auto");
+  const companionMode = await io.choose(
+    "  Companion replies",
+    [
+      "Safe: only directly admitted messages can wake the agent",
+      "Relaxed: any delivered participant can wake the agent",
+    ],
+    config.gateway.companionResponseMode === "relaxed" ? 1 : 0,
+  );
+  save(c, "INKBOX_COMPANION_RESPONSE_MODE", companionMode === 1 ? "relaxed" : "safe");
+
   const client = await c.sdk.client(apiKey);
   const imessageOn = await configureIMessage(c, client, identity.agentHandle);
 

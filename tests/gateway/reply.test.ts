@@ -8,6 +8,13 @@ import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/limits.js
 
 function makeIdentity() {
   return {
+    getMessage: vi.fn(async () => ({
+      id: "parent-1",
+      threadId: "thread-1",
+      messageId: "<parent@example.com>",
+      replyAllRecipients: { to: ["sponsor@example.com"], cc: ["fred@example.com"] },
+    })),
+    replyAllEmail: vi.fn(async (_id: string, _opts: unknown) => ({ id: "email-1" })),
     sendEmail: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "email-1" })),
     sendText: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "sms-1" })),
     sendIMessage: vi.fn(async (_opts: Record<string, unknown>) => ({ id: "im-1" })),
@@ -53,47 +60,44 @@ describe("deliverReply suppression", () => {
 });
 
 describe("deliverReply email", () => {
-  it("sends to the target with a single Re: prefix and threads by message id", async () => {
-    const target: ReplyTarget = {
-      channel: "email",
-      to: "user@example.com",
-      subject: "Weekly report",
-      rfcMessageId: "<abc@mail>",
-    };
-    const { identity, result } = deliver(target, "All done.");
-    await expect(result).resolves.toEqual({
-      delivered: true,
-      reason: "sent",
-      messageId: "email-1",
-    });
-    expect(identity.sendEmail).toHaveBeenCalledWith({
-      to: ["user@example.com"],
-      subject: "Re: Weekly report",
-      bodyText: "All done.",
-      inReplyToMessageId: "<abc@mail>",
-    });
+  it("uses the stored message UUID with canonical reply-all, not the RFC header", async () => {
+    const { identity, result } = deliver(
+      {
+        channel: "email",
+        messageId: "stored-id",
+        rfcMessageId: "<rfc@example.com>",
+        to: "sender@example.com",
+      },
+      "All done.",
+    );
+    await expect(result).resolves.toMatchObject({ delivered: true, messageId: "email-1" });
+    expect(identity.replyAllEmail).toHaveBeenCalledWith("stored-id", { bodyText: "All done." });
+    expect(identity.sendEmail).not.toHaveBeenCalled();
   });
-
-  it("does not double an existing Re: prefix (any case)", async () => {
-    const upper = deliver({ channel: "email", to: "x@y.com", subject: "Re: Weekly report" }, "ok");
-    await upper.result;
-    expect(upper.identity.sendEmail.mock.calls[0][0].subject).toBe("Re: Weekly report");
-
-    const lower = deliver({ channel: "email", to: "x@y.com", subject: "re: hi" }, "ok");
-    await lower.result;
-    expect(lower.identity.sendEmail.mock.calls[0][0].subject).toBe("re: hi");
-  });
-
-  it("falls back to a bare Re: when there is no subject", async () => {
-    const { identity, result } = deliver({ channel: "email", to: "x@y.com" }, "ok");
+  it("retains the saved sponsor anchor without repeated audience reads", async () => {
+    const { identity, result } = deliver(
+      {
+        channel: "email",
+        companion: {
+          replyToMessageId: "sponsor-id",
+          to: ["sponsor@example.com"],
+          cc: ["peer@example.com"],
+        },
+      },
+      "reply",
+    );
     await result;
-    expect(identity.sendEmail.mock.calls[0][0].subject).toBe("Re:");
+    expect(identity.replyAllEmail).toHaveBeenCalledWith("sponsor-id", { bodyText: "reply" });
+    expect(identity.getMessage).not.toHaveBeenCalled();
   });
-
-  it("omits inReplyToMessageId when the original message id was not captured", async () => {
-    const { identity, result } = deliver({ channel: "email", to: "x@y.com", subject: "Hi" }, "ok");
-    await result;
-    expect("inReplyToMessageId" in identity.sendEmail.mock.calls[0][0]).toBe(false);
+  it("fails without a stored ID instead of sending sender-only", async () => {
+    const { identity, result } = deliver(
+      { channel: "email", to: "sender@example.com", rfcMessageId: "<rfc@example.com>" },
+      "reply",
+    );
+    await expect(result).rejects.toThrow("stored inbound message ID");
+    expect(identity.sendEmail).not.toHaveBeenCalled();
+    expect(identity.replyAllEmail).not.toHaveBeenCalled();
   });
 });
 

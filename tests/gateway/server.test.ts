@@ -67,6 +67,39 @@ describe("GET /health", () => {
 });
 
 describe("POST /webhook", () => {
+  it("does not acknowledge concurrent Companion retries before durable acceptance", async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onEvent = vi.fn(async () => {
+      await barrier;
+      return false;
+    });
+    const url = await start(baseDeps({ onEvent, providers: [testProvider({ name: "inkbox" })] }));
+    const responses: number[] = [];
+    const send = async () => {
+      const response = await fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "same-event" },
+        body: JSON.stringify({
+          event_type: "text.received",
+          companion: { phase: "initialization" },
+        }),
+      });
+      responses.push(response.status);
+    };
+    const first = send();
+    const duplicate = send();
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
+    expect(responses).toEqual([]);
+    release();
+    await Promise.all([first, duplicate]);
+    expect(responses).toEqual([500, 500]);
+    onEvent.mockResolvedValue(true);
+    await send();
+    expect(responses).toEqual([500, 500, 200]);
+  });
   it("dispatches a verified event and acks with 200", async () => {
     const deps = baseDeps();
     const url = await start(deps);
@@ -148,3 +181,21 @@ describe("POST /webhook", () => {
     expect(rollback).toHaveBeenCalledWith("req-fail");
   });
 });
+
+it.each([{ companion: null }, { data: { companion: { phase: "live" } } }])(
+  "keeps ordinary request dedup for non-authoritative Companion metadata: %o",
+  async (metadata) => {
+    const deps = baseDeps({ providers: [testProvider({ name: "inkbox" })] });
+    const url = await start(deps);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "ordinary-retry" },
+        body: JSON.stringify({ event_type: "text.received", ...metadata }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    expect(deps.onEvent).toHaveBeenCalledOnce();
+  },
+);

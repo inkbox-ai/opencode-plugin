@@ -3,64 +3,63 @@ import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limi
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
 
+export class ReplyPreparationError extends Error {}
+
 export interface ReplyResult {
   delivered: boolean;
   reason?: "silent" | "empty" | "sent";
   messageId?: string;
 }
 
-// Deliver an assistant turn on the modality the inbound message arrived on.
-// Exact-[SILENT] and empty replies are suppressed. Phone channels get
-// markdown stripped; length caps are enforced with a clear error so the
-// caller can run a split-or-summarize recovery turn.
+// Prepare before marking delivery started: identity/validation failures have
+// no send side effect and can retry with the completed model output intact.
+export async function prepareReply(
+  runtime: InkboxRuntime,
+  target: ReplyTarget,
+  raw: string,
+  logger: GatewayLogger,
+): Promise<() => Promise<ReplyResult>> {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed || trimmed === SILENT)
+    return async () => ({ delivered: false, reason: trimmed ? "silent" : "empty" });
+  const parentId = target.companion?.replyToMessageId ?? target.messageId ?? "";
+  if (target.channel === "email" && !parentId)
+    throw new ReplyPreparationError("Email reply requires the stored inbound message ID.");
+  const body = target.channel === "email" ? trimmed : stripMarkdown(trimmed);
+  try {
+    if (target.channel === "sms") assertSmsTextWithinLimit(body);
+    if (target.channel === "imessage") assertIMessageTextWithinLimit(body);
+  } catch (error) {
+    throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
+  }
+  const identity = await runtime.getIdentity();
+  return async () => {
+    const message =
+      target.channel === "email"
+        ? await identity.replyAllEmail(parentId, { bodyText: body })
+        : target.channel === "sms"
+          ? await identity.sendText({
+              text: body,
+              ...(target.conversationId
+                ? { conversationId: target.conversationId }
+                : { to: target.to }),
+            })
+          : await identity.sendIMessage({
+              text: body,
+              ...(target.conversationId
+                ? { conversationId: target.conversationId }
+                : { to: target.to }),
+            });
+    logger.info("reply.sent", { channel: target.channel, id: message.id });
+    return { delivered: true, reason: "sent", messageId: message.id };
+  };
+}
+
 export async function deliverReply(
   runtime: InkboxRuntime,
   target: ReplyTarget,
   raw: string,
   logger: GatewayLogger,
 ): Promise<ReplyResult> {
-  const trimmed = (raw ?? "").trim();
-  if (trimmed === "") return { delivered: false, reason: "empty" };
-  if (trimmed === SILENT) return { delivered: false, reason: "silent" };
-
-  const identity = await runtime.getIdentity();
-
-  if (target.channel === "email") {
-    const msg = await identity.sendEmail({
-      to: [target.to ?? ""],
-      subject: replySubject(target.subject),
-      bodyText: trimmed,
-      // Thread the reply when we captured the original Message-ID.
-      ...(target.rfcMessageId ? { inReplyToMessageId: target.rfcMessageId } : {}),
-    });
-    logger.info("reply.sent", { channel: "email", id: msg.id });
-    return { delivered: true, reason: "sent", messageId: msg.id };
-  }
-
-  const body = stripMarkdown(trimmed);
-
-  if (target.channel === "sms") {
-    assertSmsTextWithinLimit(body);
-    const msg = await identity.sendText({
-      text: body,
-      ...(target.conversationId ? { conversationId: target.conversationId } : { to: target.to }),
-    });
-    logger.info("reply.sent", { channel: "sms", id: msg.id });
-    return { delivered: true, reason: "sent", messageId: msg.id };
-  }
-
-  // iMessage
-  assertIMessageTextWithinLimit(body);
-  const msg = await identity.sendIMessage({
-    text: body,
-    ...(target.conversationId ? { conversationId: target.conversationId } : { to: target.to }),
-  });
-  logger.info("reply.sent", { channel: "imessage", id: msg.id });
-  return { delivered: true, reason: "sent", messageId: msg.id };
-}
-
-function replySubject(subject: string | undefined): string {
-  const s = (subject ?? "").trim();
-  if (!s) return "Re:";
-  return /^re:/i.test(s) ? s : `Re: ${s}`;
+  return (await prepareReply(runtime, target, raw, logger))();
 }
