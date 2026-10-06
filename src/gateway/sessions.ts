@@ -354,6 +354,13 @@ export function createSessionManager(
       throw new Error("Companion sender is not permitted by local settings.");
   }
 
+  function channelDisabled(turn: DurableTurn): boolean {
+    return Boolean(
+      (turn.replyTarget?.imessageSource && !deps.config.gateway.imessageThreadedReplies) ||
+        ((turn.replyTarget?.slack || turn.companion?.slack) && !deps.config.gateway.slackEnabled),
+    );
+  }
+
   async function submit(turn: DurableTurn): Promise<DurableTurn> {
     if (turn.companion) turn = await hydrateCompanion(turn);
     if (TERMINAL.has(turn.state)) return turn;
@@ -829,7 +836,7 @@ export function createSessionManager(
       }
       current = completed;
     }
-    if (current.replyTarget?.imessageSource && !deps.config.gateway.imessageThreadedReplies) return;
+    if (channelDisabled(current)) return;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
       await authorizeSlack(current);
@@ -859,6 +866,10 @@ export function createSessionManager(
       }
       if (closing || deps.state.getTurn(current.id)?.state === "interrupted") return;
       await authorizeSlack(current);
+      // The safe SDK reads may span a shutdown, feature change or Stop. Keep
+      // the saved answer until enabled, and never checkpoint a stale owner.
+      if (closing || channelDisabled(current)) return;
+      assertCompanionLocallyAllowed(current);
       if (
         !deps.state.transitionTurn(
           current.id,
@@ -962,6 +973,7 @@ export function createSessionManager(
       }
     } catch (err) {
       const latest = deps.state.getTurn(id);
+      if (latest?.state === "completed" && (closing || channelDisabled(latest))) return;
       if (latest?.state === "interrupted") {
         settle(id, undefined);
         return;
@@ -1413,7 +1425,12 @@ export function createSessionManager(
       for (const turn of matches)
         if (turn.replyTarget) deps.cancelPending?.(turn.chatKey, turn.replyTarget);
       let uncertain = false;
-      for (const turn of matches) {
+      for (const captured of matches) {
+        const turn = deps.state.getTurn(captured.id);
+        if (!turn || !ACTIVE.has(turn.state)) continue;
+        // Stop cannot retract a POST that crossed its durable boundary. Its
+        // real completion or restart recovery must retain the delivery outcome.
+        if (turn.state === "delivery_started" || turn.uncertainStage === "delivery") continue;
         const executing =
           ["submitting", "submitted"].includes(turn.state) ||
           (turn.uncertainStage === "submission" && !turn.executionFenced);
@@ -1428,8 +1445,25 @@ export function createSessionManager(
             continue;
           }
         }
-        deps.state.updateTurn(turn.id, { state: "interrupted", executionFenced: true });
-        activityEvent(turn, "cancelled");
+        const latest = deps.state.getTurn(turn.id);
+        if (
+          !latest ||
+          !ACTIVE.has(latest.state) ||
+          latest.state === "delivery_started" ||
+          latest.uncertainStage === "delivery"
+        )
+          continue;
+        if (
+          !deps.state.transitionTurn(
+            turn.id,
+            ["hydrating", "paused", "queued", "submitting", "submitted", "completed"],
+            { state: "interrupted", executionFenced: true },
+          )
+        ) {
+          uncertain = true;
+          continue;
+        }
+        activityEvent(latest, "cancelled");
         settle(turn.id, undefined);
       }
       if (uncertain)
@@ -1688,7 +1722,10 @@ export function createSessionManager(
                 (turn.kind === "normal" || Boolean(turn.companion)))),
         );
       let uncertain = false;
-      for (const turn of turns) {
+      for (const captured of turns) {
+        const turn = deps.state.getTurn(captured.id);
+        if (!turn || !ACTIVE.has(turn.state)) continue;
+        if (turn.state === "delivery_started" || turn.uncertainStage === "delivery") continue;
         const executing =
           ["submitting", "submitted"].includes(turn.state) ||
           (turn.uncertainStage === "submission" && !turn.executionFenced);
@@ -1703,8 +1740,25 @@ export function createSessionManager(
             continue;
           }
         }
-        activityEvent(turn, "cancelled");
-        deps.state.updateTurn(turn.id, { state: "interrupted", executionFenced: true });
+        const latest = deps.state.getTurn(turn.id);
+        if (
+          !latest ||
+          !ACTIVE.has(latest.state) ||
+          latest.state === "delivery_started" ||
+          latest.uncertainStage === "delivery"
+        )
+          continue;
+        if (
+          !deps.state.transitionTurn(
+            turn.id,
+            ["hydrating", "paused", "queued", "submitting", "submitted", "completed"],
+            { state: "interrupted", executionFenced: true },
+          )
+        ) {
+          uncertain = true;
+          continue;
+        }
+        activityEvent(latest, "cancelled");
         settle(turn.id, undefined);
       }
       if (uncertain)

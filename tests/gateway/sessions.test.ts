@@ -19,9 +19,11 @@ import {
   saveHostedCall,
   settleHostedSmsAttempt,
 } from "../../src/gateway/hosted-call-registry.js";
+import { queueReadiness } from "../../src/gateway/readiness.js";
 import { createSessionManager, extractText } from "../../src/gateway/sessions.js";
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
+import * as slackActivity from "../../src/slack-activity.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
@@ -2127,6 +2129,96 @@ describe("native iMessage durable source ownership", () => {
     expect(d.state.listTurns()[0].state).toBe("delivered");
     await d.mgr.close();
   });
+  it.each(["accepted", "unknown"])(
+    "does not cancel a native reply whose POST is already in flight (%s)",
+    async (outcome) => {
+      const d = makeManager();
+      d.config.gateway.imessageThreadedReplies = true;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      d.identity.sendIMessage.mockImplementationOnce(async () => {
+        await held;
+        if (outcome === "unknown") throw new Error("Response lost after POST");
+        return { id: "accepted-native" };
+      });
+      await d.mgr.handleInbound(incoming("first", "question", { mediaPaths: ["/synthetic.png"] }));
+      await vi.waitFor(() => expect(d.identity.sendIMessage).toHaveBeenCalledOnce());
+      try {
+        await d.mgr.abortTurn("imessage:conversation", "imessage");
+        expect(d.state.listTurns()[0].state).toBe("delivery_started");
+        const crashed = makeManager();
+        crashed.config.gateway.imessageThreadedReplies = true;
+        crashed.state.update(d.state.read());
+        await crashed.mgr.catchUp();
+        expect(crashed.state.listTurns()[0]).toMatchObject({
+          state: "failed",
+          uncertainStage: "delivery",
+          executionFenced: true,
+        });
+        expect(queueReadiness(crashed.state)).toMatchObject({
+          unconfirmed: 1,
+          blockedConversations: 0,
+        });
+        expect(crashed.identity.sendIMessage).not.toHaveBeenCalled();
+        expect(crashed.opencode.session.promptAsync).not.toHaveBeenCalled();
+        await crashed.mgr.close();
+      } finally {
+        release();
+        await vi.waitFor(() =>
+          expect(d.state.listTurns()[0].state).toBe(
+            outcome === "accepted" ? "delivered" : "failed",
+          ),
+        );
+        await d.mgr.close();
+      }
+      const restarted = makeManager(d.dir);
+      restarted.config.gateway.imessageThreadedReplies = true;
+      await restarted.mgr.catchUp();
+      const saved = restarted.state.listTurns()[0];
+      if (outcome === "unknown") expect(saved.uncertainStage).toBe("delivery");
+      else expect(saved.deliveryMessageId).toBe("accepted-native");
+      expect(restarted.identity.sendIMessage).not.toHaveBeenCalled();
+      expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await restarted.mgr.close();
+    },
+  );
+  it.each(["disable", "shutdown"])(
+    "retains an unsent saved native answer when %s happens during final preflight",
+    async (action) => {
+      const d = makeManager();
+      d.config.gateway.imessageThreadedReplies = true;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      d.identity.getIMessageThread.mockImplementationOnce(async () => {
+        await held;
+        return { conversationId: "conversation", messages: [] };
+      });
+      await d.mgr.handleInbound(incoming("first", "question", { mediaPaths: ["/synthetic.png"] }));
+      await vi.waitFor(() => expect(d.identity.getIMessageThread).toHaveBeenCalledOnce());
+      if (action === "disable") d.config.gateway.imessageThreadedReplies = false;
+      else await d.mgr.close();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      try {
+        expect(d.identity.sendIMessage).not.toHaveBeenCalled();
+        expect(d.state.read().imessageSends ?? {}).toEqual({});
+        expect(d.state.listTurns()[0]).toMatchObject({ state: "completed", output: "reply" });
+      } finally {
+        await d.mgr.close();
+      }
+      const restarted = makeManager(d.dir);
+      restarted.config.gateway.imessageThreadedReplies = true;
+      await restarted.mgr.catchUp();
+      await vi.waitFor(() => expect(restarted.identity.sendIMessage).toHaveBeenCalledOnce());
+      expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+      await restarted.mgr.close();
+    },
+  );
 });
 
 describe("Slack native host lifecycle", () => {
@@ -2438,6 +2530,222 @@ describe("Slack native host lifecycle", () => {
     expect(d.opencode.session.abort).toHaveBeenCalledTimes(aborts);
     d.state.updateTurn("later-work", { state: "interrupted" });
     await d.mgr.close();
+  });
+  it.each([
+    { companion: false, outcome: "accepted" },
+    { companion: false, outcome: "unknown" },
+    { companion: true, outcome: "accepted" },
+    { companion: true, outcome: "unknown" },
+  ])(
+    "preserves crossed Slack POST outcomes through Stop ($companion, $outcome)",
+    async (testCase) => {
+      const d = setup();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      d.slack.sendMessage.mockImplementationOnce(async () => {
+        await held;
+        if (testCase.outcome === "unknown") throw new Error("Response lost after POST");
+        return { id: "accepted-slack", status: "sent" };
+      });
+      if (testCase.companion) await d.mgr.acceptCompanion(d.c, "question");
+      else await inboundSlack(d);
+      await vi.waitFor(() => expect(d.slack.sendMessage).toHaveBeenCalledOnce());
+      const id = d.state.listTurns().find((turn) => turn.state === "delivery_started")!.id;
+      try {
+        await d.mgr.stopSlack!({ ...d.route, sourceEventId: "stop-during-post" });
+        expect(d.state.getTurn(id)?.state).toBe("delivery_started");
+        const crashed = setup();
+        crashed.state.update(d.state.read());
+        await crashed.mgr.catchUp();
+        expect(crashed.state.getTurn(id)).toMatchObject({
+          state: testCase.companion ? "paused" : "failed",
+          uncertainStage: "delivery",
+          executionFenced: true,
+        });
+        expect(queueReadiness(crashed.state)).toMatchObject({
+          unconfirmed: 1,
+          blockedConversations: 0,
+        });
+        expect(crashed.slack.sendMessage).not.toHaveBeenCalled();
+        expect(crashed.opencode.session.promptAsync).not.toHaveBeenCalled();
+        await crashed.mgr.close();
+      } finally {
+        release();
+        await vi.waitFor(() =>
+          expect(d.state.getTurn(id)?.state).toBe(
+            testCase.outcome === "accepted"
+              ? "delivered"
+              : testCase.companion
+                ? "paused"
+                : "failed",
+          ),
+        );
+        await d.mgr.close();
+      }
+      if (testCase.outcome === "accepted") {
+        expect(d.state.getTurn(id)?.deliveryMessageId).toBe("accepted-slack");
+        expect(queueReadiness(d.state).unconfirmed).toBe(0);
+      } else expect(d.state.getTurn(id)?.uncertainStage).toBe("delivery");
+      expect(d.slack.sendMessage).toHaveBeenCalledOnce();
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(["disable", "shutdown", "stop"])(
+    "rechecks %s after the final Slack authorization read before sending",
+    async (action) => {
+      // Activity has independent connection probes, covered by its own suite.
+      // Isolate the reply's final read without relying on disk-write timing.
+      const activityStub = vi.spyOn(slackActivity, "createSlackActivity").mockReturnValue({
+        notify: vi.fn(),
+        recover: vi.fn(async () => {}),
+        flush: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+      });
+      const d = setup();
+      activityStub.mockRestore();
+      const connection = await d.slack.listConnections();
+      d.slack.listConnections.mockClear();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      let finalReadStarted = false;
+      d.slack.listConnections.mockImplementation(async () => {
+        // Admission, finish authorization and reply preparation read
+        // the connection before the final finish authorization probe.
+        if (++reads === 4) {
+          finalReadStarted = true;
+          await held;
+        }
+        return connection;
+      });
+      const now = Date.now();
+      d.state.saveTurn({
+        id: "saved-slack",
+        messageID: "saved-slack",
+        chatKey: "slack-saved",
+        kind: "normal",
+        state: "completed",
+        text: "question",
+        output: "saved answer",
+        deliver: true,
+        replyTarget: { channel: "slack", slack: d.route },
+        createdAt: now,
+        updatedAt: now,
+      });
+      await d.mgr.catchUp();
+      await vi.waitFor(() => expect(finalReadStarted).toBe(true));
+      if (action === "disable") d.config.gateway.slackEnabled = false;
+      else if (action === "shutdown") await d.mgr.close();
+      else await d.mgr.stopSlack!({ ...d.route, sourceEventId: "stop-in-final-read" });
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(d.slack.sendMessage).not.toHaveBeenCalled();
+      expect(d.state.getTurn("saved-slack")?.state).toBe(
+        action === "stop" ? "interrupted" : "completed",
+      );
+      await d.mgr.close();
+      if (action !== "stop") {
+        const restarted = setup();
+        restarted.state.update(d.state.read());
+        await restarted.mgr.catchUp();
+        await vi.waitFor(() => expect(restarted.slack.sendMessage).toHaveBeenCalledOnce());
+        expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+        await restarted.mgr.close();
+      }
+    },
+  );
+  it.each(["delivery_started", "delivered", "failed"] as const)(
+    "retains a %s outcome reached while another captured Stop target is fencing",
+    async (outcome) => {
+      const d = setup();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      d.opencode.session.abort.mockImplementationOnce(async () => {
+        await held;
+        return { data: true };
+      });
+      const base = {
+        kind: "normal" as const,
+        text: "question",
+        output: "saved answer",
+        deliver: true,
+        replyTarget: { channel: "slack" as const, slack: d.route },
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      d.state.saveTurn({
+        ...base,
+        id: "first-owner",
+        messageID: "first-owner",
+        chatKey: "companion-scope",
+        sessionID: "old-session",
+        state: "submitted",
+      });
+      d.state.saveTurn({
+        ...base,
+        id: "second-owner",
+        messageID: "second-owner",
+        chatKey: "ordinary-scope",
+        state: "completed",
+      });
+      const stopping = d.mgr.stopSlack!({ ...d.route, sourceEventId: "multi-owner-stop" });
+      await vi.waitFor(() => expect(d.opencode.session.abort).toHaveBeenCalledOnce());
+      d.state.transitionTurn("second-owner", ["completed"], {
+        state: outcome,
+        ...(outcome === "failed" ? { uncertainStage: "delivery" as const } : {}),
+      });
+      release();
+      await stopping;
+      expect(d.state.getTurn("second-owner")?.state).toBe(outcome);
+      await d.mgr.close();
+    },
+  );
+  it.each([
+    { channel: "slack", state: "paused" },
+    { channel: "slack", state: "completed" },
+    { channel: "imessage", state: "paused" },
+    { channel: "imessage", state: "completed" },
+  ] as const)("stops an idle $channel $state target after its lease expires", async (testCase) => {
+    const d = setup();
+    d.state.saveTurn({
+      id: "idle-expired",
+      messageID: "idle-expired",
+      chatKey: "idle-scope",
+      kind: "normal",
+      state: testCase.state,
+      text: "question",
+      output: "saved answer",
+      deliver: true,
+      replyTarget:
+        testCase.channel === "slack"
+          ? { channel: "slack", slack: d.route }
+          : {
+              channel: "imessage",
+              conversationId: "conversation",
+              imessageSource: { messageId: "source", conversationId: "conversation" },
+            },
+      ownerId: "previous-host",
+      leaseUntil: Date.now() - 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    try {
+      if (testCase.channel === "slack")
+        await d.mgr.stopSlack!({ ...d.route, sourceEventId: "expired-lease-stop" });
+      else await d.mgr.abortTurn("idle-scope", "imessage");
+      expect(d.state.getTurn("idle-expired")?.state).toBe("interrupted");
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(d.slack.sendMessage).not.toHaveBeenCalled();
+      expect(d.identity.sendIMessage).not.toHaveBeenCalled();
+    } finally {
+      await d.mgr.close();
+    }
   });
   it("retains disabled Slack receipts across restart without model, send or activity", async () => {
     const d = setup();

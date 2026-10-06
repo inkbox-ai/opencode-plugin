@@ -9,6 +9,7 @@
 - Adds opt-in native iMessage replies, durable source admission, bounded first-source bursts, serialized follow-ups, bounded thread reads, and observed-send deduplication.
 - Preserves explicitly requested sends to other iMessage recipients or conversations without borrowing the current reply target or suppressing its answer; stale source turns remain fenced.
 - Preserves unknown submission/send outcomes without replay. Native execution must be positively fenced before later work can proceed; diagnostics separate liveness from queue readiness.
+- Keeps crossed send outcomes inspectable after Stop and retains unsent saved answers across shutdown or feature changes during final reply preparation.
 - Releases definite pre-submission failures for later valid work, retains proactive iMessage failures as quiet context, and keeps reactions and compatible message bursts in their native conversation queue.
 - Serializes remote approval prompts, preserves control and fresh-message routing, and binds shared-route responses to the prompted author.
 - Keeps Vault tools optional: metadata remains locked-safe, individual credentials and grants are refreshed, login TOTP seeds are redacted, and the generic credential read requires exact-name enablement.
