@@ -30,7 +30,7 @@ vi.mock("../../src/gateway/sessions.js", () => ({
 vi.mock("../../src/gateway/escalation.js", () => ({
   createEscalationBridge: (deps: any) => {
     hooks.escalation = deps;
-    return { catchUp: async () => {}, handlePermission: async () => {} };
+    return { catchUp: async () => {}, handlePermission: async () => {}, close: async () => {} };
   },
 }));
 vi.mock("../../src/gateway/server.js", () => ({

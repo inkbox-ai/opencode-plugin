@@ -59,7 +59,7 @@ function makeIdentity() {
   };
 }
 
-function makeManager(existingDir?: string) {
+function makeManager(existingDir?: string, factory = createSessionManager) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-sessions-"));
   if (!existingDir) tmpDirs.push(dir);
   process.env.INKBOX_OPENCODE_HOME = dir;
@@ -139,7 +139,7 @@ function makeManager(existingDir?: string) {
     async (_turn: CompanionTurn, _key: string, _target: unknown) => false,
   );
   const companionContactId = vi.fn(async (_from: string): Promise<string | undefined> => undefined);
-  const mgr = createSessionManager({
+  const mgr = factory({
     opencode: opencode as never,
     inkbox: inkbox as never,
     config,
@@ -204,6 +204,186 @@ function prepareHostedCall(dir: string): void {
 }
 
 describe("durable async turns", () => {
+  it("isolates an anomalous native history floor from unrelated prompt and receipt IDs", async () => {
+    vi.resetModules();
+    const { createSessionManager: isolated } = await import("../../src/gateway/sessions.js");
+    const d = makeManager(undefined, isolated);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    d.state.setSession("anomalous", "existing-session");
+    d.messages.set("existing-session", [
+      {
+        info: { id: "msg_fffffffffffdAAAAAAAAAAAAAA", role: "assistant", finish: "stop" },
+        parts: [],
+      },
+    ]);
+    try {
+      await expect(
+        d.mgr.runText("anomalous", "source with caller-supplied native ID"),
+      ).resolves.toBe("reply");
+      await expect(d.mgr.runText("unrelated", "fresh source")).resolves.toBe("reply");
+      const normal = d.state.listTurns().find((turn) => turn.chatKey === "unrelated")!;
+      const normalEpoch = (BigInt(now) * 0x1000n) & 0xffffffffffffn;
+      for (const id of [normal.id, normal.messageID]) {
+        const sequence = BigInt(`0x${id.slice(4, 16)}`);
+        expect(sequence >= normalEpoch && sequence < normalEpoch + 100n).toBe(true);
+      }
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+      expect(
+        d.state
+          .listTurns()
+          .find((turn) => turn.chatKey === "anomalous")
+          ?.messageID.slice(4, 16),
+      ).toBe("fffffffffffe");
+    } finally {
+      await d.mgr.close();
+      clock.mockRestore();
+    }
+  });
+
+  it.each(["later millisecond", "same millisecond with a higher native counter"])(
+    "allocates a queued prompt ID after the preceding native assistant (%s) without changing its receipt",
+    async (timing) => {
+      const d = makeManager();
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      const assistantID = `msg_${((BigInt(now + 10) * 0x1000n + 2000n) & 0xffffffffffffn).toString(16).padStart(12, "0")}AAAAAAAAAAAAAA`;
+      const nativePrompt = d.opencode.session.promptAsync.getMockImplementation()!;
+      d.setAutoComplete(false);
+      d.opencode.session.promptAsync.mockImplementation(async (input: any) => {
+        if (d.opencode.session.promptAsync.mock.calls.length === 2) {
+          // A finished newer assistant makes the native host consider an older
+          // user ID already answered, even when that user was inserted later.
+          d.setAutoComplete(input.body.messageID > assistantID);
+          expect(
+            createStateStore(d.dir)
+              .listTurns()
+              .find((turn) => turn.state === "submitting"),
+          ).toMatchObject({ messageID: input.body.messageID });
+        }
+        return nativePrompt(input);
+      });
+      const first = d.mgr.runText("ck", "first");
+      let second: Promise<string | undefined> | undefined;
+      try {
+        await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        second = d.mgr.runText("ck", "second");
+        void second.catch(() => {});
+        const queued = d.state.listTurns().find((turn) => turn.state === "queued")!;
+        expect(queued.messageID < assistantID).toBe(true);
+        const firstID = d.opencode.session.promptAsync.mock.calls[0][0].body.messageID;
+        clock.mockReturnValue(now + (timing === "later millisecond" ? 20 : 10));
+        d.messages.get("sess-1")!.push({
+          info: {
+            id: assistantID,
+            role: "assistant",
+            parentID: firstID,
+            finish: "stop",
+            time: { completed: now + 10 },
+          },
+          parts: [{ type: "text", text: "first answer" }],
+        });
+        delete d.statuses["sess-1"];
+        await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2));
+        const secondID = d.opencode.session.promptAsync.mock.calls[1][0].body.messageID;
+        expect(secondID > assistantID).toBe(true);
+        expect(secondID).not.toBe(queued.messageID);
+        expect(createStateStore(d.dir).getTurn(queued.id)?.messageID).toBe(secondID);
+        await expect(first).resolves.toBe("first answer");
+        await expect(second).resolves.toBe("reply");
+        expect(d.opencode.session.abort).not.toHaveBeenCalled();
+      } finally {
+        await d.mgr.abortTurn("ck");
+        await d.mgr.close();
+        clock.mockRestore();
+        await Promise.allSettled([first, ...(second ? [second] : [])]);
+      }
+    },
+  );
+
+  it.each(["before", "after"] as const)(
+    "never posts when submission checkpoint fails %s publication",
+    async (phase) => {
+      const d = makeManager();
+      const transition = d.state.transitionTurn.bind(d.state);
+      let attemptedID: string | undefined;
+      vi.spyOn(d.state, "transitionTurn").mockImplementation((id, expected, patch, owner) => {
+        if (patch.state === "submitting" && !attemptedID) {
+          attemptedID = patch.messageID;
+          if (phase === "after") transition(id, expected, patch, owner);
+          throw new Error("Synthetic checkpoint failure");
+        }
+        return transition(id, expected, patch, owner);
+      });
+      d.state.saveTurn({
+        id: "checkpoint-receipt",
+        messageID: "queued-placeholder",
+        chatKey: "ck",
+        state: "queued",
+        kind: "capture",
+        text: "checkpoint",
+        deliver: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      await d.mgr.catchUp();
+      await vi.waitFor(() => expect(attemptedID).toBeDefined());
+      await vi.waitFor(() =>
+        expect(d.logger.warn.mock.calls.length + d.logger.error.mock.calls.length).toBeGreaterThan(
+          0,
+        ),
+      );
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      const saved = createStateStore(d.dir).listTurns()[0];
+      expect(saved.messageID === attemptedID).toBe(phase === "after");
+      expect(saved.state).toBe(phase === "after" ? "failed" : "queued");
+      await d.mgr.close();
+      const restarted = makeManager(d.dir);
+      await restarted.mgr.catchUp();
+      if (phase === "after") {
+        expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+        expect(restarted.state.getTurn(saved.id)?.messageID).toBe(attemptedID);
+      } else {
+        await vi.waitFor(() => expect(restarted.state.getTurn(saved.id)?.state).toBe("completed"));
+        expect(restarted.opencode.session.promptAsync).toHaveBeenCalledOnce();
+        expect(restarted.state.getTurn(saved.id)?.messageID).not.toBe(saved.messageID);
+      }
+      await restarted.mgr.close();
+    },
+  );
+
+  it.each(["stop", "lease"] as const)(
+    "keeps the queued receipt unchanged when %s wins before submission",
+    async (control) => {
+      const d = makeManager();
+      let release: (messages: { data: any[] }) => void = () => {};
+      d.opencode.session.messages.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const result = d.mgr.runText("ck", "held preflight");
+      void result.catch(() => {});
+      await vi.waitFor(() => expect(d.opencode.session.messages).toHaveBeenCalledOnce());
+      const queued = d.state.listTurns()[0];
+      if (control === "stop") await d.mgr.abortTurn("ck");
+      else
+        d.state.updateTurn(queued.id, {
+          ownerId: "another-owner",
+          leaseUntil: Date.now() + 60_000,
+        });
+      release({ data: [] });
+      await Promise.allSettled([result]);
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(createStateStore(d.dir).getTurn(queued.id)).toMatchObject({
+        messageID: queued.messageID,
+        state: control === "stop" ? "interrupted" : "queued",
+      });
+      await d.mgr.close();
+    },
+  );
+
   it("creates a session once and uses promptAsync with a stable message id", async () => {
     const d = makeManager();
     await d.mgr.handleInbound(sms("first"));
@@ -216,7 +396,9 @@ describe("durable async turns", () => {
     expect(first.body.messageID).toMatch(/^msg_[a-f0-9]{12}[0-9A-Za-z]{14}$/);
     expect(first.body.messageID < second.body.messageID).toBe(true);
     expect(first.body.parts[0].text).toContain("first");
-    expect(d.state.getTurn(first.body.messageID)?.state).toBe("delivered");
+    const committed = d.state.listTurns().find((turn) => turn.messageID === first.body.messageID)!;
+    expect(committed.state).toBe("delivered");
+    expect(committed.id).not.toBe(first.body.messageID);
   });
 
   it("drops a stale persisted session before submission", async () => {
@@ -241,7 +423,17 @@ describe("durable async turns", () => {
 
     expect(d.opencode.session.create).toHaveBeenCalledTimes(1);
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
-    expect(d.state.listTurns()[0].state).toBe("failed");
+    const saved = createStateStore(d.dir).listTurns()[0];
+    const submittedID = d.opencode.session.promptAsync.mock.calls[0][0].body.messageID;
+    expect(saved.state).toBe("failed");
+    expect(saved.messageID).toBe(submittedID);
+    expect(saved.id).not.toBe(submittedID);
+    await d.mgr.close();
+    const restarted = makeManager(d.dir);
+    await restarted.mgr.catchUp();
+    expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(restarted.state.getTurn(saved.id)?.messageID).toBe(submittedID);
+    await restarted.mgr.close();
   });
 
   it("reconciles a transport error when OpenCode accepted the message", async () => {
@@ -267,6 +459,11 @@ describe("durable async turns", () => {
 
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
     expect((d.identity.sendText.mock.calls as any)[0][0].text).toBe("accepted");
+    const submittedID = d.opencode.session.promptAsync.mock.calls[0][0].body.messageID;
+    expect(createStateStore(d.dir).listTurns()[0]).toMatchObject({
+      messageID: submittedID,
+      state: "delivered",
+    });
   });
 
   it("delivers the completed assistant response", async () => {
@@ -868,7 +1065,7 @@ describe("Companion durable host boundary", () => {
     await d.mgr.close();
   });
 
-  it("recovers pending hydration with the same host message ID", async () => {
+  it("recovers pending hydration with its receipt and a newly committed host message ID", async () => {
     const d = makeManager();
     const c = companion();
     const chatKey = companionChatKey(c.identityId, c.metadata);
@@ -892,7 +1089,9 @@ describe("Companion durable host boundary", () => {
     });
     await d.mgr.catchUp();
     await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1));
-    expect(d.opencode.session.promptAsync.mock.calls[0][0].body.messageID).toBe("msg_saved");
+    const submittedID = d.opencode.session.promptAsync.mock.calls[0][0].body.messageID;
+    expect(submittedID).not.toBe("msg_saved");
+    expect(d.state.getTurn(`${chatKey}:initialization`)?.messageID).toBe(submittedID);
     await vi.waitFor(() => expect(d.state.listTurns()[0].state).toBe("delivered"));
     await d.mgr.close();
   });

@@ -10,6 +10,7 @@ import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
 import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
+import { subscribePermissionEvents } from "./events.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
 import { queueReadiness } from "./readiness.js";
@@ -308,7 +309,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     },
   });
 
-  const events = subscribeEvents(opts.opencode, escalation, logger, opts.directory);
+  const events = subscribePermissionEvents(opts.opencode, escalation, logger, opts.directory);
   void sessions
     .catchUp()
     .catch((error) => logger.error("sessions.catch_up_failed", { error: String(error) }));
@@ -512,7 +513,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     publicUrl: transport.publicUrl,
     failed: transport.failed,
     async close() {
-      escalation.close?.();
+      await escalation
+        .close()
+        .catch((error) => logger.error("escalation.close_failed", { error: String(error) }));
       pending.close();
       events.close();
       bursts?.flushAll();
@@ -535,59 +538,6 @@ function chatKeyForSession(
   }
   return undefined;
 }
-
-// Consume the server event stream; route permission requests to escalation.
-function subscribeEvents(
-  opencode: OpencodeClient,
-  escalation: ReturnType<typeof createEscalationBridge>,
-  logger: GatewayLogger,
-  directory: string,
-): { close(): void } {
-  let stopped = false;
-  (async () => {
-    // A clean stream end (or an error) must not stop escalation for the
-    // gateway's lifetime — re-subscribe with a short backoff until closed.
-    while (!stopped) {
-      try {
-        // Scope the stream to the gateway's project so permission events for
-        // its sessions are actually delivered.
-        const stream = await opencode.event.subscribe({ query: { directory } });
-        for await (const evt of iterate(stream)) {
-          if (stopped) break;
-          const payload = (evt as any)?.payload ?? evt;
-          if (payload?.type === "permission.replied")
-            escalation.resolved(payload.properties.id ?? payload.properties.permissionID);
-          if (payload?.type === "permission.updated") {
-            const p = payload.properties;
-            void escalation.handlePermission({
-              permissionID: p.id,
-              sessionID: p.sessionID,
-              title: p.title,
-            });
-          }
-        }
-      } catch (err) {
-        if (!stopped) logger.warn("events.stream_ended", { error: String(err) });
-      }
-      if (!stopped) await new Promise((r) => setTimeout(r, 1000));
-    }
-  })();
-  return {
-    close() {
-      stopped = true;
-    },
-  };
-}
-
-// The SSE result exposes an async iterable of events; normalize access.
-async function* iterate(stream: unknown): AsyncGenerator<unknown> {
-  const s = stream as any;
-  const source = s?.stream ?? s?.data ?? s;
-  if (source && typeof source[Symbol.asyncIterator] === "function") {
-    yield* source as AsyncIterable<unknown>;
-  }
-}
-
 async function health(
   opts: StartGatewayOptions,
   publicUrl: string,

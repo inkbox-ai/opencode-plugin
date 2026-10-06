@@ -124,10 +124,21 @@ function retryableRead(error: unknown): boolean {
   );
 }
 
-function createMessageID(): string {
+function createMessageID(after?: string): string {
   const current = BigInt(Date.now()) * 0x1000n + 1n;
   lastMessageSequence = current > lastMessageSequence ? current : lastMessageSequence + 1n;
-  const timestamp = (lastMessageSequence & 0xffffffffffffn).toString(16).padStart(12, "0");
+  // A caller-supplied history ID may affect this prompt, never the shared
+  // clock sequence used by unrelated sessions and durable receipt IDs.
+  let sequence = lastMessageSequence & 0xffffffffffffn;
+  if (after) {
+    const nativeSequence = BigInt(`0x${after.slice(4, 16)}`);
+    if (sequence <= nativeSequence) {
+      if (nativeSequence === 0xffffffffffffn)
+        throw new Error("Native message ordering cannot advance safely.");
+      sequence = nativeSequence + 1n;
+    }
+  }
+  const timestamp = sequence.toString(16).padStart(12, "0");
   const random = [...randomBytes(14)].map((byte) => BASE62[byte % BASE62.length]).join("");
   return `msg_${timestamp}${random}`;
 }
@@ -372,6 +383,16 @@ export function createSessionManager(
     const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey, turn));
     const body = await promptBody(turn);
     if (turn.companion) assertCompanionSize(JSON.stringify(body));
+    // Native counters are process-local, so wall time alone is insufficient
+    // when the preceding assistant and this submission share a millisecond.
+    const precedingMessageID = (await listMessages(sessionID))
+      .map((message) => message?.info?.id)
+      .filter(
+        (id): id is string =>
+          typeof id === "string" && /^msg_[a-f0-9]{12}[0-9A-Za-z]{14}$/.test(id),
+      )
+      .sort()
+      .at(-1);
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
     await authorizeSlack(turn);
@@ -383,6 +404,8 @@ export function createSessionManager(
       {
         state: "submitting",
         sessionID,
+        // Native history ordering follows the prompt ID, not queue admission.
+        messageID: createMessageID(precedingMessageID),
       },
       turn.companion ? ownerId : undefined,
     );
@@ -399,7 +422,7 @@ export function createSessionManager(
       const res = await deps.opencode.session.promptAsync({
         path: { id: sessionID },
         query: { directory: deps.directory },
-        body: body as never,
+        body: { ...body, messageID: next.messageID } as never,
       });
       const err = (res as any)?.error;
       if (err) throw new Error(`session.promptAsync failed: ${JSON.stringify(err).slice(0, 300)}`);

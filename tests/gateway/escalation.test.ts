@@ -17,7 +17,7 @@ afterEach(() => {
 function makeDeps(over: Partial<EscalationDeps> = {}): EscalationDeps & {
   opencode: { postSessionIdPermissionsPermissionId: ReturnType<typeof vi.fn> };
 } {
-  const opencode = { postSessionIdPermissionsPermissionId: vi.fn(async () => ({})) };
+  const opencode = { postSessionIdPermissionsPermissionId: vi.fn(async () => ({ data: true })) };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-escalation-"));
   dirs.push(dir);
   return {
@@ -244,3 +244,177 @@ it("does not reject or recreate a permission already resolved in the native host
   expect(deps.opencode.postSessionIdPermissionsPermissionId).not.toHaveBeenCalled();
   expect(deps.relay.ask).toHaveBeenCalledOnce();
 });
+
+it("retires only its live owned asks on idempotent shutdown and aborts the relay", async () => {
+  const deps = makeDeps({
+    relay: {
+      ask: vi.fn(
+        (_k, _p, _t, options) =>
+          new Promise<string | undefined>((resolve) => {
+            options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      ),
+    },
+  });
+  deps.state.savePermission({
+    ...perm,
+    permissionID: "unrelated-stored",
+    chatKey: "ck",
+    state: "pending",
+    deadline: Date.now() + 10000,
+  });
+  const bridge = createEscalationBridge(deps);
+  const handling = bridge.handlePermission(perm);
+  const closed = bridge.close();
+  expect(bridge.close()).toBe(closed);
+  await closed;
+  await handling;
+  expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      path: { id: perm.sessionID, permissionID: perm.permissionID },
+      body: { response: "reject" },
+      signal: expect.any(AbortSignal),
+    }),
+  );
+  expect(deps.state.listPermissions().map((p) => p.permissionID)).toEqual(["unrelated-stored"]);
+});
+
+it("does not conflict with an approval POST already in flight during shutdown", async () => {
+  let finish: (result: unknown) => void = () => {};
+  const deps = makeDeps();
+  deps.opencode.postSessionIdPermissionsPermissionId.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const bridge = createEscalationBridge(deps);
+  const handling = bridge.handlePermission(perm);
+  await vi.waitFor(() =>
+    expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledOnce(),
+  );
+  await bridge.close();
+  expect(deps.state.listPermissions()[0]).toMatchObject({ state: "responding", response: "once" });
+  expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledOnce();
+  finish({});
+  await handling;
+});
+
+it("keeps failed shutdown rejection durable while attempting the other owned cleanup", async () => {
+  const deps = makeDeps({
+    relay: {
+      ask: vi.fn(
+        (_k, _p, _t, options) =>
+          new Promise<string | undefined>((resolve) => {
+            options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      ),
+    },
+  });
+  deps.opencode.postSessionIdPermissionsPermissionId.mockRejectedValueOnce(
+    new Error("Synthetic native failure"),
+  );
+  const bridge = createEscalationBridge(deps);
+  const handling = [
+    bridge.handlePermission(perm),
+    bridge.handlePermission({ ...perm, permissionID: "second" }),
+  ];
+  await expect(bridge.close()).rejects.toThrow("Synthetic native failure");
+  await Promise.all(handling);
+  expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledTimes(2);
+  expect(createStateStore(path.dirname(deps.state.filePath)).listPermissions()).toEqual([
+    expect.objectContaining({
+      permissionID: perm.permissionID,
+      state: "responding",
+      response: "reject",
+    }),
+  ]);
+});
+
+it("does not decline an ask whose session ownership changed before close", async () => {
+  const owner = vi.fn(() => "ck");
+  const deps = makeDeps({
+    chatKeyForSession: owner,
+    relay: {
+      ask: vi.fn(
+        (_k, _p, _t, options) =>
+          new Promise<string | undefined>((resolve) => {
+            options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      ),
+    },
+  });
+  const bridge = createEscalationBridge(deps);
+  const handling = bridge.handlePermission(perm);
+  owner.mockReturnValue("new-owner");
+  await bridge.close();
+  await handling;
+  expect(deps.opencode.postSessionIdPermissionsPermissionId).not.toHaveBeenCalled();
+  expect(deps.state.listPermissions()[0].state).toBe("relayed");
+});
+
+it("bounds an unresponsive native shutdown POST and retains its durable reject", async () => {
+  const timeout = new AbortController();
+  const makeTimeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+  const deps = makeDeps({
+    relay: {
+      ask: vi.fn(
+        (_k, _p, _t, options) =>
+          new Promise<string | undefined>((resolve) => {
+            options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      ),
+    },
+  });
+  deps.opencode.postSessionIdPermissionsPermissionId.mockImplementation(
+    (args: any) =>
+      new Promise((_resolve, reject) => {
+        args.signal.addEventListener(
+          "abort",
+          () => reject(new Error("Synthetic shutdown deadline")),
+          { once: true },
+        );
+      }),
+  );
+  const bridge = createEscalationBridge(deps);
+  const handling = bridge.handlePermission(perm);
+  try {
+    const closed = bridge.close();
+    const failed = expect(closed).rejects.toThrow("Synthetic shutdown deadline");
+    expect(makeTimeout).toHaveBeenCalledWith(5000);
+    timeout.abort();
+    await failed;
+    await handling;
+    expect(deps.state.listPermissions()[0]).toMatchObject({
+      state: "responding",
+      response: "reject",
+    });
+  } finally {
+    makeTimeout.mockRestore();
+  }
+});
+
+it.each([{ data: false }, {}])(
+  "retains the durable shutdown rejection without a positive ACK (%j)",
+  async (reply) => {
+    const deps = makeDeps({
+      relay: {
+        ask: vi.fn(
+          (_k, _p, _t, options) =>
+            new Promise<string | undefined>((resolve) => {
+              options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+            }),
+        ),
+      },
+    });
+    deps.opencode.postSessionIdPermissionsPermissionId.mockResolvedValue(reply);
+    const bridge = createEscalationBridge(deps);
+    const handling = bridge.handlePermission(perm);
+    await expect(bridge.close()).rejects.toThrow("not acknowledged");
+    await handling;
+    expect(deps.state.listPermissions()[0]).toMatchObject({
+      state: "responding",
+      response: "reject",
+    });
+  },
+);

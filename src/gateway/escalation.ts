@@ -76,6 +76,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
   const controllers = new Map<string, AbortController>();
   const resolved = new Set<string>();
   let closed = false;
+  let closeTask: Promise<void> | undefined;
 
   async function handlePermission(perm: PendingPermission, recovering = false): Promise<void> {
     const chatKey = perm.chatKey ?? deps.chatKeyForSession(perm.sessionID);
@@ -194,9 +195,41 @@ export function createEscalationBridge(deps: EscalationDeps) {
       controllers.get(permissionID)?.abort();
       deps.state.removePermission(permissionID);
     },
-    close() {
+    close(): Promise<void> {
+      if (closeTask) return closeTask;
       closed = true;
-      for (const controller of controllers.values()) controller.abort();
+      const owned = [...controllers.entries()];
+      for (const [, controller] of owned) controller.abort();
+      closeTask = Promise.allSettled(
+        owned.map(async ([permissionID]) => {
+          const current = deps.state
+            .listPermissions()
+            .find((entry) => entry.permissionID === permissionID);
+          if (
+            !current ||
+            resolved.has(permissionID) ||
+            !["pending", "relayed"].includes(current.state) ||
+            deps.chatKeyForSession(current.sessionID) !== current.chatKey
+          )
+            return;
+          // Never overwrite a response whose native POST may already have
+          // started. Only this live owner's unsubmitted ask may be declined.
+          deps.state.savePermission({ ...current, state: "responding", response: "reject" });
+          const result = await deps.opencode.postSessionIdPermissionsPermissionId({
+            path: { id: current.sessionID, permissionID },
+            query: { directory: deps.directory },
+            body: { response: "reject" },
+            signal: AbortSignal.timeout(5000),
+          });
+          if ((result as any)?.error || result.data !== true)
+            throw new Error("Native permission shutdown rejection was not acknowledged.");
+          deps.state.removePermission(permissionID);
+        }),
+      ).then((results) => {
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      });
+      return closeTask;
     },
     isInFlight: (permissionID: string) => inFlight.has(permissionID),
     async catchUp() {

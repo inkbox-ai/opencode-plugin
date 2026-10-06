@@ -2,8 +2,10 @@
 // model tasks remain separate. This exercises the packed gateway against the
 // actual native host's session IDs, prompt submission, status and messages.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 
 const [directory, port] = process.argv.slice(2);
@@ -18,6 +20,53 @@ const [{ createSessionManager }, { createStateStore }, { resolveConfig }] = awai
 process.env.INKBOX_OPENCODE_HOME = join(directory, "native-contract-state");
 const state = createStateStore();
 const opencode = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
+const readNativeMessages = opencode.session.messages.bind(opencode.session);
+let sourceContract = false;
+let sourceProof;
+opencode.session.messages = async (...args) => {
+  const result = await readNativeMessages(...args);
+  if (!sourceProof) {
+    const turn = state
+      .listTurns()
+      .find(
+        (entry) =>
+          entry.state === "submitted" &&
+          entry.sessionID === args[0]?.path?.id &&
+          entry.replyTarget?.imessageSource,
+      );
+    const assistant =
+      turn &&
+      result.data?.find(
+        (message) => message.info.role === "assistant" && message.info.parentID === turn.messageID,
+      );
+    if (assistant) {
+      sourceProof = (async () => {
+        // Hold completion observation while the actual submitted owner is live.
+        // A fresh process must resolve the source from disk and native host APIs.
+        const child = await promisify(execFile)(
+          process.execPath,
+          [
+            fileURLToPath(new URL("./native-source-contract.mjs", import.meta.url)),
+            directory,
+            port,
+            process.env.INKBOX_OPENCODE_HOME,
+            turn.id,
+            assistant.info.id,
+          ],
+          { timeout: 30000 },
+        );
+        assert.equal(
+          child.stdout.trim(),
+          "PASS: packed cross-process native source ownership, legacy receipts, and stale-owner rejection contract",
+        );
+        sourceContract = true;
+        console.log(child.stdout.trim());
+      })();
+    }
+  }
+  if (sourceProof) await sourceProof;
+  return result;
+};
 const sends = [],
   statuses = [],
   reactions = [];
@@ -114,6 +163,11 @@ try {
     [["first", "fragment"], ["next"]],
   );
   await until(() => sends.length === 2, "serialized native replies");
+  assert.equal(
+    sourceContract,
+    true,
+    "cross-process source proof must execute on the actual native assistant",
+  );
   assert.deepEqual(
     sends.map((send) => send.replyToMessageId),
     ["first", "next"],
