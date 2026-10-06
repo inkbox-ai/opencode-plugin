@@ -3078,3 +3078,131 @@ it("retains native iMessage queue across a disabled restart and drains it only a
   );
   await d.mgr.close();
 });
+
+it.each(["owner", "lease", "route", "session", "state", "native-parent"] as const)(
+  "rejects a recovered permission whose %s changes during its native parent read",
+  async (change) => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    void d.mgr.runText("permission-owner", "retained accepted work").catch(() => {});
+    await vi.waitFor(() => expect(d.state.listTurns()[0]?.state).toBe("submitted"));
+    const turn = d.state.listTurns()[0]!;
+    let release: (value: any) => void = () => {};
+    const read = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    (d.opencode.session as any).message = read;
+    const permission = {
+      permissionID: "native-permission",
+      sessionID: turn.sessionID!,
+      toolMessageID: "native-assistant",
+      title: "Read directory",
+    };
+    const resolving = d.mgr.resolvePermissionOwner!(permission, new AbortController().signal);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    if (change === "owner") d.state.updateTurn(turn.id, { ownerId: "different-owner" });
+    if (change === "lease") d.state.updateTurn(turn.id, { leaseUntil: 0 });
+    if (change === "route")
+      d.state.updateTurn(turn.id, { replyTarget: { channel: "sms", to: "+15550000001" } });
+    if (change === "session") d.state.setSession(turn.chatKey, "different-session");
+    if (change === "state") d.state.updateTurn(turn.id, { state: "interrupted" });
+    release({
+      data: {
+        info: {
+          id: "native-assistant",
+          role: "assistant",
+          sessionID: turn.sessionID,
+          parentID: change === "native-parent" ? "different-source" : turn.messageID,
+        },
+      },
+    });
+    expect(await resolving).toBeUndefined();
+    await d.mgr.close();
+  },
+);
+
+it("resolves only the exact native assistant parent of a current local turn and freezes admission without aborting it", async () => {
+  const d = makeManager();
+  d.setAutoComplete(false);
+  void d.mgr.runText("permission-owner", "retained accepted work").catch(() => {});
+  await vi.waitFor(() => expect(d.state.listTurns()[0]?.state).toBe("submitted"));
+  const turn = d.state.listTurns()[0]!;
+  const message = vi.fn(async () => ({
+    data: {
+      info: {
+        id: "native-assistant",
+        role: "assistant",
+        sessionID: turn.sessionID,
+        parentID: turn.messageID,
+      },
+    },
+  }));
+  (d.opencode.session as any).message = message;
+  const permission = {
+    permissionID: "native-permission",
+    sessionID: turn.sessionID!,
+    toolMessageID: "native-assistant",
+    title: "Read directory",
+  };
+  expect(
+    await d.mgr.resolvePermissionOwner!(
+      { ...permission, toolMessageID: undefined },
+      new AbortController().signal,
+    ),
+  ).toBeUndefined();
+  expect(
+    await d.mgr.resolvePermissionOwner!(
+      { ...permission, sessionID: "foreign" },
+      new AbortController().signal,
+    ),
+  ).toBeUndefined();
+  expect(message).not.toHaveBeenCalled();
+  d.mgr.freezeAdmission!();
+  expect(await d.mgr.runText("new", "must not start")).toBeUndefined();
+  const owner = await d.mgr.resolvePermissionOwner!(permission, new AbortController().signal);
+  expect(owner).toMatchObject({
+    turnId: turn.id,
+    ownerId: turn.ownerId,
+    messageID: turn.messageID,
+  });
+  expect(d.mgr.permissionOwnerCurrent!(owner!)).toBe(true);
+  expect(d.opencode.session.abort).not.toHaveBeenCalled();
+  expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+  await d.mgr.close();
+  expect(d.state.getTurn(turn.id)?.state).toBe("submitted");
+  expect(d.mgr.permissionOwnerCurrent!(owner!)).toBe(false);
+  expect(d.opencode.session.abort).not.toHaveBeenCalled();
+});
+
+it("reconciles native permissions after actual recovered ownership, not just catchUp enqueue", async () => {
+  const first = makeManager();
+  first.setAutoComplete(false);
+  void first.mgr.runText("retained", "accepted").catch(() => {});
+  await vi.waitFor(() => expect(first.state.listTurns()[0]?.state).toBe("submitted"));
+  const turn = first.state.listTurns()[0]!;
+  await first.mgr.close();
+  const observed: boolean[] = [];
+  const second = makeManager(first.dir, (deps) =>
+    createSessionManager({
+      ...deps,
+      reconcilePermissions: async (force) => {
+        if (force)
+          observed.push(
+            Boolean(
+              deps.state.getTurn(turn.id)?.ownerId &&
+                deps.state.getTurn(turn.id)!.leaseUntil! > Date.now(),
+            ),
+          );
+      },
+    }),
+  );
+  second.messages.set(turn.sessionID!, [{ info: { role: "user", id: turn.messageID }, parts: [] }]);
+  second.statuses[turn.sessionID!] = { type: "busy" };
+  await second.mgr.catchUp();
+  await vi.waitFor(() => expect(observed).toEqual([true]));
+  expect(second.opencode.session.promptAsync).not.toHaveBeenCalled();
+  await second.mgr.close();
+});

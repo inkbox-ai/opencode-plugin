@@ -400,6 +400,14 @@ inbound events. What it does:
 Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
 identity, signing key, opencode server, tunnel/public URL).
 
+Gateway shutdown preserves accepted native work. Permission requests observed
+during shutdown are durably declined only while their exact turn owner is still
+current. On reconnect or restart, the gateway reads native pending permissions
+and recovers only requests tied to a reclaimed turn's actual assistant parent
+and original reply route; unrelated sessions are left alone. Responses whose
+outcome is uncertain are retained, never blindly posted again. Readiness stays
+unconfirmed until the new attachment's native permission inventory succeeds.
+
 ### Companion mode
 
 Version 0.2.15 requires SDK 0.7.7 and supports sponsored email, MMS, and dedicated-line iMessage groups. Enable Companion mode and select a sponsor in the identity settings. Installing the plugin does not enable it.

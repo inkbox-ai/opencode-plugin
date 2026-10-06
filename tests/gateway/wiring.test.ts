@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import type { CompanionTurn } from "../../src/gateway/companion.js";
 import { startGateway } from "../../src/gateway/index.js";
+import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
 
 const hooks = vi.hoisted(() => ({
@@ -30,7 +31,13 @@ vi.mock("../../src/gateway/sessions.js", () => ({
 vi.mock("../../src/gateway/escalation.js", () => ({
   createEscalationBridge: (deps: any) => {
     hooks.escalation = deps;
-    return { catchUp: async () => {}, handlePermission: async () => {}, close: async () => {} };
+    return {
+      catchUp: async () => {},
+      handlePermission: async () => {},
+      close: async () => {},
+      detach: async () => {},
+      reconcile: async () => {},
+    };
   },
 }));
 vi.mock("../../src/gateway/server.js", () => ({
@@ -68,10 +75,12 @@ afterEach(async () => {
   hooks.abort.mockClear();
   hooks.reset.mockClear();
 });
-async function start() {
+async function start(previousInventoryReady?: boolean) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+  if (previousInventoryReady !== undefined)
+    createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
   const gateway = defaultGatewayConfig();
   const config = {
     gateway: { ...gateway, permissionTimeoutS: 1, voice: { ...gateway.voice, enabled: false } },
@@ -399,4 +408,26 @@ it("keeps ordinary Slack approval ownership scoped to admitted actor and native 
     hooks.inbound.mock.calls.filter(([m]) => m.text === "implement this new request"),
   ).toHaveLength(1);
   expect(hooks.abort).not.toHaveBeenCalled();
+});
+
+it("does not route an owned permission without a source target to a newer stored destination", async () => {
+  const { identity } = await start();
+  hooks.manager.state.setReplyTarget("owned", {
+    channel: "sms",
+    to: "+15550000001",
+    sender: "+15550000001",
+  });
+  const result = await hooks.escalation.relay.ask("owned", "Approve?", undefined, {
+    signal: new AbortController().signal,
+    timeoutMs: 1000,
+    current: () => true,
+  });
+  expect(result).toBeUndefined();
+  expect(identity.sendText).not.toHaveBeenCalled();
+  expect(identity.replyAllEmail).not.toHaveBeenCalled();
+});
+
+it("starts native inventory readiness unconfirmed instead of inheriting a prior attachment's result", async () => {
+  await start(true);
+  expect(hooks.manager.state.read().permissionInventory).toEqual({ ready: false });
 });

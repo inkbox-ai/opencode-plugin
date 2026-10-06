@@ -131,6 +131,12 @@ export interface TurnRequest {
 }
 
 export interface SessionManager {
+  freezeAdmission?(): void;
+  resolvePermissionOwner?(
+    permission: import("./escalation.js").PendingPermission,
+    signal: AbortSignal,
+  ): Promise<import("./escalation.js").PermissionOwner | undefined>;
+  permissionOwnerCurrent?(owner: import("./escalation.js").PermissionOwner): boolean;
   permissionActivity?(target: ReplyTarget, waiting: boolean): void;
   authorizeReply?(target: ReplyTarget): Promise<void>;
   stopSlack?(route: SlackRoute, chatKey?: string): Promise<void>;

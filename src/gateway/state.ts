@@ -65,6 +65,7 @@ export interface DurableTurn {
 }
 
 export interface DurablePermission {
+  owner?: { turnId: string; ownerId: string; messageID: string; toolMessageID: string };
   replyTarget?: ReplyTarget;
   permissionID: string;
   sessionID: string;

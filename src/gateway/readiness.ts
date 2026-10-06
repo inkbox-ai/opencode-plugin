@@ -1,6 +1,7 @@
 import { createStateStore, type StateStore } from "./state.js";
 
 export function queueReadiness(store: StateStore = createStateStore()) {
+  const inventory = store.read().permissionInventory as { ready?: boolean } | undefined;
   const turns = store.listTurns();
   const unconfirmed = turns.filter((turn) => turn.uncertainStage || turn.state === "paused");
   const blocked = unconfirmed.filter((turn) => !turn.executionFenced);
@@ -10,7 +11,8 @@ export function queueReadiness(store: StateStore = createStateStore()) {
     ),
   );
   return {
-    ready: blocked.length === 0,
+    ready: blocked.length === 0 && inventory?.ready !== false,
+    permissionInventoryReady: inventory?.ready !== false,
     pending: pending.length,
     unconfirmed: unconfirmed.length,
     blockedConversations: new Set(blocked.map((turn) => turn.chatKey)).size,

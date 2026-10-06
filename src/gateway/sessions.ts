@@ -24,6 +24,7 @@ import {
   deliveryFailureKey,
   deliveryFailureRecovery,
 } from "./delivery-policy.js";
+import type { PermissionOwner } from "./escalation.js";
 import {
   activateHostedSmsCapture,
   clearHostedSmsCapture,
@@ -65,6 +66,7 @@ export interface SessionManagerDeps {
   state: StateStore;
   logger: GatewayLogger;
   directory: string;
+  reconcilePermissions?(force?: boolean): Promise<void>;
   cancelPending?(chatKey: string, target: ReplyTarget): void;
   companionSenderAllowed?(from: string, requireReply?: boolean): Promise<boolean>;
   companionContactId?(from: string): Promise<string | undefined>;
@@ -786,6 +788,10 @@ export function createSessionManager(
         throw new Error("Durable turn lease was lost.");
       }
       if (deps.state.getTurn(turn.id)?.state === "interrupted") return undefined;
+      await deps
+        .reconcilePermissions?.()
+        .catch(() => deps.logger.warn("sessions.permission_inventory_failed", {}));
+      if (closing) return undefined;
       const messages = await listMessages(turn.sessionID);
       const userIndex = messages.findIndex((message) => message?.info?.id === turn.messageID);
       if (userIndex < 0) {
@@ -953,6 +959,12 @@ export function createSessionManager(
     }, LEASE_MS / 3);
     renewal.unref?.();
     try {
+      // catchUp only enqueues. Inventory must run after this process has
+      // actually reclaimed the durable lease, and may retry while polling.
+      await deps
+        .reconcilePermissions?.(true)
+        .catch(() => deps.logger.warn("sessions.permission_inventory_failed", {}));
+      if (closing) return;
       if (turn.state === "paused") {
         if (turn.uncertainStage === "submission") await rescueUnconfirmed(turn);
         return;
@@ -1313,7 +1325,77 @@ export function createSessionManager(
     }
   }
 
+  function permissionOwnerCurrent(owner: PermissionOwner): boolean {
+    const turn = deps.state.getTurn(owner.turnId);
+    if (
+      !turn ||
+      turn.ownerId !== ownerId ||
+      owner.ownerId !== ownerId ||
+      (turn.leaseUntil ?? 0) <= Date.now() ||
+      !["submitting", "submitted"].includes(turn.state) ||
+      turn.sessionID !== owner.sessionID ||
+      turn.messageID !== owner.messageID ||
+      turn.chatKey !== owner.chatKey ||
+      deps.state.getSession(turn.chatKey) !== owner.sessionID ||
+      channelDisabled(turn) ||
+      JSON.stringify(turn.replyTarget) !== JSON.stringify(owner.replyTarget)
+    )
+      return false;
+    try {
+      assertCompanionLocallyAllowed(turn);
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
   return {
+    freezeAdmission() {
+      closing = true;
+    },
+    permissionOwnerCurrent,
+    async resolvePermissionOwner(permission, signal) {
+      if (!permission.toolMessageID) return undefined;
+      const matches = deps.state
+        .listTurns()
+        .filter(
+          (turn) =>
+            turn.sessionID === permission.sessionID &&
+            turn.ownerId === ownerId &&
+            (turn.leaseUntil ?? 0) > Date.now() &&
+            ["submitting", "submitted"].includes(turn.state),
+        );
+      if (matches.length !== 1) return undefined;
+      const turn = matches[0]!;
+      const owner: PermissionOwner = {
+        turnId: turn.id,
+        ownerId,
+        messageID: turn.messageID,
+        toolMessageID: permission.toolMessageID,
+        sessionID: permission.sessionID,
+        chatKey: turn.chatKey,
+        replyTarget: turn.replyTarget,
+      };
+      if (!permissionOwnerCurrent(owner)) return undefined;
+      const message = await deps.opencode.session.message({
+        path: { id: owner.sessionID, messageID: owner.toolMessageID },
+        query: { directory: deps.directory },
+        signal,
+      });
+      signal.throwIfAborted();
+      if ((message as any)?.error)
+        throw new Error("Native permission parent read was not confirmed.");
+      const info = message.data?.info;
+      if (
+        info?.id !== owner.toolMessageID ||
+        info.sessionID !== owner.sessionID ||
+        info.role !== "assistant" ||
+        info.parentID !== owner.messageID ||
+        !permissionOwnerCurrent(owner)
+      )
+        return undefined;
+      return owner;
+    },
     ownsCompanionDelivery(channel, messageId, conversationId) {
       return deps.state
         .listTurns()

@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import type { createEscalationBridge } from "./escalation.js";
+import type { createEscalationBridge, PendingPermission } from "./escalation.js";
 import type { GatewayLogger } from "./types.js";
 
 // Current native hosts emit permission.asked on the raw SSE endpoint even
@@ -20,6 +20,9 @@ export function subscribePermissionEvents(
           query: { directory },
           signal: controller.signal,
         });
+        void escalation
+          .reconcile?.(true)
+          .catch(() => logger.warn("events.permission_inventory_failed", {}));
         for await (const evt of iterate(stream)) {
           if (controller.signal.aborted) break;
           const payload = (evt as any)?.payload ?? evt;
@@ -30,19 +33,10 @@ export function subscribePermissionEvents(
             if (typeof id === "string" && id) escalation.resolved(id);
           }
           if (payload?.type === "permission.asked" || payload?.type === "permission.updated") {
-            if (
-              typeof p.id !== "string" ||
-              !p.id ||
-              typeof p.sessionID !== "string" ||
-              !p.sessionID
-            )
-              continue;
+            const permission = normalizePermission(p);
+            if (!permission) continue;
             void escalation
-              .handlePermission({
-                permissionID: p.id,
-                sessionID: p.sessionID,
-                title: permissionTitle(p),
-              })
+              .handlePermission(permission)
               .catch((err) => logger.warn("events.permission_failed", { error: String(err) }));
           }
         }
@@ -62,6 +56,21 @@ export function subscribePermissionEvents(
       if (retry) clearTimeout(retry);
       wake?.();
     },
+  };
+}
+
+export function normalizePermission(value: unknown): PendingPermission | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const p = value as Record<string, any>;
+  if (typeof p.id !== "string" || !p.id || typeof p.sessionID !== "string" || !p.sessionID)
+    return undefined;
+  return {
+    permissionID: p.id,
+    sessionID: p.sessionID,
+    title: permissionTitle(p),
+    ...(typeof p.tool?.messageID === "string" && p.tool.messageID
+      ? { toolMessageID: p.tool.messageID }
+      : {}),
   };
 }
 

@@ -14,6 +14,7 @@
 - Serializes remote approval prompts, preserves control and fresh-message routing, and binds shared-route responses to the prompted author.
 - Allocates native prompt IDs at durable submission, after prior native messages, while keeping receipt IDs and uncertain submissions stable across restart.
 - Handles current and legacy native permission events and retires owned, unsubmitted approval prompts during shutdown without conflicting with in-flight responses.
+- Retains late native permission requests across shutdown and reconciles pending asks only after exact turn ownership is reclaimed, without aborting or replaying accepted work.
 - Runs packed native messaging, permission-lifecycle, and cross-process source-owner contracts against both the minimum supported OpenCode 1.15.0 and the latest host.
 - Keeps Vault tools optional: metadata remains locked-safe, individual credentials and grants are refreshed, login TOTP seeds are redacted, and the generic credential read requires exact-name enablement.
 - Requires published `@inkbox/sdk` 0.7.14. Migrate the default Vault key environment variable to `INKBOX_OPENCODE_VAULT_KEY`; a custom `vault.keyEnvVar` remains supported.

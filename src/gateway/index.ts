@@ -10,11 +10,15 @@ import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
 import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
-import { subscribePermissionEvents } from "./events.js";
+import { normalizePermission, subscribePermissionEvents } from "./events.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
+import {
+  createNativePermissionInventory,
+  type NativePermissionInventory,
+} from "./permission-inventory.js";
 import { queueReadiness } from "./readiness.js";
-import { deliverReply } from "./reply.js";
+import { deliverReply, prepareReply } from "./reply.js";
 import {
   companionWakes,
   controlText,
@@ -38,6 +42,7 @@ export interface StartGatewayOptions {
   // True when the gateway owns its process (sidecar); false in-plugin.
   ownsProcess: boolean;
   logger?: GatewayLogger;
+  permissionInventory?: NativePermissionInventory;
 }
 
 const consoleLogger: GatewayLogger = {
@@ -54,11 +59,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const logger = opts.logger ?? consoleLogger;
   const g = opts.config.gateway;
   const state = createStateStore();
+  // A prior process's successful inventory is not evidence for this attachment.
+  // Do this before opening any gateway resources or serving readiness requests.
+  state.update({ permissionInventory: { ready: false } });
   const contacts = createContactResolver({ inkbox: opts.inkbox, logger });
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
   const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
+  let reconcilePermissions = async (_force?: boolean) => {};
 
   const deps: GatewayDeps = {
     inkbox: opts.inkbox,
@@ -88,6 +97,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
     directory: opts.directory,
+    reconcilePermissions: (force) => reconcilePermissions(force),
     cancelPending: (chatKey, target) => {
       if (target.sender)
         pending.cancelFor(chatKey, {
@@ -271,10 +281,17 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     timeoutMs: g.permissionTimeoutS * 1000,
     directory: opts.directory,
     state,
+    resolveOwner: (permission, signal) => sessions.resolvePermissionOwner!(permission, signal),
+    ownerCurrent: (owner) => sessions.permissionOwnerCurrent!(owner),
+    inventory: async () => {
+      const inventory = opts.permissionInventory ?? createNativePermissionInventory(opts.opencode);
+      return (await inventory.list(opts.directory, AbortSignal.timeout(5000)))
+        .map(normalizePermission)
+        .filter((permission): permission is NonNullable<typeof permission> => Boolean(permission));
+    },
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
       async ask(chatKey, prompt, target, options) {
-        target ??= state.getReplyTarget(chatKey);
         if (!target?.sender) return undefined;
         const hint =
           (target.companionMode || target.companionSponsor) && g.groupReplyMode === "mention"
@@ -297,8 +314,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               : undefined,
             async () => {
               await sessions.authorizeReply?.(replyTarget);
+              const send = await prepareReply(opts.inkbox, replyTarget, prompt + hint, logger);
+              if (options?.signal.aborted || options?.current?.() === false)
+                throw new Error("Native permission owner is no longer current.");
               sessions.permissionActivity?.(replyTarget, true);
-              return deliverReply(opts.inkbox, replyTarget, prompt + hint, logger);
+              return send();
             },
             options?.signal,
           );
@@ -308,6 +328,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       },
     },
   });
+  reconcilePermissions = (force) => escalation.reconcile(force);
 
   const events = subscribePermissionEvents(opts.opencode, escalation, logger, opts.directory);
   void sessions
@@ -513,11 +534,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     publicUrl: transport.publicUrl,
     failed: transport.failed,
     async close() {
+      sessions.freezeAdmission?.();
       await escalation
         .close()
         .catch((error) => logger.error("escalation.close_failed", { error: String(error) }));
       pending.close();
       events.close();
+      await escalation
+        .detach()
+        .catch((error) => logger.error("escalation.detach_failed", { error: String(error) }));
       bursts?.flushAll();
       await a2a.close();
       await sessions.close();

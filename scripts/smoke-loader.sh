@@ -87,4 +87,5 @@ fi
 echo "==> checking durable messaging against the real native host"
 node "$ROOT/scripts/native-host-contract.mjs" "$WORKDIR" "$PORT"
 node "$ROOT/scripts/native-permission-contract.mjs" "$WORKDIR" "$PORT"
+node "$ROOT/scripts/native-permission-handoff-contract.mjs" "$WORKDIR" "$PORT"
 echo "PASS: loader smoke and native messaging contract"
