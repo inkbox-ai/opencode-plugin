@@ -90,6 +90,7 @@ const OPT_IN = [
   "inkbox_credentials_get_login",
   "inkbox_credentials_get_api_key",
   "inkbox_credentials_get_ssh_key",
+  "inkbox_credentials_get_secret",
   "inkbox_totp_code",
 ].sort();
 
@@ -97,6 +98,7 @@ const SENSITIVE = [
   "inkbox_credentials_get_login",
   "inkbox_credentials_get_api_key",
   "inkbox_credentials_get_ssh_key",
+  "inkbox_credentials_get_secret",
   "inkbox_totp_code",
 ].sort();
 
@@ -117,10 +119,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 56 tools", () => {
+  it("ships exactly the expected 57 default-configuration tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(56);
+    expect(names).toHaveLength(57);
   });
 
   it("has no duplicate tool names", () => {

@@ -2,9 +2,39 @@
 // email subject threading, markdown stripping, and length caps.
 import { describe, expect, it, vi } from "vitest";
 import type { InkboxRuntime } from "../../src/client.js";
-import { deliverReply } from "../../src/gateway/reply.js";
+import { deliverReply, prepareReply } from "../../src/gateway/reply.js";
 import type { GatewayLogger, ReplyTarget } from "../../src/gateway/types.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/limits.js";
+
+it("completes Slack reads before the send checkpoint and never reclassifies a read as an uncertain send", async () => {
+  const route = {
+    identityId: "identity",
+    connectionId: "connection",
+    workspaceId: "workspace",
+    conversationId: "conversation",
+    threadTs: "1.000001",
+    sourceEventId: "event",
+  };
+  const slack = {
+    listConnections: vi.fn(async () => ({
+      connections: [
+        { id: "connection", identityId: "identity", workspaceId: "workspace", status: "connected" },
+      ],
+    })),
+    sendMessage: vi.fn(async () => ({ id: "action", status: "sent" })),
+  };
+  const runtime = { getClient: async () => ({ slack }) } as any;
+  const target = { channel: "slack", slack: route } as ReplyTarget;
+  slack.listConnections.mockRejectedValueOnce(new Error("503 unavailable"));
+  await expect(prepareReply(runtime, target, "saved answer", makeLogger())).rejects.toThrow("503");
+  expect(slack.sendMessage).not.toHaveBeenCalled();
+  const send = await prepareReply(runtime, target, "saved answer", makeLogger());
+  expect(slack.listConnections).toHaveBeenCalledTimes(2);
+  slack.listConnections.mockRejectedValue(new Error("reads must precede the send checkpoint"));
+  await expect(send()).resolves.toMatchObject({ delivered: true, messageId: "action" });
+  expect(slack.listConnections).toHaveBeenCalledTimes(2);
+  expect(slack.sendMessage).toHaveBeenCalledOnce();
+});
 
 function makeIdentity() {
   return {

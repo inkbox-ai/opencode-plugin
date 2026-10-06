@@ -492,3 +492,58 @@ describe("skipWebhookReconcile", () => {
     expect(subscriptions.create).toHaveBeenCalled();
   });
 });
+
+describe("mixed identity subscription preservation", () => {
+  it("keeps Slack events when another identity family is reconciled", async () => {
+    const subscriptions = makeSubscriptions([
+      {
+        id: "mixed",
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL,
+        eventTypes: ["slack.channel_message_received", "a2a.task.created"],
+      },
+    ]);
+    await reconcileSubscriptions(
+      makeDeps(
+        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+        subscriptions,
+      ),
+      PUBLIC_URL,
+    );
+    expect(subscriptions.list).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      scope: "identity",
+    });
+    expect(subscriptions.update).toHaveBeenCalledWith("mixed", {
+      scope: "identity",
+      eventTypes: ["slack.channel_message_received", ...A2A_EVENT_TYPES],
+    });
+    expect(subscriptions.delete).not.toHaveBeenCalled();
+  });
+  it("does not delete mixed Slack rows when replacing an old same-path query URL", async () => {
+    const subscriptions = makeSubscriptions([
+      {
+        id: "mixed",
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL + "?receiver=other",
+        eventTypes: ["slack.channel_message_received", "a2a.task.created"],
+      },
+    ]);
+    await reconcileSubscriptions(
+      makeDeps(
+        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+        subscriptions,
+      ),
+      PUBLIC_URL,
+    );
+    expect(subscriptions.update).not.toHaveBeenCalled();
+    expect(subscriptions.delete).not.toHaveBeenCalled();
+    expect(subscriptions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL,
+        eventTypes: A2A_EVENT_TYPES,
+      }),
+    );
+  });
+});

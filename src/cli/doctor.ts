@@ -2,6 +2,8 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
+import { channelReadiness } from "../gateway/channel-readiness.js";
+import { queueReadiness } from "../gateway/readiness.js";
 import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
@@ -40,6 +42,15 @@ export async function runDoctor(
   const findings: Finding[] = [];
   const add = (severity: Severity, message: string) => findings.push({ severity, message });
 
+  try {
+    const queue = queueReadiness();
+    add(
+      queue.ready ? "info" : "error",
+      `Durable queue: ${queue.pending} pending, ${queue.unconfirmed} unconfirmed, ${queue.blockedConversations} blocked conversations. Process liveness does not prove readiness.`,
+    );
+  } catch {
+    add("error", "Durable queue state could not be read; do not delete it to recover readiness.");
+  }
   if (!config.apiKey || !config.identity) {
     add("error", NOT_CONFIGURED_MESSAGE);
   }
@@ -58,6 +69,7 @@ export async function runDoctor(
         identity: config.identity,
         baseUrl: config.baseUrl,
       }));
+    findings.push(...(await channelReadiness(config, runtime)));
     try {
       const inkbox = await runtime.getClient();
       const info = await inkbox.whoami();

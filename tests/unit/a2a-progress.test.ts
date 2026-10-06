@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   a2aProgressUserPrompt,
@@ -98,6 +101,9 @@ describe("A2A progress summaries", () => {
   });
 
   it("clears only the matching cross-process drain token", () => {
+    const home = mkdtempSync(join(tmpdir(), "progress-test-"));
+    const previous = process.env.INKBOX_OPENCODE_HOME;
+    process.env.INKBOX_OPENCODE_HOME = home;
     const taskId = `task-${crypto.randomUUID()}`;
     const first = requestA2AProgressDrain(taskId);
     const second = requestA2AProgressDrain(taskId);
@@ -106,5 +112,8 @@ describe("A2A progress summaries", () => {
 
     expect(listA2AProgressDrains(taskId).map((request) => request.token)).toEqual([second]);
     clearA2AProgressDrain(taskId);
+    if (previous === undefined) delete process.env.INKBOX_OPENCODE_HOME;
+    else process.env.INKBOX_OPENCODE_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
   });
 });

@@ -78,6 +78,8 @@ export interface GatewayOptions {
   requireSignature?: boolean;
   /** Leave webhook subscriptions untouched at boot; they must already point here. */
   skipWebhookReconcile?: boolean;
+  slackEnabled?: boolean;
+  imessageThreadedReplies?: boolean;
   groupReplyMode?: "auto" | "mention";
   companionResponseMode?: "safe" | "relaxed";
   // Deliver verified non-Inkbox webhooks (and unverified ones) to the agent.
@@ -141,6 +143,8 @@ export interface ResolvedGatewayConfig {
   allowedInboundContactIds: string[];
   requireSignature: boolean;
   skipWebhookReconcile: boolean;
+  slackEnabled: boolean;
+  imessageThreadedReplies: boolean;
   groupReplyMode: "auto" | "mention";
   companionResponseMode: "safe" | "relaxed";
   externalEvents: boolean;
@@ -195,7 +199,7 @@ export interface ResolvedConfig {
   gateway: ResolvedGatewayConfig;
 }
 
-export const DEFAULT_VAULT_KEY_ENV_VAR = "INKBOX_VAULT_KEY";
+export const DEFAULT_VAULT_KEY_ENV_VAR = "INKBOX_OPENCODE_VAULT_KEY";
 // Approval prompts fail after this long so a headless run degrades to a clear
 // error instead of hanging on a prompt nobody will answer.
 export const DEFAULT_ASK_TIMEOUT_MS = 300_000;
@@ -426,6 +430,9 @@ function resolveGatewayConfig(
     requireSignature: opts.requireSignature ?? boolEnv(env.INKBOX_REQUIRE_SIGNATURE) ?? true,
     skipWebhookReconcile:
       opts.skipWebhookReconcile ?? boolEnv(env.INKBOX_SKIP_WEBHOOK_RECONCILE) ?? false,
+    slackEnabled: opts.slackEnabled ?? boolEnv(env.INKBOX_SLACK_ENABLED) ?? false,
+    imessageThreadedReplies:
+      opts.imessageThreadedReplies ?? boolEnv(env.INKBOX_IMESSAGE_THREADED_REPLIES) ?? false,
     groupReplyMode: responseMode(
       opts.groupReplyMode ?? env.INKBOX_GROUP_REPLY_MODE,
       ["auto", "mention"],

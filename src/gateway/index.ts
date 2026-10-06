@@ -2,6 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { checkOutboundRecipient } from "../permissions.js";
+import { slackRouteKey } from "../slack.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
@@ -9,10 +10,22 @@ import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
 import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
+import { normalizePermission, subscribePermissionEvents } from "./events.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
-import { deliverReply } from "./reply.js";
-import { companionWakes, controlText, isPermissionReply, sameAuthor } from "./response-policy.js";
+import {
+  createNativePermissionInventory,
+  type NativePermissionInventory,
+} from "./permission-inventory.js";
+import { queueReadiness } from "./readiness.js";
+import { deliverReply, prepareReply } from "./reply.js";
+import {
+  companionWakes,
+  controlText,
+  isPermissionReply,
+  mentionsAgent,
+  sameAuthor,
+} from "./response-policy.js";
 import { createWebhookServer } from "./server.js";
 import { createSessionManager } from "./sessions.js";
 import { createStateStore } from "./state.js";
@@ -29,6 +42,7 @@ export interface StartGatewayOptions {
   // True when the gateway owns its process (sidecar); false in-plugin.
   ownsProcess: boolean;
   logger?: GatewayLogger;
+  permissionInventory?: NativePermissionInventory;
 }
 
 const consoleLogger: GatewayLogger = {
@@ -45,11 +59,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const logger = opts.logger ?? consoleLogger;
   const g = opts.config.gateway;
   const state = createStateStore();
+  // A prior process's successful inventory is not evidence for this attachment.
+  // Do this before opening any gateway resources or serving readiness requests.
+  state.update({ permissionInventory: { ready: false } });
   const contacts = createContactResolver({ inkbox: opts.inkbox, logger });
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
   const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
+  let reconcilePermissions = async (_force?: boolean) => {};
 
   const deps: GatewayDeps = {
     inkbox: opts.inkbox,
@@ -79,6 +97,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
     directory: opts.directory,
+    reconcilePermissions: (force) => reconcilePermissions(force),
+    cancelPending: (chatKey, target) => {
+      if (target.sender)
+        pending.cancelFor(chatKey, {
+          sender: target.sender,
+          channel: target.channel,
+          route: target.slack ? slackRouteKey(target.slack) : undefined,
+        });
+    },
     companionSenderAllowed: async (from, requireReply) => {
       const contact = await contacts.resolve(from);
       return companionLocalAllowed(from, contact.contactId, Boolean(requireReply));
@@ -91,9 +118,19 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       if (
         turn.metadata.phase !== "initialization" &&
         isPermissionReply(raw) &&
-        pending.tryConsume(chatKey, raw, { sender: turn.from, channel: target.channel })
+        pending.tryConsume(chatKey, raw, {
+          sender: turn.from,
+          channel: target.channel,
+          route: target.slack ? slackRouteKey(target.slack) : undefined,
+        })
       )
         return true;
+      if (!isPermissionReply(raw))
+        pending.cancelFor(chatKey, {
+          sender: turn.from,
+          channel: target.channel,
+          route: target.slack ? slackRouteKey(target.slack) : undefined,
+        });
       if (!sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? ""))
         return false;
       const candidates = resumeCandidates.get(chatKey);
@@ -118,6 +155,33 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         )
       )
         return false;
+      if (target.slack) {
+        await sessions.authorizeReply?.(target);
+        if (["/stop", "/cancel"].includes(raw.trim().toLowerCase())) {
+          pending.cancelFor(chatKey, {
+            sender: turn.from,
+            channel: target.channel,
+            route: target.slack ? slackRouteKey(target.slack) : undefined,
+          });
+          await sessions.stopSlack?.(target.slack, chatKey);
+          await deliverReply(opts.inkbox, target, "Stopped your work in this thread.", logger);
+          return true;
+        }
+        if (["/clear", "/new", "/resume"].includes(raw.trim().toLowerCase())) {
+          await deliverReply(
+            opts.inkbox,
+            target,
+            "Companion context is shared across this channel. Manage its activation in Inkbox before resetting it.",
+            logger,
+          );
+          return true;
+        }
+      }
+      pending.cancelFor(chatKey, {
+        sender: turn.from,
+        channel: target.channel,
+        route: target.slack ? slackRouteKey(target.slack) : undefined,
+      });
       resumeCandidates.delete(chatKey);
       const result = await handleCommand(
         {
@@ -217,31 +281,56 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     timeoutMs: g.permissionTimeoutS * 1000,
     directory: opts.directory,
     state,
+    resolveOwner: (permission, signal) => sessions.resolvePermissionOwner!(permission, signal),
+    ownerCurrent: (owner) => sessions.permissionOwnerCurrent!(owner),
+    inventory: async () => {
+      const inventory = opts.permissionInventory ?? createNativePermissionInventory(opts.opencode);
+      return (await inventory.list(opts.directory, AbortSignal.timeout(5000)))
+        .map(normalizePermission)
+        .filter((permission): permission is NonNullable<typeof permission> => Boolean(permission));
+    },
     chatKeyForSession: (sessionID) => chatKeyForSession(state, sessionID),
     relay: {
-      async ask(chatKey, prompt, target) {
-        target ??= state.getReplyTarget(chatKey);
+      async ask(chatKey, prompt, target, options) {
         if (!target?.sender) return undefined;
-        const answer = pending.await(
-          chatKey,
-          g.permissionTimeoutS * 1000,
-          target.group || target.companionMode || target.companionSponsor
-            ? { sender: target.sender, channel: target.channel }
-            : undefined,
-        );
         const hint =
           (target.companionMode || target.companionSponsor) && g.groupReplyMode === "mention"
             ? target.channel === "email"
               ? "\nKeep the agent in To, or include @agent in your answer (for example, @agent allow)."
               : "\nInclude @agent in your answer (for example, @agent allow)."
             : "";
-        await deliverReply(opts.inkbox, target, prompt + hint, logger);
-        return answer;
+        const replyTarget = target;
+        if (target.slack) await sessions.authorizeReply?.(target);
+        try {
+          return await pending.ask(
+            chatKey,
+            options?.timeoutMs ?? g.permissionTimeoutS * 1000,
+            target.group || target.companionMode || target.slack
+              ? {
+                  sender: target.sender,
+                  channel: target.channel,
+                  route: target.slack ? slackRouteKey(target.slack) : undefined,
+                }
+              : undefined,
+            async () => {
+              await sessions.authorizeReply?.(replyTarget);
+              const send = await prepareReply(opts.inkbox, replyTarget, prompt + hint, logger);
+              if (options?.signal.aborted || options?.current?.() === false)
+                throw new Error("Native permission owner is no longer current.");
+              sessions.permissionActivity?.(replyTarget, true);
+              return send();
+            },
+            options?.signal,
+          );
+        } finally {
+          sessions.permissionActivity?.(replyTarget, false);
+        }
       },
     },
   });
+  reconcilePermissions = (force) => escalation.reconcile(force);
 
-  const events = subscribeEvents(opts.opencode, escalation, logger, opts.directory);
+  const events = subscribePermissionEvents(opts.opencode, escalation, logger, opts.directory);
   void sessions
     .catchUp()
     .catch((error) => logger.error("sessions.catch_up_failed", { error: String(error) }));
@@ -276,6 +365,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         inkbox: opts.inkbox,
         contacts,
         sessions: wrapSessions(),
+        state,
         notify,
         logger,
         bursts,
@@ -315,6 +405,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       handleInbound: async (msg: import("./types.js").InboundMessage) => {
         const target = {
           channel: msg.channel,
+          slack: msg.slack,
+          imessageSource: msg.imessageSource,
           to: msg.from,
           sender: msg.from,
           conversationId: msg.conversationId,
@@ -324,12 +416,63 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
         };
         const raw = msg.rawText ?? msg.text;
+        const admitted =
+          !msg.reaction &&
+          (!msg.group ||
+            msg.channel === "email" ||
+            g.groupReplyMode !== "mention" ||
+            (msg.slack
+              ? msg.slack.direct || msg.slack.mentioned
+              : mentionsAgent(raw, (await opts.inkbox.getIdentity()).agentHandle)));
+        if (!admitted) {
+          await sessions.handleInbound(msg);
+          return;
+        }
         if (
           !msg.reaction &&
-          (!msg.group || msg.channel === "email" || isPermissionReply(raw)) &&
-          pending.tryConsume(msg.chatKey, raw, { sender: msg.from, channel: msg.channel })
+          isPermissionReply(raw) &&
+          pending.tryConsume(msg.chatKey, raw, {
+            sender: msg.from,
+            channel: msg.channel,
+            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+          })
         )
           return;
+
+        if (
+          msg.slack &&
+          /^\/(?:stop|cancel|clear|new|resume|status|health|usage)$/i.test(raw.trim())
+        ) {
+          if (!msg.slack.direct && g.groupReplyMode === "mention" && !msg.slack.mentioned) {
+            await sessions.handleInbound(msg);
+            return;
+          }
+          if (["/stop", "/cancel"].includes(raw.trim().toLowerCase())) {
+            await sessions.stopSlack?.(msg.slack, msg.chatKey);
+            await deliverReply(opts.inkbox, target, "Stopped your work in this thread.", logger);
+            return;
+          }
+          const origin = state.getReplyTarget(msg.chatKey);
+          if (
+            ["/clear", "/new", "/resume"].includes(raw.trim().toLowerCase()) &&
+            origin?.slack &&
+            origin.slack.actorId !== msg.slack.actorId
+          ) {
+            await deliverReply(
+              opts.inkbox,
+              target,
+              "Only the conversation owner can reset or resume this thread.",
+              logger,
+            );
+            return;
+          }
+        }
+        if (/^\/(?:stop|cancel|clear|new)$/i.test(raw.trim()))
+          pending.cancelFor(msg.chatKey, {
+            sender: msg.from,
+            channel: msg.channel,
+            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+          });
 
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
@@ -352,7 +495,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               {
                 opencode: opts.opencode,
                 inkbox: opts.inkbox,
-                sessions,
+                sessions: msg.imessageSource
+                  ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, "imessage") }
+                  : sessions,
                 logger,
                 directory: opts.directory,
                 health: () => health(opts, transport.publicUrl),
@@ -372,6 +517,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
+        if (admitted)
+          pending.cancelFor(msg.chatKey, {
+            sender: msg.from,
+            channel: msg.channel,
+            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+          });
         await sessions.handleInbound(msg);
       },
     };
@@ -383,7 +534,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     publicUrl: transport.publicUrl,
     failed: transport.failed,
     async close() {
+      sessions.freezeAdmission?.();
+      await escalation
+        .close()
+        .catch((error) => logger.error("escalation.close_failed", { error: String(error) }));
+      pending.close();
       events.close();
+      await escalation
+        .detach()
+        .catch((error) => logger.error("escalation.detach_failed", { error: String(error) }));
       bursts?.flushAll();
       await a2a.close();
       await sessions.close();
@@ -404,62 +563,18 @@ function chatKeyForSession(
   }
   return undefined;
 }
-
-// Consume the server event stream; route permission requests to escalation.
-function subscribeEvents(
-  opencode: OpencodeClient,
-  escalation: ReturnType<typeof createEscalationBridge>,
-  logger: GatewayLogger,
-  directory: string,
-): { close(): void } {
-  let stopped = false;
-  (async () => {
-    // A clean stream end (or an error) must not stop escalation for the
-    // gateway's lifetime — re-subscribe with a short backoff until closed.
-    while (!stopped) {
-      try {
-        // Scope the stream to the gateway's project so permission events for
-        // its sessions are actually delivered.
-        const stream = await opencode.event.subscribe({ query: { directory } });
-        for await (const evt of iterate(stream)) {
-          if (stopped) break;
-          const payload = (evt as any)?.payload ?? evt;
-          if (payload?.type === "permission.updated") {
-            const p = payload.properties;
-            void escalation.handlePermission({
-              permissionID: p.id,
-              sessionID: p.sessionID,
-              title: p.title,
-            });
-          }
-        }
-      } catch (err) {
-        if (!stopped) logger.warn("events.stream_ended", { error: String(err) });
-      }
-      if (!stopped) await new Promise((r) => setTimeout(r, 1000));
-    }
-  })();
-  return {
-    close() {
-      stopped = true;
-    },
-  };
-}
-
-// The SSE result exposes an async iterable of events; normalize access.
-async function* iterate(stream: unknown): AsyncGenerator<unknown> {
-  const s = stream as any;
-  const source = s?.stream ?? s?.data ?? s;
-  if (source && typeof source[Symbol.asyncIterator] === "function") {
-    yield* source as AsyncIterable<unknown>;
-  }
-}
-
 async function health(
   opts: StartGatewayOptions,
   publicUrl: string,
 ): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = { ok: true, publicUrl };
+  const queue = queueReadiness();
+  const out: Record<string, unknown> = {
+    ok: queue.ready,
+    live: true,
+    ready: queue.ready,
+    queue,
+    publicUrl,
+  };
   try {
     const id = await opts.inkbox.getIdentity();
     out.identity = id.agentHandle;
@@ -467,6 +582,7 @@ async function health(
       email: Boolean(id.emailAddress),
       phone: Boolean(id.phoneNumber?.number),
       imessage: Boolean((id as any).imessageEnabled),
+      slack: opts.config.gateway.slackEnabled,
     };
   } catch (err) {
     out.ok = false;

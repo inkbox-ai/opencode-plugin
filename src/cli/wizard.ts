@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { DEFAULT_REALTIME_MODEL, type ResolvedConfig } from "../config.js";
 import { gatewayHome } from "../gateway/state.js";
 import { CALL_MEDIA_WS_PATH, normalizePublicUrl, WEBHOOK_PATH } from "../gateway/subscriptions.js";
+import { configureSlack } from "../slack-setup.js";
 import type { PhoneVoiceStack } from "../voice-stack.js";
 import { installAutostart } from "./autostart.js";
 import { restartDaemon, runningDaemonPid, startDaemon } from "./daemon.js";
@@ -228,6 +229,33 @@ async function wizard(c: Ctx, config: ResolvedConfig): Promise<number> {
   } catch (err) {
     io.print(`  warning: could not load the identity record: ${errText(err)}`);
     fullIdentity = identity;
+  }
+  if (fullIdentity.id) {
+    const enabled = await configureSlack(client, fullIdentity.id, config.gateway.slackEnabled, {
+      prompter: {
+        ask: (question, def) => io.ask(question, { def }),
+        askSecret: (question) => io.ask(question, { password: true }),
+        confirm: (question, def = false) => io.confirm(question, def),
+        select: async (question, choices, def) =>
+          choices[
+            await io.choose(
+              question,
+              choices.map((choice) => choice.label),
+              Math.max(
+                0,
+                choices.findIndex((choice) => choice.value === def),
+              ),
+            )
+          ].value,
+      },
+      note: (message) => io.print(message),
+      installation: (url, expiresAt) =>
+        io.print(
+          `Open this Slack authorization link in your browser before ${expiresAt.toISOString()}: ${url}`,
+        ),
+      delay: c.sleep,
+    });
+    save(c, "INKBOX_SLACK_ENABLED", String(enabled));
   }
   const provisioned = await offerDedicatedNumber(c, client, fullIdentity);
   fullIdentity = provisioned.identity;

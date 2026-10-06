@@ -6,6 +6,7 @@ import {
   sendAudioDone,
   sendClear,
   sendMedia,
+  sendTranscript,
   speak,
 } from "../../src/gateway/voice/protocol.js";
 
@@ -35,6 +36,41 @@ describe("call media protocol", () => {
     const { ws, sent } = fakeWs();
     sendAudioDone(ws);
     expect(JSON.parse(sent[0])).toEqual({ event: "audio_done" });
+  });
+
+  it("publishes final caller and agent transcripts with ownership-relative parties", () => {
+    const { ws, sent } = fakeWs();
+    Object.assign(ws, { OPEN: 1, readyState: 1 });
+    const failed = vi.fn();
+    expect(sendTranscript(ws, "remote", " caller request ", failed)).toBe(true);
+    expect(sendTranscript(ws, "local", "spoken answer", failed)).toBe(true);
+    expect(sent.map((value) => JSON.parse(value))).toEqual([
+      { event: "transcript", party: "remote", text: "caller request", is_final: true },
+      { event: "transcript", party: "local", text: "spoken answer", is_final: true },
+    ]);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it("does not send empty or closed-socket transcripts and never retries a failed send", () => {
+    const { ws, sent } = fakeWs();
+    Object.assign(ws, { OPEN: 1, readyState: 3 });
+    const failed = vi.fn();
+    expect(sendTranscript(ws, "remote", "request", failed)).toBe(false);
+    ws.readyState = 1;
+    expect(sendTranscript(ws, "local", "   ", failed)).toBe(false);
+    expect(sent).toEqual([]);
+    ws.send.mockImplementationOnce(() => {
+      throw new Error("socket closed");
+    });
+    expect(sendTranscript(ws, "local", "answer", failed)).toBe(false);
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(failed).toHaveBeenCalledTimes(1);
+    ws.send.mockImplementationOnce((_value: string, done: (error: Error) => void) => {
+      done(new Error("write failed"));
+    });
+    expect(sendTranscript(ws, "local", "later answer", failed)).toBe(true);
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(failed).toHaveBeenCalledTimes(2);
   });
 
   it("drops queued playback with a clear frame on barge-in", () => {

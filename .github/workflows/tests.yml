@@ -20,7 +20,7 @@ jobs:
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.7 \
+            @inkbox/sdk@0.7.14 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
@@ -41,11 +41,11 @@ jobs:
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.7 \
+            @inkbox/sdk@0.7.14 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.7 \
+            @inkbox/sdk@0.7.14 \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
       - run: npx vitest run tests/contract
@@ -61,7 +61,15 @@ jobs:
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.7 \
+            @inkbox/sdk@0.7.14 \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
-      - run: bash scripts/smoke-loader.sh
+      - name: Install minimum native host
+        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.15.0
+      - name: Packed native loader on minimum host
+        run: |
+          test "$(opencode --version)" = "1.15.0"
+          bash scripts/smoke-loader.sh
+      - name: Install latest native host
+        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
+      - name: Packed native loader on latest host
+        run: bash scripts/smoke-loader.sh

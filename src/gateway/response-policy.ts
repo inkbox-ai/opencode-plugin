@@ -26,6 +26,11 @@ export function controlText(text: string, handle = ""): string {
 
 export function companionWakes(c: CompanionTurn, config: ResolvedGatewayConfig): boolean {
   if (config.companionResponseMode !== "relaxed" && c.senderAccess !== "direct") return false;
+  if (c.slack)
+    return (
+      config.slackEnabled &&
+      (config.groupReplyMode !== "mention" || c.slack.mentioned || c.slack.direct)
+    );
   if (config.groupReplyMode !== "mention" || mentionsAgent(c.rawText ?? "", c.handle)) return true;
   const email = c.emailAddress?.trim().toLowerCase();
   return Boolean(
@@ -39,7 +44,7 @@ export function companionWakes(c: CompanionTurn, config: ResolvedGatewayConfig):
 }
 
 export function isPermissionReply(text: string): boolean {
-  return /^(?:[123]|y|yes|ok|okay|approve|allow|sure|go|go ahead|always|allow always|yes always|n|no|deny|reject|decline)$/i.test(
+  return /^(?:[123]|y|yes|yes please go ahead|ok|okay|approve|allow|sure|go|go ahead|always|allow always|yes always|n|no|deny|reject|decline)$/i.test(
     text.trim(),
   );
 }

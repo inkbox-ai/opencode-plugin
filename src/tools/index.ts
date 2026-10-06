@@ -16,6 +16,7 @@ import { selectTools } from "./registry.js";
 import { sendEmailTools } from "./send-email.js";
 import { sendIMessageTools } from "./send-imessage.js";
 import { sendSmsTools } from "./send-sms.js";
+import { slackTools } from "./slack.js";
 import { smsReadTools } from "./sms-reads.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 import { vaultTools } from "./vault.js";
@@ -25,6 +26,7 @@ const EMPTY_GATING: GatingSummary = { enabled: [], disabledByDefault: [], groups
 
 function buildGroups(deps: ToolDeps, getGating: () => GatingSummary): RegisteredTool[] {
   return [
+    ...slackTools(deps),
     ...a2aTools(deps),
     ...sendEmailTools(deps),
     ...forwardEmailTools(deps),

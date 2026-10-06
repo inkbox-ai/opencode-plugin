@@ -166,6 +166,51 @@ describe("realtime function-call lifecycle", () => {
     expect(onTranscript).toHaveBeenNthCalledWith(2, "agent", "I queued it");
   });
 
+  it("emits each identified final once across aliases, preserving repeated words in new turns", async () => {
+    const fake = fakeSocket();
+    const onTranscript = vi.fn();
+    const bridge = openRealtimeBridge(
+      { apiKey: "k", model: "m", voice: "v", instructions: "hi" },
+      createPostCallRegistry(),
+      {
+        onAudio: vi.fn(),
+        onTranscript,
+        onConsult: vi.fn(async () => ""),
+        onHangup: vi.fn(),
+        logger,
+      },
+      () => 0,
+      () => fake.ws as never,
+    );
+    emitMessage(fake, { type: "session.updated" });
+    const caller = {
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "caller-1",
+      transcript: "same words",
+    };
+    const agent = {
+      type: "response.output_audio_transcript.done",
+      item_id: "agent-1",
+      transcript: "same words",
+    };
+    emitMessage(fake, caller);
+    emitMessage(fake, caller);
+    emitMessage(fake, agent);
+    emitMessage(fake, { ...agent, type: "response.audio_transcript.done" });
+    emitMessage(fake, { ...caller, item_id: "caller-2" });
+    emitMessage(fake, { ...agent, item_id: "agent-2" });
+    emitMessage(fake, { ...agent, item_id: "empty", transcript: " " });
+    expect(onTranscript.mock.calls).toEqual([
+      ["caller", "same words"],
+      ["agent", "same words"],
+      ["caller", "same words"],
+      ["agent", "same words"],
+    ]);
+    await bridge.close();
+    emitMessage(fake, { ...agent, item_id: "late" });
+    expect(onTranscript).toHaveBeenCalledTimes(4);
+  });
+
   it("accumulates name + call id + args across the three events before dispatching", async () => {
     const fake = fakeSocket();
     const onConsult = vi.fn(async () => "the answer");

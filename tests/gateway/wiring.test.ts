@@ -5,13 +5,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import type { CompanionTurn } from "../../src/gateway/companion.js";
 import { startGateway } from "../../src/gateway/index.js";
+import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
 
 const hooks = vi.hoisted(() => ({
   manager: undefined as any,
   escalation: undefined as any,
   server: undefined as any,
-  inbound: vi.fn(async () => {}),
+  inbound: vi.fn(async (_message: any) => {}),
   abort: vi.fn(async () => true),
   reset: vi.fn(async (_key: string) => {}),
 }));
@@ -30,7 +31,13 @@ vi.mock("../../src/gateway/sessions.js", () => ({
 vi.mock("../../src/gateway/escalation.js", () => ({
   createEscalationBridge: (deps: any) => {
     hooks.escalation = deps;
-    return { catchUp: async () => {}, handlePermission: async () => {} };
+    return {
+      catchUp: async () => {},
+      handlePermission: async () => {},
+      close: async () => {},
+      detach: async () => {},
+      reconcile: async () => {},
+    };
   },
 }));
 vi.mock("../../src/gateway/server.js", () => ({
@@ -68,10 +75,12 @@ afterEach(async () => {
   hooks.abort.mockClear();
   hooks.reset.mockClear();
 });
-async function start() {
+async function start(previousInventoryReady?: boolean) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+  if (previousInventoryReady !== undefined)
+    createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
   const gateway = defaultGatewayConfig();
   const config = {
     gateway: { ...gateway, permissionTimeoutS: 1, voice: { ...gateway.voice, enabled: false } },
@@ -99,7 +108,7 @@ async function start() {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
-  return { config, identity };
+  return { config, identity, inkbox };
 }
 function inbound(text: string, sender: string, channel = "sms", group = false) {
   return hooks.server.onEvent({
@@ -151,7 +160,7 @@ it("binds a shared group's approval to its asked author and requires an approval
   };
   const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target);
   await inbound("allow", "+15550000002", "sms", true);
-  await inbound("unrelated conversation", target.sender ?? "", "sms", true);
+  await inbound("unrelated conversation", "+15550000002", "sms", true);
   expect(hooks.inbound).toHaveBeenCalledTimes(2);
   await inbound("allow", target.sender ?? "", "sms", true);
   expect(await answer).toBe("allow");
@@ -297,4 +306,128 @@ it("resets the old ordinary group turn before a valid asked-author resume select
   await inbound("2", sender, "sms", true);
   expect(hooks.reset).toHaveBeenCalledExactlyOnceWith("contact-1");
   expect(hooks.manager.state.getSession("contact-1")).toBe("session-b");
+});
+
+it("cancels only an admitted same-author group instruction's obsolete permission", async () => {
+  const d = await start();
+  d.config.gateway.groupReplyMode = "mention";
+  const target: ReplyTarget = {
+    channel: "sms",
+    conversationId: "group-1",
+    sender: "+15550000001",
+    group: true,
+  };
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Approve?", target)
+    .then((value: unknown) => {
+      settled = true;
+      return value;
+    });
+  await inbound("yes", target.sender!, "sms", true);
+  await inbound("@agent do another task", "+15550000002", "sms", true);
+  expect(settled).toBe(false);
+  await inbound("@agent implement the new request", target.sender!, "sms", true);
+  expect(await answer).toBeUndefined();
+  expect(hooks.inbound).toHaveBeenCalledTimes(3);
+  expect(hooks.inbound.mock.calls[2][0]).toMatchObject({
+    text: "@agent implement the new request",
+  });
+  expect(hooks.abort).not.toHaveBeenCalled();
+});
+
+it("keeps ordinary Slack approval ownership scoped to admitted actor and native thread", async () => {
+  const d = await start();
+  d.config.gateway.slackEnabled = true;
+  d.config.gateway.groupReplyMode = "mention";
+  const route = {
+    identityId: "identity",
+    connectionId: "connection",
+    workspaceId: "TTEAM",
+    conversationId: "CROOM",
+    actorId: "UPERSON",
+    messageTs: "100.000001",
+    threadTs: "100.000001",
+    sourceEventId: "permission-owner",
+    author: "TTEAM:UPERSON",
+    mentioned: true,
+    addressed: true,
+    direct: false,
+    rawText: "question",
+    text: "question",
+  };
+  const sendMessage = vi.fn(async () => ({ status: "sent", id: "action" }));
+  d.inkbox.getClient = async () =>
+    ({
+      slack: {
+        listConnections: async () => ({
+          connections: [
+            {
+              id: route.connectionId,
+              identityId: route.identityId,
+              workspaceId: route.workspaceId,
+              status: "connected",
+            },
+          ],
+        }),
+        sendMessage,
+      },
+    }) as any;
+  const target: ReplyTarget = { channel: "slack", slack: route, sender: route.author, group: true };
+  let settled = false;
+  const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target).then((v: unknown) => {
+    settled = true;
+    return v;
+  });
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+  const message = async (text: string, changes = {}) => {
+    const slack = { ...route, ...changes };
+    await hooks.server.onEvent({
+      body: {
+        message: {
+          chatKey: "contact-1",
+          channel: "slack",
+          from: slack.author,
+          slack,
+          text,
+          rawText: text,
+          group: { participantCount: 2 },
+          mediaPaths: [],
+        },
+      },
+    });
+  };
+  await message("yes", { mentioned: false });
+  await message("new task", { author: "TTEAM:UOTHER", actorId: "UOTHER" });
+  await message("new task", { threadTs: "200.000002" });
+  expect(settled).toBe(false);
+  await message("implement this new request");
+  expect(await answer).toBeUndefined();
+  expect(hooks.inbound).toHaveBeenCalledTimes(4);
+  expect(
+    hooks.inbound.mock.calls.filter(([m]) => m.text === "implement this new request"),
+  ).toHaveLength(1);
+  expect(hooks.abort).not.toHaveBeenCalled();
+});
+
+it("does not route an owned permission without a source target to a newer stored destination", async () => {
+  const { identity } = await start();
+  hooks.manager.state.setReplyTarget("owned", {
+    channel: "sms",
+    to: "+15550000001",
+    sender: "+15550000001",
+  });
+  const result = await hooks.escalation.relay.ask("owned", "Approve?", undefined, {
+    signal: new AbortController().signal,
+    timeoutMs: 1000,
+    current: () => true,
+  });
+  expect(result).toBeUndefined();
+  expect(identity.sendText).not.toHaveBeenCalled();
+  expect(identity.replyAllEmail).not.toHaveBeenCalled();
+});
+
+it("starts native inventory readiness unconfirmed instead of inheriting a prior attachment's result", async () => {
+  await start(true);
+  expect(hooks.manager.state.read().permissionInventory).toEqual({ ready: false });
 });

@@ -10,9 +10,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${SMOKE_PORT:-14096}"
+MODEL_PORT="${SMOKE_MODEL_PORT:-14098}"
 WORKDIR="$(mktemp -d)"
 MARKER="$WORKDIR/loaded.json"
-trap 'kill "${SERVE_PID:-}" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
+trap 'kill "${MOCK_PID:-}" "${SERVE_PID:-}" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
 
 command -v opencode >/dev/null || { echo "SKIP: opencode CLI not installed"; exit 0; }
 
@@ -39,15 +40,25 @@ import InkboxPlugin from "@inkbox/opencode-plugin";
 import { writeFileSync } from "node:fs";
 
 export default async (input: any) => {
-  const hooks = await InkboxPlugin(input, {});
+  const hooks = await InkboxPlugin(input, { gateway: { enabled: false, slackEnabled: true, imessageThreadedReplies: true }, tools: { enable: ["inkbox_credentials_get_secret"] } });
   writeFileSync("$MARKER", JSON.stringify({ tools: Object.keys(hooks.tool ?? {}) }));
   return hooks;
 };
 EOF
 
 cat > opencode.json <<EOF
-{ "\$schema": "https://opencode.ai/config.json" }
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": { "mock": {
+    "npm": "@ai-sdk/openai-compatible", "name": "Synthetic transport fixture",
+    "options": { "baseURL": "http://127.0.0.1:$MODEL_PORT/v1" },
+    "models": { "mock-model": { "name": "mock-model" } }
+  } }
+}
 EOF
+
+node "$ROOT/tests/live/mock-openai.mjs" "$MODEL_PORT" >"$WORKDIR/model.log" 2>&1 &
+MOCK_PID=$!
 
 echo "==> starting opencode serve on port $PORT"
 opencode serve --port "$PORT" >"$WORKDIR/serve.log" 2>&1 &
@@ -64,7 +75,7 @@ done
 
 [ -f "$MARKER" ] || { echo "FAIL: plugin never loaded (no marker after 60s)"; cat "$WORKDIR/serve.log"; exit 1; }
 
-TOOLS=$(node -e "const m=require('$MARKER'); console.log(m.tools.length); if(!m.tools.includes('inkbox_send_email')||!m.tools.includes('inkbox_doctor')) process.exit(1);")
+TOOLS=$(node -e "const m=require('$MARKER'); console.log(m.tools.length); if(!m.tools.includes('inkbox_send_email')||!m.tools.includes('inkbox_doctor')||m.tools.filter(t=>t.startsWith('inkbox_slack_')).length!==6||!m.tools.includes('inkbox_get_imessage_thread')||!m.tools.includes('inkbox_credentials_get_secret')) process.exit(1);")
 echo "==> plugin loaded with $TOOLS tools registered"
 
 if grep -i "inkbox" "$WORKDIR/serve.log" | grep -iq "error"; then
@@ -73,4 +84,8 @@ if grep -i "inkbox" "$WORKDIR/serve.log" | grep -iq "error"; then
   exit 1
 fi
 
-echo "PASS: loader smoke test"
+echo "==> checking durable messaging against the real native host"
+node "$ROOT/scripts/native-host-contract.mjs" "$WORKDIR" "$PORT"
+node "$ROOT/scripts/native-permission-contract.mjs" "$WORKDIR" "$PORT"
+node "$ROOT/scripts/native-permission-handoff-contract.mjs" "$WORKDIR" "$PORT"
+echo "PASS: loader smoke and native messaging contract"

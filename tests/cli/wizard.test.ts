@@ -53,7 +53,8 @@ function scriptedIO(answers: Array<string | boolean | number>) {
         ? ""
         : String(next());
     },
-    confirm: async () => Boolean(next()),
+    confirm: async (question, def) =>
+      question.includes("Enable Slack messaging") ? def : Boolean(next()),
     choose: async (question, _options, def) => {
       if (question.includes("Group replies") || question.includes("Companion replies")) return def;
       choiceDefaults.push(def);

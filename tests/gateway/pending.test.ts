@@ -16,8 +16,8 @@ describe("createPendingReplies", () => {
     const pending = createPendingReplies();
     const answer = pending.await("ck", 10_000);
 
-    expect(pending.tryConsume("ck", "the answer")).toBe(true);
-    await expect(answer).resolves.toBe("the answer");
+    expect(pending.tryConsume("ck", "allow")).toBe(true);
+    await expect(answer).resolves.toBe("allow");
   });
 
   it("reports tryConsume false when no one is waiting", () => {
@@ -33,15 +33,52 @@ describe("createPendingReplies", () => {
     await expect(answer).resolves.toBeUndefined();
   });
 
-  it("supersedes an earlier wait for the same chatKey", async () => {
+  it("does not let a second waiter steal an active permission answer", async () => {
     const pending = createPendingReplies();
     const first = pending.await("ck", 10_000);
-    const second = pending.await("ck", 10_000);
+    await expect(pending.await("ck", 10_000)).resolves.toBeUndefined();
+    expect(pending.tryConsume("ck", "allow")).toBe(true);
+    await expect(first).resolves.toBe("allow");
+  });
 
+  it("serializes prompts and leaves fresh instructions and stop commands unconsumed", async () => {
+    const pending = createPendingReplies();
+    const send = vi.fn(async () => {});
+    const first = pending.ask("ck", 10000, undefined, send);
+    const second = pending.ask("ck", 10000, undefined, send);
+    expect(send).toHaveBeenCalledTimes(1);
+    for (const text of [
+      "/stop",
+      "/new",
+      "Please update the README",
+      "yes, and delete every other file",
+    ])
+      expect(pending.tryConsume("ck", text)).toBe(false);
+    expect(pending.tryConsume("ck", "allow")).toBe(true);
+    await expect(first).resolves.toBe("allow");
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(pending.tryConsume("ck", "reject")).toBe(true);
+    await expect(second).resolves.toBe("reject");
+  });
+
+  it("cancels queued prompts and cleans up a failed send without clearing a newer owner", async () => {
+    const pending = createPendingReplies();
+    const first = pending.ask("ck", 10000, undefined, async () => {});
+    const send = vi.fn(async () => {});
+    const queued = pending.ask("ck", 10000, undefined, send);
+    pending.cancel("ck");
     await expect(first).resolves.toBeUndefined();
-
-    expect(pending.tryConsume("ck", "for the second")).toBe(true);
-    await expect(second).resolves.toBe("for the second");
+    await expect(queued).resolves.toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
+    await expect(
+      pending.ask("ck", 10000, undefined, async () => {
+        throw new Error("offline");
+      }),
+    ).rejects.toThrow("offline");
+    expect(pending.pending("ck")).toBe(false);
+    const newer = pending.await("ck", 10000);
+    expect(pending.tryConsume("ck", "allow")).toBe(true);
+    await expect(newer).resolves.toBe("allow");
   });
 
   it("reflects whether a chatKey is currently waiting", async () => {
@@ -51,7 +88,7 @@ describe("createPendingReplies", () => {
     const answer = pending.await("ck", 10_000);
     expect(pending.pending("ck")).toBe(true);
 
-    pending.tryConsume("ck", "done");
+    pending.tryConsume("ck", "reject");
     await answer;
     expect(pending.pending("ck")).toBe(false);
   });

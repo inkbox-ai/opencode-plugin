@@ -493,7 +493,7 @@ describe.skipIf(!LIVE || !REAL_MODEL)("live voice", () => {
         }
         expect(progress.phase).toBe("pre-hangup caller and open-action readiness");
         expect(progress.last).toContain("two_way_ready=true");
-        expect(progress.last).toContain("caller_ready=true");
+        expect(progress.last).toMatch(/(?:^| )caller_ready=true(?: |$)/);
         expect(progress.last).toContain("action_ready=true");
       } finally {
         await cleanupFreshCalls(remote, driverLegs, beforeDriverCalls);

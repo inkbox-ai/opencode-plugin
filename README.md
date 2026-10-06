@@ -208,7 +208,7 @@ export default async (input: any) => InkboxPlugin(input, {
   `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, and
   `inkbox_totp_code` must be enabled by exact name — `"vault"` or `"all"`
   never turns them on. Vault tools also need the unlock key in
-  `INKBOX_VAULT_KEY` (override the variable name with the `vault.keyEnvVar`
+  `INKBOX_OPENCODE_VAULT_KEY` (override the variable name with the `vault.keyEnvVar`
   option).
 - `inkbox_doctor` lists everything that's currently disabled, so the agent can
   tell you what to enable instead of silently lacking a capability.
@@ -304,7 +304,7 @@ mirror so `doctor` can report configuration drift.
 | `phoneVoiceStack` | `INKBOX_VOICE_STACK` | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt` |
 | `voiceAiAuthorityMode` | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Local mirror of saved Voice AI authority: `contact_scoped` or `yolo` |
 | `voicemailDetection` | `INKBOX_VOICEMAIL_DETECTION` | Optional explicit `enabled` / `disabled`; omission uses the Inkbox API default |
-| `vault.keyEnvVar` | — (default `INKBOX_VAULT_KEY`) | Which env var holds the vault unlock key |
+| `vault.keyEnvVar` | — (default `INKBOX_OPENCODE_VAULT_KEY`) | Which env var holds the vault unlock key |
 | `tools.enable` / `tools.disable` | — | Tool gating (names, groups, `"all"`) |
 | `outbound.approval` | — | `"ask"` (default) / `"allowlist"` / `"auto"` |
 | `outbound.allowedRecipients` | — | Exact-match recipient allowlist |
@@ -370,7 +370,8 @@ inbound events. What it does:
 - **Email / SMS / iMessage** arrive as sessions keyed per contact (one person,
   one ongoing conversation across channels); replies go back on the channel the
   message came in on, threaded for email. Delivery failures wake the agent to
-  retry or switch channels.
+  retry or switch channels, except native iMessage delivery failures, which are
+  retained as quiet context without an automatic retry.
 - **Contact memories** from verified inbound events are included as optional
   background context by default. Set `gateway.contactMemories: false` or
   `INKBOX_CONTACT_MEMORIES_ENABLED=false` to omit them from every channel.
@@ -398,6 +399,14 @@ inbound events. What it does:
 
 Run `inkbox-opencode doctor` to check gateway readiness (API reachability,
 identity, signing key, opencode server, tunnel/public URL).
+
+Gateway shutdown preserves accepted native work. Permission requests observed
+during shutdown are durably declined only while their exact turn owner is still
+current. On reconnect or restart, the gateway reads native pending permissions
+and recovers only requests tied to a reclaimed turn's actual assistant parent
+and original reply route; unrelated sessions are left alone. Responses whose
+outcome is uncertain are retained, never blindly posted again. Readiness stays
+unconfirmed until the new attachment's native permission inventory succeeds.
 
 ### Companion mode
 
@@ -466,3 +475,30 @@ twice daily to catch upstream drift.
 Inbound delivery (email/texts arriving as opencode sessions) is being
 validated for a future release — see `docs/gateway-spike.md` for the current
 findings.
+
+
+### Slack and native iMessage replies (0.2.16)
+
+Slack is off by default. Run `inkbox-opencode setup` to enable it, select the app's provisioning workspace, provide or renew App Configuration credentials through masked input, open the browser installation link, and wait for the matching workspace connection. Setup is bounded and can be resumed; an unknown app-creation outcome is never blindly repeated. For an already connected identity, set `INKBOX_SLACK_ENABLED=true` or `gateway.slackEnabled: true` and restart.
+
+The six Slack tools are `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Search covers retained message text, not all workspace history or files; follow `nextCursor` even when a page is empty. Reuse the same idempotency key for a send retry and inspect unknown actions before doing anything else.
+
+Ordinary Slack channel traffic starts a session only when addressed; later messages in that engaged thread can continue it. Unmentioned traffic in unrelated threads does not wake the agent or display activity. DMs and group DMs do not require a prior session.
+
+Slack Companion context spans the channel within one identity, installation, and activation. Replies and approvals remain bound to the current native thread; a null thread stays top-level. The existing Safe/Relaxed and Auto/Mention settings apply. Quiet context makes no model/tool/activity calls. Local Slack allowlists may use a bare actor ID or the installation-workspace `WORKSPACE_ID:ACTOR_ID`; Companion also recognizes the canonical home-workspace author. Matching sender-profile fields provide bounded context, never additional authority.
+
+Top-level inline replies show eyes while working or awaiting approval; a failed reply clears eyes and adds an X. Native thread replies use Slack's working/awaiting-input/ready indicator, never eyes. Indicators are best-effort and cannot prove visible client behavior: verify the actual Slack UI during acceptance.
+
+Set `INKBOX_IMESSAGE_THREADED_REPLIES=true` (or `gateway.imessageThreadedReplies`) to target known-source replies natively. Compatible fragments share a 750 ms quiet window capped at 2 seconds and reply to the first source. Different senders, explicit thread contexts, media, and Companion receipts are separate. Follow-ups queue without interrupting the active native turn. `inkbox_get_imessage_thread` and `inkbox_get_imessage_conversation_thread` provide bounded chronological reads; opaque thread IDs are not message IDs.
+
+Before a targeted send or its local media upload, the bridge verifies the admitted source conversation and reads at most one native thread item. Unsupported endpoints fail explicitly; fetched history is not injected into Companion context. Safe read failures retain the completed reply for retry without another model turn.
+
+An explicitly requested send to another recipient or conversation is independent: it uses the normal outbound approval and allowlist rules, does not inherit a native reply target, and does not suppress the answer to the current request. The originating turn must still be active before uploads and sends; Stop or disabling native replies prevents effects that have not crossed their send checkpoint. Stop cannot retract an in-flight send: its accepted or unknown result remains inspectable, including after restart. Shutdown or disabling a channel during safe reply preparation retains the saved answer without another model turn.
+
+The bridge owns automatic and source-correlated tool reply targets and allows only API-controlled same-conversation fallback. Proactive turns do not inherit an earlier target. Native messages and reactions share the conversation session; reactions do not inherit a native reply source or interrupt active work. Delivery failures, including unmatched proactive sends, are retained as quiet context for later input, never automatic resend requests. Durable records checkpoint admission, model output, and send attempts. An uncertain send is retained without plain resend or model replay; it is not proof of failure or of visible phone delivery. Check the receiving phone for native UI acceptance.
+
+Approval prompts serialize per conversation. Only explicit approval tokens answer them; Stop and fresh instructions are not swallowed. Shared-channel replies require the prompted author and exact native route. `/health`, the CLI doctor, and `inkbox_doctor` expose pending/unconfirmed/blocked counts separately from process liveness. Never delete the durable journal to clear an uncertainty warning.
+
+**Vault migration:** export `INKBOX_OPENCODE_VAULT_KEY` for lazy optional unlocking. Existing custom `vault.keyEnvVar` settings still work. If you retain `INKBOX_VAULT_KEY` or a Vault key in the SDK's global config, the SDK may unlock eagerly; remove that global setting when migrating to the plugin-local variable. Locked metadata listing continues to work. Individual plaintext/TOTP reads recheck the configured identity's grants and refresh the secret; login payloads expose `has_totp`, never the TOTP seed. Existing typed tool names remain supported; `inkbox_credentials_get_secret` adds key-pair/other reads and must be enabled by its exact name.
+
+Doctor distinguishes disabled channels, missing SDK capabilities, disconnected Slack workspaces, incomplete active webhook coverage, and unverified native backend support. An available source permits a bounded read-only native endpoint probe; absent source or tunnel URL remains explicitly unverified. These checks never send messages or modify subscriptions.

@@ -184,7 +184,7 @@ export interface IMessageMediaUploader {
 export async function uploadLocalMedia(
   identity: IMessageMediaUploader,
   paths: string[],
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; beforeUpload?: () => Promise<void> } = {},
 ): Promise<string[]> {
   const maxBytes = opts.maxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const urls: string[] = [];
@@ -192,6 +192,7 @@ export async function uploadLocalMedia(
     const resolved = expandHome(p);
     const content = await readFileWithCap(resolved, maxBytes, "upload");
     const filename = path.basename(resolved);
+    await opts.beforeUpload?.();
     const { mediaUrl } = await identity.uploadIMessageMedia({
       content,
       filename,

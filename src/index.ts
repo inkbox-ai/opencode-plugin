@@ -14,7 +14,7 @@ const InkboxPlugin: Plugin = async (input, options) => {
   const vault = createVaultRuntime(runtime, { keyEnvVar: config.vaultKeyEnvVar });
   // Gating happens here: tools that aren't enabled are never registered, so
   // their specs never reach the model. inkbox_doctor reports what's off.
-  const { tools } = registerTools({ runtime, config, vault });
+  const { tools } = registerTools({ runtime, config, vault, opencode: input.client });
 
   // In-plugin gateway mode: start the inbound gateway inside opencode. Deferred
   // past plugin init (awaiting server-API calls here would deadlock instance

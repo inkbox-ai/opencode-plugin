@@ -2,6 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { ActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { SlackRoute } from "../slack.js";
 import type { CompanionTurn } from "./companion.js";
 import type { HostedSmsAttempt } from "./hosted-call-registry.js";
 import type { StateStore } from "./state.js";
@@ -27,7 +28,7 @@ export interface GatewayDeps {
   directory: string;
 }
 
-export type Channel = "email" | "sms" | "imessage" | "voice";
+export type Channel = "email" | "sms" | "imessage" | "slack" | "voice";
 
 // A peer agent identity the backend resolved for an inbound sender. Webhooks
 // carry these under `data.agent_identities`; a sender with no contact match
@@ -41,6 +42,14 @@ export interface SenderAgentIdentity {
 // A verified, parsed inbound message ready for session dispatch.
 export interface InboundMessage {
   channel: Channel;
+  slack?: SlackRoute;
+  imessageSource?: {
+    messageId: string;
+    conversationId: string;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
+  };
   // Stable per-human key: resolved contact id when available, else a
   // per-channel thread key, else the raw sender address.
   chatKey: string;
@@ -80,6 +89,14 @@ export interface InboundMessage {
 // Where a session's replies are delivered — always the last-used modality.
 export interface ReplyTarget {
   channel: Channel;
+  slack?: SlackRoute;
+  imessageSource?: {
+    messageId: string;
+    conversationId: string;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
+  };
   to?: string;
   conversationId?: string;
   subject?: string;
@@ -114,6 +131,15 @@ export interface TurnRequest {
 }
 
 export interface SessionManager {
+  freezeAdmission?(): void;
+  resolvePermissionOwner?(
+    permission: import("./escalation.js").PendingPermission,
+    signal: AbortSignal,
+  ): Promise<import("./escalation.js").PermissionOwner | undefined>;
+  permissionOwnerCurrent?(owner: import("./escalation.js").PermissionOwner): boolean;
+  permissionActivity?(target: ReplyTarget, waiting: boolean): void;
+  authorizeReply?(target: ReplyTarget): Promise<void>;
+  stopSlack?(route: SlackRoute, chatKey?: string): Promise<void>;
   acceptCompanion?(turn: CompanionTurn, text: string, target?: ReplyTarget): Promise<void>;
   ownsCompanionDelivery?(channel: Channel, messageId?: string, conversationId?: string): boolean;
   // Enqueue a normal turn for this message's chatKey (interrupts an
@@ -144,7 +170,7 @@ export interface SessionManager {
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
   resetSession(chatKey: string): Promise<void>;
-  abortTurn(chatKey: string): Promise<boolean>;
+  abortTurn(chatKey: string, channel?: Channel): Promise<boolean>;
   status(chatKey: string): { busy: boolean; sessionID?: string };
   // Resume durable accepted work after a gateway restart.
   catchUp(): Promise<void>;

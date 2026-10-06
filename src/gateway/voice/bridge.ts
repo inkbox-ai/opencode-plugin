@@ -26,6 +26,7 @@ import {
   sendAudioDone,
   sendClear,
   sendMedia,
+  sendTranscript,
   speak,
 } from "./protocol.js";
 import { openRealtimeBridge, type RealtimeBridge } from "./realtime.js";
@@ -235,6 +236,11 @@ export function createCallBridge(
         onBargeIn: () => callWs && sendClear(callWs),
         onTranscript: (party, text) => {
           ctx.transcript.push(`${party}: ${text}`);
+          if (callWs) {
+            sendTranscript(callWs, party === "caller" ? "remote" : "local", text, () => {
+              deps.logger.warn("call.transcript_send_failed", { callId: ctx.callId, party });
+            });
+          }
         },
         onConsult: async (query) => {
           ctx.transcript.push(`caller: ${query}`);

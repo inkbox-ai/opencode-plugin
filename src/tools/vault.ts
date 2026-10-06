@@ -49,34 +49,17 @@ export function vaultTools(deps: ToolDeps): RegisteredTool[] {
         args: credentialsListArgs,
         async execute(args: CredentialsListArgs, _ctx) {
           return runTool(async () => {
-            const creds = await vault.getCredentials();
-            // The SDK surface has typed convenience lists; fall back to
-            // creds.list() when no filter is set.
-            let items: any[];
-            switch (args.type) {
-              case "login":
-                items = creds.listLogins();
-                break;
-              case "api_key":
-                items = creds.listApiKeys();
-                break;
-              case "key_pair":
-                items = creds.listKeyPairs();
-                break;
-              case "ssh_key":
-                items = creds.listSshKeys();
-                break;
-              default:
-                items = creds.list();
-                break;
-            }
-            // Strip the decrypted payload so listing never leaks plaintext.
-            const safe = items.map((c) => ({
-              id: c.id,
-              name: c.name,
-              secretType: c.secretType,
-              description: c.description,
-            }));
+            const client = await runtime.getClient();
+            const items = await client.vault.listSecrets({ secretType: args.type });
+            const identity = await runtime.getIdentity();
+            const safe = items
+              .filter((c) => c.access.some((rule) => rule.identityId === identity.id))
+              .map((c) => ({
+                id: c.id,
+                name: c.name,
+                secretType: c.secretType,
+                description: c.description,
+              }));
             return formatWithHeader(`Returned ${safe.length} credential(s).`, safe);
           });
         },
@@ -94,7 +77,7 @@ export function vaultTools(deps: ToolDeps): RegisteredTool[] {
         async execute(args: GetLoginArgs, _ctx) {
           return runTool(async () => {
             const creds = await vault.getCredentials();
-            const login = creds.getLogin(args.secretId);
+            const login = await creds.getLogin(args.secretId);
             return formatJson(login);
           });
         },
@@ -112,7 +95,7 @@ export function vaultTools(deps: ToolDeps): RegisteredTool[] {
         async execute(args: GetApiKeyArgs, _ctx) {
           return runTool(async () => {
             const creds = await vault.getCredentials();
-            const apiKey = creds.getApiKey(args.secretId);
+            const apiKey = await creds.getApiKey(args.secretId);
             return formatJson(apiKey);
           });
         },
@@ -130,9 +113,25 @@ export function vaultTools(deps: ToolDeps): RegisteredTool[] {
         async execute(args: GetSshKeyArgs, _ctx) {
           return runTool(async () => {
             const creds = await vault.getCredentials();
-            const sshKey = creds.getSshKey(args.secretId);
+            const sshKey = await creds.getSshKey(args.secretId);
             return formatJson(sshKey);
           });
+        },
+      },
+    },
+    {
+      name: "inkbox_credentials_get_secret",
+      group: "vault",
+      defaultEnabled: false,
+      sensitive: true,
+      definition: {
+        description:
+          "Fetch one explicitly needed credential by UUID, including key_pair and other types. Returns plaintext; login TOTP seed/configuration is removed and replaced by has_totp. Never enumerate plaintext.",
+        args: { secretId: z.string().min(1).describe("UUID selected from metadata listing.") },
+        async execute(args: { secretId: string }) {
+          return runTool(async () =>
+            formatJson(await (await vault.getCredentials()).getSecret(args.secretId)),
+          );
         },
       },
     },
@@ -147,10 +146,8 @@ export function vaultTools(deps: ToolDeps): RegisteredTool[] {
         args: totpCodeArgs,
         async execute(args: TotpCodeArgs, _ctx) {
           return runTool(async () => {
-            // Ensure the vault is unlocked first — getTotpCode requires it.
-            await vault.getCredentials();
-            const identity = await runtime.getIdentity();
-            const code = await identity.getTotpCode(args.secretId);
+            const creds = await vault.getCredentials();
+            const code = await creds.getTotpCode(args.secretId);
             return `TOTP code for secret ${args.secretId}: ${code.code} (expires in ${code.secondsRemaining}s)`;
           });
         },

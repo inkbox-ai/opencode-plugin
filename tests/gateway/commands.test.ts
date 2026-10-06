@@ -45,8 +45,20 @@ describe("handleCommand routing", () => {
     expect(out).toBe("Started a fresh conversation. What's next?");
   });
 
+  it("leaves commands embedded in an ordinary task for the model", async () => {
+    const deps = makeDeps();
+    for (const message of [
+      "/clear this is a file path",
+      "/stop explaining and implement",
+      "/frobnicate now",
+    ])
+      expect(await handleCommand(deps, "ck", message)).toBeNull();
+    expect(deps.sessions.abortTurn).not.toHaveBeenCalled();
+    expect(deps.sessions.resetSession).not.toHaveBeenCalled();
+  });
+
   it("reports an unknown command with the offending word", async () => {
-    const out = await handleCommand(makeDeps(), "ck", "/frobnicate now");
+    const out = await handleCommand(makeDeps(), "ck", "/frobnicate");
     expect(out).toContain("/frobnicate");
   });
 });

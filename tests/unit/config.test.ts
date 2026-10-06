@@ -148,10 +148,10 @@ describe("resolveConfig", () => {
   });
 
   describe("vault key env var", () => {
-    it("defaults to INKBOX_VAULT_KEY", () => {
+    it("defaults to INKBOX_OPENCODE_VAULT_KEY", () => {
       const cfg = resolveConfig({}, FULL_ENV);
       expect(cfg.vaultKeyEnvVar).toBe(DEFAULT_VAULT_KEY_ENV_VAR);
-      expect(cfg.vaultKeyEnvVar).toBe("INKBOX_VAULT_KEY");
+      expect(cfg.vaultKeyEnvVar).toBe("INKBOX_OPENCODE_VAULT_KEY");
     });
 
     it("honors vault.keyEnvVar", () => {

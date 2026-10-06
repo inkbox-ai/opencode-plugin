@@ -1,6 +1,7 @@
 import type { AgentIdentity } from "@inkbox/sdk";
 import { IncomingCallAction } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
+import { reconcileSlackSubscription } from "../slack.js";
 import type { GatewayDeps } from "./types.js";
 
 // Path (under the public URL) all gateway webhook subscriptions target.
@@ -128,7 +129,10 @@ export async function reconcileSubscriptions(
     subscriptionUrl = webhookUrl,
   ): Promise<void> {
     try {
-      const existing = await client.webhooks.subscriptions.list(owner);
+      const existing = await client.webhooks.subscriptions.list({
+        ...owner,
+        ...("agentIdentityId" in owner ? { scope: "identity" as const } : {}),
+      });
       const desiredFamilies = eventFamilies(eventTypes);
       const belongsToDesiredChannel = (sub: { eventTypes: string[] }) =>
         [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family));
@@ -141,6 +145,8 @@ export async function reconcileSubscriptions(
           sameWebhookPath(sub.url, subscriptionUrl) &&
           [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
       );
+      if (ours?.eventTypes.some((type) => type.startsWith("slack.")))
+        eventTypes = [...new Set([...ours.eventTypes, ...eventTypes])];
       if (!ours) {
         const created = await client.webhooks.subscriptions.create({
           ...owner,
@@ -160,7 +166,12 @@ export async function reconcileSubscriptions(
       } else if (sameEventTypes(ours.eventTypes, eventTypes)) {
         result.unchanged += 1;
       } else {
-        await client.webhooks.subscriptions.update(ours.id, { eventTypes });
+        await client.webhooks.subscriptions.update(ours.id, {
+          eventTypes,
+          ...(ours.eventTypes.some((type) => type.startsWith("slack."))
+            ? { scope: "identity" as const }
+            : {}),
+        });
         result.updated += 1;
         deps.logger.info("updated webhook subscription event types", {
           kind,
@@ -168,6 +179,7 @@ export async function reconcileSubscriptions(
         });
       }
       for (const stale of staleOurs) {
+        if (stale.eventTypes.some((type) => type.startsWith("slack."))) continue;
         await client.webhooks.subscriptions.delete(stale.id);
         deps.logger.info("removed stale webhook subscription", {
           kind,
@@ -202,6 +214,9 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber || identity.imessageEnabled) {
     await reconcileOwner("calls", { agentIdentityId: identity.id }, CALL_EVENT_TYPES);
   }
+
+  if (deps.config.gateway.slackEnabled)
+    await reconcileSlackSubscription(client, identity.id, webhookUrl);
 
   if (deps.config.gateway.voice.enabled) {
     await wireIncomingCalls(deps, identity, base, webhookUrl);
