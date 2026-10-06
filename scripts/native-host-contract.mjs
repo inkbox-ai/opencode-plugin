@@ -32,7 +32,9 @@ const identity = {
 };
 const slack = {
   listConnections: async () => ({
-    connections: [{ id: "connection", identityId: identity.id, status: "connected" }],
+    connections: [
+      { id: "connection", identityId: identity.id, workspaceId: "TWORKSPACE", status: "connected" },
+    ],
   }),
   sendMessage: async (_connection, request) => {
     sends.push(request);

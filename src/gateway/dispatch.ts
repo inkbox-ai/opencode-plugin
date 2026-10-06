@@ -1,7 +1,7 @@
 import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
-import { ownsNativeFailure } from "../imessage-native.js";
+import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
 import type { BurstBuffer } from "./burst.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
@@ -560,6 +560,17 @@ async function handleDeliveryFailure(
   const messageId = str(r?.id);
   const companionConversationId = str(r?.conversation_id) ?? str(r?.thread_id);
   const channel = isImessage ? "imessage" : isText ? "sms" : "email";
+  if (isImessage) {
+    const identity = await deps.inkbox.getIdentity();
+    if (
+      deps.config.gateway.imessageThreadedReplies ||
+      ownsNativeFailure(identity.id, messageId, str(r?.conversation_id))
+    ) {
+      noteNativeFailure(identity.id, messageId, str(r?.conversation_id));
+      deps.logger.info("dispatch.native_imessage_delivery_failure_context_only", { messageId });
+      return true;
+    }
+  }
   if (deps.sessions.ownsCompanionDelivery?.(channel, messageId, companionConversationId)) {
     deps.logger.warn("companion.reply_failed", {
       type,
@@ -572,16 +583,7 @@ async function handleDeliveryFailure(
     deps.logger.info("dispatch.hosted_sms_delivery_failed");
     return true;
   }
-  if (isImessage) {
-    const identity = await deps.inkbox.getIdentity();
-    if (
-      deps.config.gateway.imessageThreadedReplies ||
-      ownsNativeFailure(identity.id, messageId, str(r?.conversation_id))
-    ) {
-      deps.logger.info("dispatch.native_imessage_delivery_failure_context_only", { messageId });
-      return true;
-    }
-  }
+
   const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];
   const failedRecipient = recipientRows
     .map((item) => record(item))

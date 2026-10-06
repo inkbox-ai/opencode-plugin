@@ -118,3 +118,53 @@ export function ownsNativeFailure(
         (send.state === "started" && conversationId === send.conversationId)),
   );
 }
+
+/** Retain correlated delivery failure as context, never as a new model task. */
+export function noteNativeFailure(
+  identityId: string,
+  messageId?: string,
+  conversationId?: string,
+  store = createStateStore(),
+): void {
+  const sends = Object.values((store.read().imessageSends ?? {}) as Record<string, NativeSend>);
+  const exact = sends.filter(
+    (send) => send.identityId === identityId && messageId && send.messageId === messageId,
+  );
+  const candidates = exact.length
+    ? exact
+    : sends.filter(
+        (send) =>
+          send.identityId === identityId &&
+          send.state === "started" &&
+          conversationId &&
+          send.conversationId === conversationId,
+      );
+  // A callback can arrive before the send response. Correlate only a unique
+  // durable effect; a conversation match alone must not pick an arbitrary job.
+  if (candidates.length !== 1) return;
+  const send = candidates[0]!;
+  const owners = store
+    .listTurns()
+    .filter(
+      (turn) =>
+        turn.replyTarget?.imessageSource?.messageId === send.sourceId &&
+        turn.replyTarget.imessageSource.conversationId === send.conversationId,
+    );
+  const keys = new Set(owners.map((turn) => turn.chatKey));
+  if (keys.size !== 1) return;
+  const chatKey = owners[0]!.chatKey;
+  const id = `native-failure:${send.key}`;
+  store.reserveTurns([
+    {
+      id,
+      messageID: id,
+      chatKey,
+      kind: "capture",
+      state: "context_only",
+      deliver: false,
+      text: "An earlier source-bound iMessage send failed. This is delivery context only, not a new request or authorization to resend its actions or message.",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+  ]);
+}

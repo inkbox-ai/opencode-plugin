@@ -5,7 +5,12 @@ import { Inkbox } from "@inkbox/sdk";
 import { afterEach, expect, it, vi } from "vitest";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
-import { nativeTarget, ownsNativeFailure, sendNativeIMessage } from "../../src/imessage-native.js";
+import {
+  nativeTarget,
+  noteNativeFailure,
+  ownsNativeFailure,
+  sendNativeIMessage,
+} from "../../src/imessage-native.js";
 
 const dirs: string[] = [];
 function store() {
@@ -154,4 +159,36 @@ it("uses the published SDK native reply wire shape and opaque bounded thread rea
   expect(requests.at(-1)!.url).toContain("opaque-thread");
   expect(requests.at(-1)!.url).toContain("limit=20");
   expect(requests.at(-1)!.url).toContain("cursor=next");
+});
+
+it("retains callback-first and repeated failure as one quiet notice for its original source", async () => {
+  const state = store();
+  state.saveTurn({
+    id: "owner",
+    messageID: "host",
+    chatKey: "original-chat",
+    kind: "normal",
+    state: "submitted",
+    deliver: true,
+    text: "request",
+    replyTarget: target,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const identity: any = {
+    id: "identity",
+    sendIMessage: vi.fn(async () => {
+      noteNativeFailure("identity", "sent", "conversation", state);
+      return { id: "sent" };
+    }),
+  };
+  await sendNativeIMessage(identity, target, { text: "answer" }, state);
+  noteNativeFailure("identity", "sent", "conversation", state);
+  noteNativeFailure("other-identity", "sent", "conversation", state);
+  noteNativeFailure("identity", "unmatched-proactive", "other-conversation", state);
+  const notices = state.listTurns().filter((turn) => turn.state === "context_only");
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toMatchObject({ chatKey: "original-chat", deliver: false, kind: "capture" });
+  expect(notices[0].text).toContain("not a new request");
+  expect(identity.sendIMessage).toHaveBeenCalledOnce();
 });
