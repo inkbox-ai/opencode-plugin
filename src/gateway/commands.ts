@@ -28,7 +28,7 @@ export async function handleCommand(
   message: string,
 ): Promise<string | CommandResult | null> {
   const cmd = message.trim().toLowerCase();
-  if (!cmd.startsWith("/")) return null;
+  if (!cmd.startsWith("/") || /\s/.test(cmd)) return null;
   const word = cmd.split(/\s+/)[0];
 
   switch (word) {
@@ -38,8 +38,12 @@ export async function handleCommand(
       return "Started a fresh conversation. What's next?";
     case "/stop":
     case "/cancel": {
-      const aborted = await deps.sessions.abortTurn(chatKey);
-      return aborted ? "Stopped." : "Nothing was running.";
+      try {
+        const aborted = await deps.sessions.abortTurn(chatKey);
+        return aborted ? "Stopped." : "Nothing was running.";
+      } catch {
+        return "Stop requested, but the host has not confirmed execution ended. This conversation remains blocked; check /health.";
+      }
     }
     case "/status": {
       const s = deps.sessions.status(chatKey);

@@ -8,6 +8,7 @@ const loginCred = {
   id: "cred-login",
   name: "Prod DB",
   secretType: "login",
+  access: [{ identityId: "identity" }],
   description: "Primary database login",
   payload: { username: "root", password: "hunter2" },
 };
@@ -16,6 +17,7 @@ const apiKeyCred = {
   id: "cred-api",
   name: "Weather API",
   secretType: "api_key",
+  access: [{ identityId: "identity" }],
   description: "Forecast service key",
   payload: { apiKey: "sk-secret-123" },
 };
@@ -23,6 +25,10 @@ const apiKeyCred = {
 function makeCredentials() {
   return {
     list: vi.fn(() => [loginCred, apiKeyCred]),
+    listSecrets: vi.fn(async (opts: { secretType?: string }) =>
+      [loginCred, apiKeyCred].filter((c) => !opts.secretType || c.secretType === opts.secretType),
+    ),
+    getTotpCode: vi.fn(async () => ({ code: "012345", secondsRemaining: 17 })),
     listLogins: vi.fn(() => [loginCred]),
     listApiKeys: vi.fn(() => [apiKeyCred]),
     listKeyPairs: vi.fn(() => []),
@@ -53,8 +59,8 @@ function makeDeps(
   overrides?: Partial<ResolvedConfig>,
 ): ToolDeps {
   const runtime = {
-    getIdentity: vi.fn(async () => identityStub),
-    getClient: vi.fn(async () => ({})),
+    getIdentity: vi.fn(async () => ({ id: "identity", ...identityStub })),
+    getClient: vi.fn(async () => ({ vault: { listSecrets: credentials.listSecrets } })),
   };
   const config = {
     apiKey: "k",
@@ -86,13 +92,14 @@ function outputText(result: unknown): string {
 }
 
 describe("vaultTools", () => {
-  it("registers the five vault tools in the vault group", () => {
+  it("preserves the typed vault tools and adds an exact-name generic read in the vault group", () => {
     const tools = vaultTools(makeDeps(makeCredentials()));
     expect(tools.map((t) => t.name)).toEqual([
       "inkbox_credentials_list",
       "inkbox_credentials_get_login",
       "inkbox_credentials_get_api_key",
       "inkbox_credentials_get_ssh_key",
+      "inkbox_credentials_get_secret",
       "inkbox_totp_code",
     ]);
     for (const tool of tools) {
@@ -114,6 +121,7 @@ describe("vaultTools", () => {
     expect(findTool(tools, "inkbox_credentials_get_api_key").sensitive).toBe(true);
     expect(findTool(tools, "inkbox_credentials_get_ssh_key").sensitive).toBe(true);
     expect(findTool(tools, "inkbox_totp_code").sensitive).toBe(true);
+    expect(findTool(tools, "inkbox_credentials_get_secret").sensitive).toBe(true);
   });
 
   describe("inkbox_credentials_list", () => {
@@ -121,7 +129,7 @@ describe("vaultTools", () => {
       const credentials = makeCredentials();
       const tool = findTool(vaultTools(makeDeps(credentials)), "inkbox_credentials_list");
       const result = await tool.definition.execute({}, makeCtx());
-      expect(credentials.list).toHaveBeenCalled();
+      expect(credentials.listSecrets).toHaveBeenCalledWith({ secretType: undefined });
       const text = outputText(result);
       expect(text).toContain("Returned 2 credential(s).");
       expect(text).toContain('"id": "cred-login"');
@@ -137,28 +145,16 @@ describe("vaultTools", () => {
       expect(text).not.toContain("payload");
     });
 
-    it("uses the typed list for each secret-type filter", async () => {
-      const cases = [
-        ["login", "listLogins"],
-        ["api_key", "listApiKeys"],
-        ["key_pair", "listKeyPairs"],
-        ["ssh_key", "listSshKeys"],
-      ] as const;
-      for (const [type, method] of cases) {
+    it("filters every type server-side without unlocking or falling back to plaintext", async () => {
+      for (const type of ["login", "api_key", "key_pair", "ssh_key", "other"]) {
         const credentials = makeCredentials();
-        const tool = findTool(vaultTools(makeDeps(credentials)), "inkbox_credentials_list");
+        const deps = makeDeps(credentials);
+        const tool = findTool(vaultTools(deps), "inkbox_credentials_list");
         await tool.definition.execute({ type }, makeCtx());
-        expect(credentials[method]).toHaveBeenCalled();
+        expect(credentials.listSecrets).toHaveBeenCalledWith({ secretType: type });
+        expect(deps.vault.getCredentials).not.toHaveBeenCalled();
         expect(credentials.list).not.toHaveBeenCalled();
       }
-    });
-
-    it("falls back to the full list for the other filter", async () => {
-      const credentials = makeCredentials();
-      const tool = findTool(vaultTools(makeDeps(credentials)), "inkbox_credentials_list");
-      await tool.definition.execute({ type: "other" }, makeCtx());
-      expect(credentials.list).toHaveBeenCalled();
-      expect(credentials.listLogins).not.toHaveBeenCalled();
     });
 
     it("declares a schema with an optional type filter", () => {
@@ -239,17 +235,19 @@ describe("vaultTools", () => {
   });
 
   describe("inkbox_totp_code", () => {
-    it("unlocks the vault, then generates the code via the identity", async () => {
+    it("uses a fresh per-secret TOTP read and preserves leading zeroes", async () => {
       const identity = {
         getTotpCode: vi.fn(async () => ({ code: "123456", secondsRemaining: 17 })),
       };
-      const deps = makeDeps(makeCredentials(), identity);
+      const credentials = makeCredentials();
+      const deps = makeDeps(credentials, identity);
       const tool = findTool(vaultTools(deps), "inkbox_totp_code");
       const result = await tool.definition.execute({ secretId: "cred-login" }, makeCtx());
       expect(deps.vault.getCredentials).toHaveBeenCalled();
-      expect(identity.getTotpCode).toHaveBeenCalledWith("cred-login");
+      expect(credentials.getTotpCode).toHaveBeenCalledWith("cred-login");
+      expect(identity.getTotpCode).not.toHaveBeenCalled();
       const text = outputText(result);
-      expect(text).toContain("TOTP code for secret cred-login: 123456");
+      expect(text).toContain("TOTP code for secret cred-login: 012345");
       expect(text).toContain("(expires in 17s)");
     });
 

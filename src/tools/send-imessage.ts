@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
 import { uploadLocalMedia } from "../gateway/media.js";
+import { nativeTarget, sendNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, IMESSAGE_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -97,6 +98,15 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
         args: sendIMessageArgs,
         async execute(args: SendIMessageArgs, ctx) {
           return runTool(async () => {
+            if (
+              [
+                "replyToMessageId",
+                "reply_to_message_id",
+                "plainReplyFallback",
+                "plain_reply_fallback",
+              ].some((key) => key in args)
+            )
+              throw new Error("Native iMessage reply targeting is owned by the bridge.");
             const text = typeof args.text === "string" ? args.text : "";
             const mediaUrls = Array.isArray(args.mediaUrls) ? args.mediaUrls : undefined;
             const mediaPaths = Array.isArray(args.mediaPaths) ? args.mediaPaths : undefined;
@@ -146,14 +156,25 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = mediaPaths?.length ? await uploadLocalMedia(identity, mediaPaths) : [];
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
-            const msg = await identity.sendIMessage({
-              ...(conversationId
-                ? { conversationId }
-                : { to: toList.length === 1 ? toList[0] : toList }),
+            const native =
+              config.gateway?.imessageThreadedReplies && conversationId
+                ? await nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode)
+                : undefined;
+            const payload = {
               ...(text ? { text } : {}),
               ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
               ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
-            });
+            };
+            const msg = native
+              ? await sendNativeIMessage(identity, native, payload)
+              : await identity.sendIMessage({
+                  ...(conversationId
+                    ? { conversationId }
+                    : { to: toList.length === 1 ? toList[0] : toList }),
+                  ...(text ? { text } : {}),
+                  ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
+                  ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
+                });
             const target = conversationId
               ? `conversation=${conversationId}`
               : `to=${toList.join(",")}`;

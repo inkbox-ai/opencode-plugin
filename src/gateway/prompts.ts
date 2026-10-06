@@ -180,6 +180,16 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   } else if (msg.conversationId) {
     fields.push(`conversation_id=${msg.conversationId}`);
   }
+  if (msg.imessageSource)
+    fields.push(
+      `native_reply_source=${msg.imessageSource.messageId}`,
+      `native_thread=${JSON.stringify(msg.imessageSource.threadId ?? null)}`,
+    );
+  if (msg.slack)
+    fields.push(
+      `connection_id=${msg.slack.connectionId}`,
+      `thread_ts=${JSON.stringify(msg.slack.threadTs)}`,
+    );
   if (msg.group?.participants?.length) {
     fields.push(`participants=${JSON.stringify(msg.group.participants.join(", "))}`);
   }

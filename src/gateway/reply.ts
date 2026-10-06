@@ -1,6 +1,9 @@
 import type { InkboxRuntime } from "../client.js";
+import { sendNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
+import { ownSlackConnection, sendSlackReply, slackText } from "../slack.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
+import type { StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
 
 export class ReplyPreparationError extends Error {}
@@ -18,10 +21,22 @@ export async function prepareReply(
   target: ReplyTarget,
   raw: string,
   logger: GatewayLogger,
+  store?: StateStore,
 ): Promise<() => Promise<ReplyResult>> {
   const trimmed = (raw ?? "").trim();
   if (!trimmed || trimmed === SILENT)
     return async () => ({ delivered: false, reason: trimmed ? "silent" : "empty" });
+  if (target.channel === "slack") {
+    if (!target.slack) throw new ReplyPreparationError("Slack reply route is missing.");
+    slackText(trimmed);
+    const client = await runtime.getClient();
+    await ownSlackConnection(client, target.slack.identityId, target.slack.connectionId);
+    return async () => ({
+      delivered: true,
+      reason: "sent",
+      messageId: await sendSlackReply(client, target.slack!, trimmed),
+    });
+  }
   const parentId = target.companion?.replyToMessageId ?? target.messageId ?? "";
   if (target.channel === "email" && !parentId)
     throw new ReplyPreparationError("Email reply requires the stored inbound message ID.");
@@ -44,12 +59,14 @@ export async function prepareReply(
                 ? { conversationId: target.conversationId }
                 : { to: target.to }),
             })
-          : await identity.sendIMessage({
-              text: body,
-              ...(target.conversationId
-                ? { conversationId: target.conversationId }
-                : { to: target.to }),
-            });
+          : target.imessageSource
+            ? await sendNativeIMessage(identity, target, { text: body }, store)
+            : await identity.sendIMessage({
+                text: body,
+                ...(target.conversationId
+                  ? { conversationId: target.conversationId }
+                  : { to: target.to }),
+              });
     logger.info("reply.sent", { channel: target.channel, id: message.id });
     return { delivered: true, reason: "sent", messageId: message.id };
   };

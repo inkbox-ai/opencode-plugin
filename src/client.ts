@@ -90,6 +90,13 @@ export function createInkboxRuntime(source: ConfigSource, logger?: PluginLogger)
         ...(cfg.baseUrl?.trim() ? { baseUrl: cfg.baseUrl.trim() } : {}),
       });
       const identityHandle = cfg.identity;
+      // An SDK-wide key may start optional background unlocking at construction.
+      // Its failure must not become an unhandled rejection in the host.
+      void inkbox.ready().catch(() => {
+        logger?.warn?.(
+          "SDK vault unlock failed; use the plugin's local vault key for lazy unlocking.",
+        );
+      });
       const promise = (async () => {
         // Confirm the key shape before we go any further. Agent-scoped is the
         // expected mode; admin-scoped works for outbound but we surface a

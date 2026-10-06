@@ -2,6 +2,7 @@ import { VERSION as SDK_VERSION } from "@inkbox/sdk";
 import { NOT_CONFIGURED_MESSAGE } from "../client.js";
 import { inkboxErrorMessage } from "../errors.js";
 import { formatWithHeader } from "../format.js";
+import { queueReadiness } from "../gateway/readiness.js";
 import type { GatingSummary } from "./registry.js";
 import { describeGating } from "./registry.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -84,6 +85,18 @@ export function doctorTools(deps: ToolDeps, getGating: () => GatingSummary): Reg
             }
           }
 
+          try {
+            const queue = queueReadiness();
+            report.queue = queue;
+            if (!queue.ready)
+              findings.push({
+                severity: "error",
+                message:
+                  "Durable work is blocked by an unconfirmed host outcome. Preserve its state and verify the native execution before recovery.",
+              });
+          } catch {
+            findings.push({ severity: "error", message: "Durable queue state could not be read." });
+          }
           const gating = getGating();
           report.tools = {
             enabled: gating.enabled,

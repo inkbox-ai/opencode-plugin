@@ -21,11 +21,11 @@ Start with `inkbox_doctor` (default-enabled). It reports config presence, API re
 | `sender_sms_pending` | The Inkbox phone number is still propagating to carriers. Retry later and verify `smsStatus`. |
 | `recipient_not_opted_in` | Ask the recipient to text `START` to the agent's Inkbox number, then retry. |
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
-| `Vault is locked` | Export `INKBOX_VAULT_KEY=<the vault key>` in the shell launching opencode (or the custom env var configured via the `vault.keyEnvVar` plugin option), then restart opencode. |
+| `Vault is locked` | Export `INKBOX_OPENCODE_VAULT_KEY=<the vault key>` in the shell launching opencode (or the custom env var configured via the `vault.keyEnvVar` plugin option), then restart opencode. |
 
 ## Vault unlock pattern
 
-Vault tools are opt-in: the `vault` group enables `inkbox_credentials_list`, but the four plaintext-returning tools must each be enabled by exact name — a group enable never turns them on. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.
+Vault tools are opt-in: the `vault` group enables `inkbox_credentials_list`, but the five plaintext-returning tools must each be enabled by exact name — a group enable never turns them on. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_OPENCODE_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.
 
 If vault access fails, do not ask for the vault key in chat. Tell the user which env var needs to be set in the shell that launches opencode.
 

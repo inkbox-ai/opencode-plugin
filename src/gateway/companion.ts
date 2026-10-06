@@ -1,4 +1,5 @@
 import type { CompanionMetadata } from "@inkbox/sdk";
+import type { SlackRoute } from "../slack.js";
 import type { ReplyTarget } from "./types.js";
 
 export type { CompanionMetadata } from "@inkbox/sdk";
@@ -6,6 +7,8 @@ export type { CompanionMetadata } from "@inkbox/sdk";
 export const COMPANION_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface CompanionTurn {
+  slack?: SlackRoute;
+  imessageSource?: ReplyTarget["imessageSource"];
   metadata: CompanionMetadata;
   identityId: string;
   handle: string;
@@ -31,7 +34,7 @@ export function companionMetadata(value: unknown): CompanionMetadata {
     ![m.scope_id, m.conversation_id].every(
       (id) => typeof id === "string" && /^[a-zA-Z0-9-]+$/.test(id),
     ) ||
-    !["mail", "phone", "imessage"].includes(m.channel) ||
+    !["mail", "phone", "imessage", "slack"].includes(m.channel) ||
     !["ordinary", "initialization", "live"].includes(m.phase) ||
     (m.phase === "live" && "history" in m && m.history != null) ||
     !Number.isSafeInteger(m.sequence) ||
@@ -58,10 +61,11 @@ export function companionChatKey(
   identityId: string,
   m: CompanionMetadata,
   environment = "https://inkbox.ai",
+  connectionId?: string,
 ): string {
   const base = new URL(environment);
   const namespace = `${base.origin}${base.pathname.replace(/\/+$/, "")}`;
-  return `companion:${encodeURIComponent(namespace)}:${identityId}:${m.channel}:${m.conversation_id}:${m.scope_id}:${m.activation_id ?? "ordinary"}`;
+  return `companion:${encodeURIComponent(namespace)}:${identityId}:${connectionId ? `${connectionId}:` : ""}${m.channel}:${m.conversation_id}:${m.scope_id}:${m.activation_id ?? "ordinary"}`;
 }
 
 export function assertCompanionSize(text: string): void {

@@ -79,6 +79,7 @@ describe("handlePermission", () => {
       "ck",
       expect.stringContaining("Delete 3 files"),
       undefined,
+      expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
     );
     expect(deps.opencode.postSessionIdPermissionsPermissionId).toHaveBeenCalledWith({
       path: { id: "sess-1", permissionID: "perm-1" },
@@ -211,5 +212,35 @@ it("falls back to a capture chat route and persists it with the permission", asy
   });
   deps.relay.ask = ask;
   await createEscalationBridge(deps).handlePermission(perm);
-  expect(ask).toHaveBeenCalledWith("ck", expect.any(String), target);
+  expect(ask).toHaveBeenCalledWith(
+    "ck",
+    expect.any(String),
+    target,
+    expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
+  );
+});
+
+it("does not reject or recreate a permission already resolved in the native host", async () => {
+  let finish: (v: string | undefined) => void = () => {};
+  const deps = makeDeps({
+    relay: {
+      ask: vi.fn(
+        (_key, _prompt, _target, options) =>
+          new Promise<string | undefined>((resolve) => {
+            finish = resolve;
+            options?.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+          }),
+      ),
+    },
+  });
+  const bridge = createEscalationBridge(deps);
+  const handling = bridge.handlePermission(perm);
+  expect(bridge.isInFlight(perm.permissionID)).toBe(true);
+  bridge.resolved(perm.permissionID);
+  finish("2");
+  await handling;
+  await bridge.handlePermission(perm);
+  expect(deps.state.listPermissions()).toEqual([]);
+  expect(deps.opencode.postSessionIdPermissionsPermissionId).not.toHaveBeenCalled();
+  expect(deps.relay.ask).toHaveBeenCalledOnce();
 });

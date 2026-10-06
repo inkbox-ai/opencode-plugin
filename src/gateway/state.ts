@@ -26,6 +26,12 @@ export type DurableTurnState =
   | "interrupted";
 
 export interface DurableTurn {
+  slackStopTargets?: string[];
+  sourceIds?: string[];
+  burstKey?: string;
+  burstTextChars?: number;
+  executionFenced?: boolean;
+  uncertainStage?: "submission" | "delivery";
   contextIds?: string[];
   consumedBy?: string;
   historySourceIds?: string[];
@@ -87,6 +93,7 @@ export interface StateStore {
   // Merge-and-write. Atomic (tmp file + rename) so a crash never leaves a
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
+  updateIMessageSend(key: string, update: (entry: unknown) => unknown): void;
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
   setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
   getSession(chatKey: string): string | undefined;
@@ -213,6 +220,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
         return [next, next];
       });
     },
+    updateIMessageSend(key, update) {
+      mutate((state) => {
+        const entries = (state.imessageSends ?? {}) as Record<string, unknown>;
+        const entry = update(entries[key]);
+        return entry === undefined
+          ? [state, undefined]
+          : [{ ...state, imessageSends: { ...entries, [key]: entry } }, undefined];
+      });
+    },
     updateA2ATask(key, update) {
       mutate((state) => {
         const tasks =
@@ -258,6 +274,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
             (candidate) =>
               !candidate.hostedCapture &&
               !candidate.companion &&
+              !candidate.replyTarget?.imessageSource &&
               (["delivered", "failed", "interrupted"].includes(candidate.state) ||
                 (candidate.state === "completed" && !candidate.deliver) ||
                 (candidate.state === "context_only" && Boolean(candidate.consumedBy))),
@@ -312,6 +329,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               candidate.id !== id &&
               candidate.chatKey === current.chatKey &&
               candidate.companion &&
+              !(candidate.state === "paused" && candidate.executionFenced) &&
               (candidate.state === "paused" ||
                 (!["context_only", "delivered", "failed", "interrupted"].includes(
                   candidate.state,

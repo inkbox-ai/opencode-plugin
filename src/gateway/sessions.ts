@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import {
@@ -10,6 +11,8 @@ import {
 } from "../a2a-progress.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js";
+import { createSlackActivity } from "../slack-activity.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -29,7 +32,9 @@ import {
 import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
 import { prepareReply, ReplyPreparationError } from "./reply.js";
 import { companionWakes, mentionsAgent, sameAuthor } from "./response-policy.js";
+import { slackSenderAllowed } from "./slack.js";
 import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
+import { gatewayHome } from "./state.js";
 import type {
   GatewayLogger,
   InboundMessage,
@@ -60,6 +65,7 @@ export interface SessionManagerDeps {
   state: StateStore;
   logger: GatewayLogger;
   directory: string;
+  cancelPending?(chatKey: string, target: ReplyTarget): void;
   companionSenderAllowed?(from: string, requireReply?: boolean): Promise<boolean>;
   companionContactId?(from: string): Promise<string | undefined>;
   companionLocalAllowed?(
@@ -133,6 +139,60 @@ export function createSessionManager(
   const waiters = new Map<string, TurnWaiter[]>();
   const ownerId = randomUUID();
   let closing = false;
+  const activity = createSlackActivity(
+    async (route) => {
+      if (!deps.config.gateway.slackEnabled) throw new Error("Slack is disabled.");
+      const client = await deps.inkbox.getClient();
+      if (route) {
+        if ((await deps.inkbox.getIdentity()).id !== route.identityId)
+          throw new Error("Slack activity identity changed.");
+        await ownSlackConnection(client, route.identityId, route.connectionId);
+      }
+      return client.slack;
+    },
+    join(gatewayHome(), "slack-activity.json"),
+    (message) => deps.logger.warn(message),
+  );
+  function activityEvent(
+    turn: DurableTurn,
+    event: import("../slack-activity.js").SlackActivityEvent,
+  ) {
+    if (turn.replyTarget?.slack && deps.config.gateway.slackEnabled)
+      activity.notify(turn.replyTarget.slack, event);
+  }
+  async function authorizeSlack(turn: DurableTurn): Promise<void> {
+    const route = turn.replyTarget?.slack ?? turn.companion?.slack;
+    if (!route) return;
+    if (!deps.config.gateway.slackEnabled) throw new Error("Slack is disabled; receipt retained.");
+    const identity = await deps.inkbox.getIdentity();
+    if (identity.id !== route.identityId) throw new Error("Slack identity changed.");
+    const client = await deps.inkbox.getClient();
+    await ownSlackConnection(client, identity.id, route.connectionId);
+    const c = turn.companion;
+    if (c?.metadata.activation_id) {
+      const page = await client.companion.activationMessages(c.handle, c.metadata.activation_id, {
+        limit: 1,
+      });
+      if (
+        page.scopeId !== c.metadata.scope_id ||
+        page.activationId !== c.metadata.activation_id ||
+        page.conversationId !== c.metadata.conversation_id ||
+        page.channel !== "slack" ||
+        page.replyContext.connectionId !== route.connectionId ||
+        page.replyContext.slackConversationId !== route.conversationId
+      )
+        throw new Error("Slack Companion activation no longer matches this receipt.");
+    }
+  }
+  function slackLocallyAllowed(
+    c: import("./companion.js").CompanionTurn,
+    author = c.from,
+  ): boolean {
+    if (!c.slack) return true;
+    const actorId = author.split(":")[1];
+    if (!actorId) return false;
+    return slackSenderAllowed({ ...c.slack, actorId }, deps.config);
+  }
   const generations = new Map<string, number>();
 
   let identitySystemCache: string | undefined;
@@ -286,7 +346,11 @@ export function createSessionManager(
     const c = turn.companion;
     if (!c) return;
     const sponsor = turn.replyTarget?.companionSponsor ?? c.from;
-    if (deps.companionLocalAllowed?.(sponsor, turn.companionContactId, true) === false)
+    if (
+      c.slack
+        ? !slackLocallyAllowed(c, sponsor)
+        : deps.companionLocalAllowed?.(sponsor, turn.companionContactId, true) === false
+    )
       throw new Error("Companion sender is not permitted by local settings.");
   }
 
@@ -295,12 +359,15 @@ export function createSessionManager(
     if (TERMINAL.has(turn.state)) return turn;
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
+    await authorizeSlack(turn);
+    activityEvent(turn, "accepted");
     turn = includeContext(turn);
     const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey, turn));
     const body = await promptBody(turn);
     if (turn.companion) assertCompanionSize(JSON.stringify(body));
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
+    await authorizeSlack(turn);
     if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
       throw new Error("Durable turn lease was lost.");
     const next = deps.state.transitionTurn(
@@ -368,12 +435,74 @@ export function createSessionManager(
         ["submitting"],
         {
           state: next.companion ? "paused" : "failed",
+          uncertainStage: "submission",
           error: String(err),
         },
         next.companion ? ownerId : undefined,
       );
+      const unconfirmed = deps.state.getTurn(turn.id);
+      if (unconfirmed) await rescueUnconfirmed(unconfirmed).catch(() => {});
+      const rescued = deps.state.getTurn(turn.id);
+      if (rescued && ["completed", "delivered"].includes(rescued.state)) return rescued;
       throw err;
     }
+  }
+
+  async function fenceUnconfirmed(turn: DurableTurn): Promise<boolean> {
+    if (turn.executionFenced) return true;
+    if (!turn.sessionID) return false;
+    // Only the host's acknowledged abort fences tool execution. A timeout,
+    // missing session status, or a new local generation alone proves nothing.
+    const result = await deps.opencode.session.abort({
+      path: { id: turn.sessionID },
+      query: { directory: deps.directory },
+    });
+    if ((result as any)?.error || (result as any)?.data !== true) return false;
+    const status = await deps.opencode.session.status({ query: { directory: deps.directory } });
+    if (
+      (status as any)?.error ||
+      !(status as any)?.data ||
+      ((status as any).data[turn.sessionID]?.type ?? "idle") !== "idle"
+    )
+      return false;
+    deps.state.updateTurn(turn.id, { executionFenced: true });
+    return true;
+  }
+
+  async function rescueUnconfirmed(turn: DurableTurn): Promise<void> {
+    if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS)) return;
+    if (turn.executionFenced || turn.uncertainStage === "delivery") return;
+    if (!turn.sessionID) return;
+    const messages = await listMessages(turn.sessionID);
+    const user = messages.find(
+      (message) => message?.info?.id === turn.messageID && message?.info?.role === "user",
+    );
+    const answers = messages.filter(
+      (message) => message?.info?.role === "assistant" && message.info.parentID === turn.messageID,
+    );
+    const answer = answers.at(-1);
+    const status = await deps.opencode.session.status({ query: { directory: deps.directory } });
+    const idle =
+      !(status as any)?.error &&
+      (status as any)?.data &&
+      ((status as any).data[turn.sessionID]?.type ?? "idle") === "idle";
+    if (
+      turn.uncertainStage === "submission" &&
+      user &&
+      idle &&
+      answer?.info?.finish &&
+      !["tool-calls", "unknown"].includes(answer.info.finish) &&
+      !answer.info.error
+    ) {
+      const restored = deps.state.updateTurn(turn.id, {
+        state: "completed",
+        output: extractText(answer),
+        executionFenced: true,
+      });
+      if (restored) await finish(restored, restored.output);
+      return;
+    }
+    await fenceUnconfirmed(turn);
   }
 
   function includeContext(turn: DurableTurn): DurableTurn {
@@ -448,12 +577,16 @@ export function createSessionManager(
       throw new Error("Companion identity changed; queued context is paused.");
     let liveContent = c.content ?? turn.text;
     const channel =
-      c.metadata.channel === "mail" ? "email" : c.metadata.channel === "phone" ? "sms" : "imessage";
+      c.metadata.channel === "mail"
+        ? "email"
+        : c.metadata.channel === "phone"
+          ? "sms"
+          : c.metadata.channel;
     let target = turn.replyTarget;
     let sponsor = c.from;
     let history = deps.state.getTurn(`${turn.chatKey}:history`);
     if (c.metadata.phase === "ordinary") {
-      if (!(await deps.companionSenderAllowed?.(c.from)))
+      if (c.slack ? !slackLocallyAllowed(c) : !(await deps.companionSenderAllowed?.(c.from)))
         return deps.state.updateTurn(turn.id, { state: "delivered" }) ?? turn;
       target ??= {
         channel,
@@ -482,7 +615,9 @@ export function createSessionManager(
         if (
           triggers.length !== 1 ||
           triggers[0].historical !== false ||
-          !(await deps.companionSenderAllowed?.(triggers[0].author, true))
+          (c.slack
+            ? !slackLocallyAllowed(c, triggers[0].author)
+            : !(await deps.companionSenderAllowed?.(triggers[0].author, true)))
         )
           throw new Error("Companion sponsor is not locally permitted.");
         const trigger = triggers[0];
@@ -507,6 +642,15 @@ export function createSessionManager(
           sender: trigger.author,
           companionSponsor: trigger.author,
         };
+        if (channel === "slack") {
+          if (
+            !c.slack ||
+            context.connectionId !== c.slack.connectionId ||
+            context.slackConversationId !== c.slack.conversationId
+          )
+            throw new Error("Slack Companion reply coordinates do not match the connection.");
+          target.slack = c.slack;
+        }
         if (channel === "email") {
           if (
             context.replyToMessageId !== trigger.id ||
@@ -552,7 +696,14 @@ export function createSessionManager(
         liveContent = `Current receipt: ${c.sourceId}; sender_access=${c.senderAccess ?? "unknown"}. Its message is in the initialization above.`;
     }
     if (!target) throw new Error("Companion reply target is unavailable.");
-    target = { ...target, sender: c.from, companionMode: true, group: true };
+    target = {
+      ...target,
+      ...(c.imessageSource ? { imessageSource: c.imessageSource } : {}),
+      ...(c.slack ? { slack: c.slack } : {}),
+      sender: c.from,
+      companionMode: true,
+      group: true,
+    };
     const contactId = history?.companionPolicyReady
       ? history.companionContactId
       : await deps.companionContactId?.(sponsor);
@@ -584,7 +735,10 @@ export function createSessionManager(
       ownerId,
     );
     if (!next) throw new Error("Durable turn lease was lost.");
-    if (wakes) assertCompanionLocallyAllowed(next);
+    if (wakes) {
+      assertCompanionLocallyAllowed(next);
+      activityEvent(next, "accepted");
+    }
     if (
       wakes &&
       c.metadata.phase !== "initialization" &&
@@ -677,20 +831,33 @@ export function createSessionManager(
     }
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
+      await authorizeSlack(current);
       let send: Awaited<ReturnType<typeof prepareReply>>;
       try {
-        send = await prepareReply(deps.inkbox, current.replyTarget, output, deps.logger);
+        send = await prepareReply(
+          deps.inkbox,
+          current.replyTarget,
+          output,
+          deps.logger,
+          deps.state,
+        );
       } catch (error) {
         if (!(error instanceof ReplyPreparationError)) throw error;
         deps.state.updateTurn(current.id, {
           state: current.companion ? "paused" : "failed",
           error: String(error),
         });
-        if (!current.companion) recoverReply(current, error, output);
+        if (
+          !current.companion &&
+          !current.replyTarget?.imessageSource &&
+          !current.replyTarget?.slack
+        )
+          recoverReply(current, error, output);
         settle(current.id, output);
         return;
       }
       if (closing || deps.state.getTurn(current.id)?.state === "interrupted") return;
+      await authorizeSlack(current);
       if (
         !deps.state.transitionTurn(
           current.id,
@@ -709,6 +876,8 @@ export function createSessionManager(
       } catch (err) {
         deps.state.updateTurn(current.id, {
           state: current.companion ? "paused" : "failed",
+          uncertainStage: "delivery",
+          executionFenced: true,
           error: String(err),
         });
         deps.logger.error("reply.failed", { chatKey: current.chatKey, error: String(err) });
@@ -716,11 +885,13 @@ export function createSessionManager(
           settle(current.id, output);
           return;
         }
-        recoverReply(current, err, output);
+        if (!current.replyTarget?.imessageSource && !current.replyTarget?.slack)
+          recoverReply(current, err, output);
       }
     }
     if (current.deliver && output === undefined)
       deps.state.updateTurn(current.id, { state: "delivered" });
+    activityEvent(current, "completed");
     settle(current.id, output);
   }
 
@@ -745,7 +916,14 @@ export function createSessionManager(
     }, LEASE_MS / 3);
     renewal.unref?.();
     try {
-      if (turn.state === "paused") return;
+      if (turn.state === "paused") {
+        if (turn.uncertainStage === "submission") await rescueUnconfirmed(turn);
+        return;
+      }
+      if (turn.replyTarget?.slack) {
+        await authorizeSlack(turn);
+        activityEvent(turn, "accepted");
+      }
       if (turn.state === "hydrating" || turn.state === "queued") turn = await submit(turn);
       else if (turn.state === "submitting") {
         if (!(await wasAccepted(turn))) throw new Error("Prompt submission outcome is ambiguous.");
@@ -774,6 +952,8 @@ export function createSessionManager(
       else if (turn.state === "delivery_started") {
         deps.state.updateTurn(id, {
           state: turn.companion ? "paused" : "failed",
+          uncertainStage: "delivery",
+          executionFenced: true,
           error: "Reply delivery outcome is ambiguous after restart.",
         });
       }
@@ -820,6 +1000,16 @@ export function createSessionManager(
       if (!(leaseLost && turn.hostedCapture)) settle(id, undefined, err);
     } finally {
       clearInterval(renewal);
+      const final = deps.state.getTurn(id);
+      if (final && ["failed", "paused", "interrupted", "delivered"].includes(final.state))
+        activityEvent(
+          final,
+          final.state === "interrupted"
+            ? "cancelled"
+            : final.state === "delivered"
+              ? "completed"
+              : "failed",
+        );
       if (turn.hostedCapture) {
         try {
           const latest = deps.state.getTurn(turn.id);
@@ -848,19 +1038,38 @@ export function createSessionManager(
       const turn = deps.state.getTurn(id);
       if (!turn || TERMINAL.has(turn.state)) continue;
       if (closing) return;
+      if ((turn.replyTarget?.slack || turn.companion?.slack) && !deps.config.gateway.slackEnabled) {
+        entry.queue.unshift(id);
+        return;
+      }
       if (turn.retryAt && turn.retryAt > Date.now()) {
         entry.queue.unshift(id);
         const timer = setTimeout(() => void drain(chatKey), turn.retryAt - Date.now());
         timer.unref?.();
         return;
       }
-      if (
-        turn.companion &&
-        deps.state
-          .listTurns()
-          .some((candidate) => candidate.chatKey === chatKey && candidate.state === "paused")
-      )
+      const blockers = deps.state
+        .listTurns()
+        .filter(
+          (candidate) =>
+            candidate.id !== turn.id &&
+            candidate.chatKey === chatKey &&
+            !candidate.executionFenced &&
+            (candidate.state === "paused" || candidate.uncertainStage === "submission"),
+        );
+      entry.runningId = id;
+      for (const blocker of blockers) {
+        if (blocker.sessionID) await rescueUnconfirmed(blocker).catch(() => {});
+      }
+      if (blockers.some((candidate) => !deps.state.getTurn(candidate.id)?.executionFenced)) {
+        entry.queue.unshift(id);
+        entry.runningId = undefined;
+        const retry = setTimeout(() => {
+          if (!closing) void drain(chatKey);
+        }, 5000);
+        retry.unref?.();
         return;
+      }
       entry.runningId = id;
       let retry = false;
       try {
@@ -882,7 +1091,7 @@ export function createSessionManager(
         entry.runningId = undefined;
       }
       const latest = deps.state.getTurn(id);
-      if (latest?.state === "paused") return;
+      if (latest?.state === "paused" && !latest.executionFenced) return;
       if (latest?.retryAt && latest.retryAt > Date.now()) {
         entry.queue.unshift(id);
         return;
@@ -896,6 +1105,7 @@ export function createSessionManager(
   }
 
   function enqueue(turn: DurableTurn): void {
+    if (!turn.companion || (turn.companion.hydrated && turn.wake)) activityEvent(turn, "accepted");
     if (!deps.state.getTurn(turn.id)) deps.state.saveTurn(turn);
     const entry = per(turn.chatKey);
     if (entry.runningId !== turn.id && !entry.queue.includes(turn.id)) entry.queue.push(turn.id);
@@ -1073,6 +1283,7 @@ export function createSessionManager(
         companion.identityId,
         companion.metadata,
         companion.environment ?? deps.config.baseUrl,
+        companion.slack?.connectionId,
       );
       const candidate = makeTurn(chatKey, "capture", text, true, target, {
         id: `${chatKey}:event:${companion.sourceId}`,
@@ -1117,16 +1328,19 @@ export function createSessionManager(
         controlTarget &&
         companion.metadata.phase !== "initialization" &&
         companionWakes(companion, deps.config.gateway) &&
-        deps.companionLocalAllowed?.(
-          controlTarget.companionSponsor ?? companion.from,
-          history?.companionContactId ??
-            (companion.metadata.phase === "ordinary"
-              ? await deps.companionContactId?.(companion.from)
-              : undefined),
-          true,
-        ) !== false &&
+        (companion.slack
+          ? slackLocallyAllowed(companion, controlTarget.companionSponsor ?? companion.from)
+          : deps.companionLocalAllowed?.(
+              controlTarget.companionSponsor ?? companion.from,
+              history?.companionContactId ??
+                (companion.metadata.phase === "ordinary"
+                  ? await deps.companionContactId?.(companion.from)
+                  : undefined),
+              true,
+            ) !== false) &&
         (await deps.companionControl?.(companion, chatKey, {
           ...controlTarget,
+          ...(companion.slack ? { slack: companion.slack } : {}),
           sender: companion.from,
         }))
       ) {
@@ -1135,10 +1349,93 @@ export function createSessionManager(
       }
       enqueue(turn);
     },
+    permissionActivity(target, waiting) {
+      if (target.slack && deps.config.gateway.slackEnabled)
+        activity.notify(target.slack, waiting ? "waiting" : "resumed");
+    },
+    async authorizeReply(target) {
+      if (!target.slack) return;
+      const turn = deps.state
+        .listTurns()
+        .find((turn) => turn.replyTarget?.slack?.sourceEventId === target.slack!.sourceEventId);
+      if (!turn) throw new Error("Slack reply owner is unavailable.");
+      await authorizeSlack(turn);
+    },
+    async stopSlack(route, chatKey) {
+      if (!deps.config.gateway.slackEnabled || !slackSenderAllowed(route, deps.config)) return;
+      const receiptId = `slack-stop:${encodeURIComponent(deps.config.baseUrl ?? "https://inkbox.ai")}:${route.identityId}:${route.sourceEventId}`;
+      const previous = deps.state.getTurn(receiptId);
+      const accepted =
+        previous ??
+        deps.state.reserveTurns([
+          makeTurn(
+            chatKey ?? "slack-control",
+            "capture",
+            "Native Slack Stop receipt",
+            false,
+            { channel: "slack", slack: route },
+            {
+              id: receiptId,
+              state: "context_only",
+              consumedBy: "native-control",
+              slackStopTargets: deps.state
+                .listTurns()
+                .filter(
+                  (turn) =>
+                    (!chatKey || turn.chatKey === chatKey) &&
+                    turn.replyTarget?.slack &&
+                    slackRouteKey(turn.replyTarget.slack) === slackRouteKey(route) &&
+                    turn.replyTarget.slack.actorId === route.actorId &&
+                    ACTIVE.has(turn.state),
+                )
+                .map((turn) => turn.id),
+            },
+          ),
+        ])[0];
+      const matches = (accepted.slackStopTargets ?? [])
+        .map((id) => deps.state.getTurn(id))
+        .filter((turn): turn is DurableTurn => Boolean(turn && ACTIVE.has(turn.state)));
+      for (const turn of matches)
+        if (turn.replyTarget) deps.cancelPending?.(turn.chatKey, turn.replyTarget);
+      let uncertain = false;
+      for (const turn of matches) {
+        const executing =
+          ["submitting", "submitted"].includes(turn.state) ||
+          (turn.uncertainStage === "submission" && !turn.executionFenced);
+        if (executing) {
+          deps.state.updateTurn(turn.id, {
+            state: "paused",
+            uncertainStage: "submission",
+            error: "Slack Stop is awaiting native execution confirmation.",
+          });
+          if (!(await fenceUnconfirmed(turn).catch(() => false))) {
+            uncertain = true;
+            continue;
+          }
+        }
+        deps.state.updateTurn(turn.id, { state: "interrupted", executionFenced: true });
+        activityEvent(turn, "cancelled");
+        settle(turn.id, undefined);
+      }
+      if (uncertain)
+        throw new Error(
+          "Native Slack turn stop could not be confirmed; this conversation remains blocked.",
+        );
+    },
     async handleInbound(msg: InboundMessage) {
-      if (closing) return;
+      if (closing) throw new Error("Gateway is closing; retry inbound delivery.");
+      const sourceId = msg.imessageSource?.messageId ?? (msg.slack ? msg.messageId : undefined);
+      if (
+        sourceId &&
+        deps.state
+          .listTurns()
+          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+      )
+        return;
       const target: ReplyTarget = {
         channel: msg.channel,
+        slack: msg.slack,
+        imessageSource: msg.imessageSource,
         to: msg.from,
         conversationId: msg.conversationId,
         subject: msg.subject,
@@ -1160,12 +1457,72 @@ export function createSessionManager(
         target,
         {
           agent: overrideFor(g.channelAgents),
+          ...(msg.slack && sourceId ? { sourceIds: [sourceId] } : {}),
+          ...(msg.imessageSource
+            ? {
+                sourceIds: [msg.imessageSource.messageId],
+                burstKey:
+                  !msg.reaction && !msg.mediaPaths.length && !msg.text.trim().startsWith("/")
+                    ? JSON.stringify([
+                        msg.from,
+                        msg.imessageSource.conversationId,
+                        msg.imessageSource.parentMessageId,
+                        msg.imessageSource.threadId,
+                        msg.imessageSource.rootMessageId,
+                      ])
+                    : undefined,
+                burstTextChars: msg.text.length,
+                retryAt:
+                  !msg.reaction && !msg.mediaPaths.length && !msg.text.trim().startsWith("/")
+                    ? Date.now() + 750
+                    : undefined,
+              }
+            : {}),
         },
       );
       if (msg.group && msg.channel !== "email" && g.groupReplyMode === "mention") {
         const identity = await deps.inkbox.getIdentity();
-        if (msg.reaction || !mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle)) {
+        if (
+          msg.reaction ||
+          !(msg.slack
+            ? msg.slack.mentioned || msg.slack.direct
+            : mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle))
+        ) {
           deps.state.saveTurn({ ...turn, state: "context_only", deliver: false });
+          return;
+        }
+      }
+      if (
+        sourceId &&
+        deps.state
+          .listTurns()
+          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+      )
+        return;
+      if (turn.burstKey) {
+        const previous = deps.state
+          .listTurns()
+          .filter(
+            (candidate) =>
+              candidate.chatKey === msg.chatKey &&
+              candidate.state === "queued" &&
+              !candidate.sessionID,
+          )
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
+        if (
+          previous?.burstKey === turn.burstKey &&
+          (previous.sourceIds?.length ?? 0) < 8 &&
+          (previous.burstTextChars ?? 0) + msg.text.length <= 4000 &&
+          Date.now() < previous.createdAt + 2000 &&
+          (previous.retryAt ?? 0) > Date.now()
+        ) {
+          const merged = deps.state.updateTurn(previous.id, {
+            text: previous.text + "\n" + msg.text,
+            sourceIds: [...(previous.sourceIds ?? []), msg.imessageSource!.messageId],
+            burstTextChars: (previous.burstTextChars ?? 0) + msg.text.length,
+            retryAt: Math.min(previous.createdAt + 2000, Date.now() + 750),
+          });
+          if (merged) enqueue(merged);
           return;
         }
       }
@@ -1174,6 +1531,7 @@ export function createSessionManager(
         .listTurns()
         .filter(
           (candidate) =>
+            !(msg.slack || msg.imessageSource) &&
             candidate.chatKey === msg.chatKey &&
             candidate.kind === "normal" &&
             Boolean(candidate.ownerId) &&
@@ -1195,6 +1553,10 @@ export function createSessionManager(
         await deps.opencode.session
           .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
           .catch(() => {});
+      }
+      if (msg.slack || msg.imessageSource) {
+        enqueue(turn);
+        return;
       }
       return promiseFor(turn);
     },
@@ -1265,6 +1627,7 @@ export function createSessionManager(
             ACTIVE.has(turn.state),
         );
       for (const turn of turns) {
+        activityEvent(turn, "cancelled");
         deps.state.transitionTurn(
           turn.id,
           ["hydrating", "paused", "completed", ...INTERRUPTIBLE, "delivery_started"],
@@ -1294,37 +1657,55 @@ export function createSessionManager(
       deps.logger.info("session.reset", { chatKey });
     },
 
-    async abortTurn(chatKey) {
+    async abortTurn(chatKey, channel) {
       const turns = deps.state
         .listTurns()
-        .filter((turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state));
-      for (const turn of turns) {
-        deps.state.transitionTurn(
-          turn.id,
-          ["hydrating", "paused", "completed", ...INTERRUPTIBLE, "delivery_started"],
-          {
-            state: "interrupted",
-          },
+        .filter(
+          (turn) =>
+            turn.chatKey === chatKey &&
+            ACTIVE.has(turn.state) &&
+            (!channel ||
+              (turn.replyTarget?.channel === channel &&
+                (turn.kind === "normal" || Boolean(turn.companion)))),
         );
+      let uncertain = false;
+      for (const turn of turns) {
+        const executing =
+          ["submitting", "submitted"].includes(turn.state) ||
+          (turn.uncertainStage === "submission" && !turn.executionFenced);
+        if (executing) {
+          deps.state.updateTurn(turn.id, {
+            state: "paused",
+            uncertainStage: "submission",
+            error: "Stop is awaiting native execution confirmation.",
+          });
+          if (!(await fenceUnconfirmed(turn).catch(() => false))) {
+            uncertain = true;
+            continue;
+          }
+        }
+        activityEvent(turn, "cancelled");
+        deps.state.updateTurn(turn.id, { state: "interrupted", executionFenced: true });
         settle(turn.id, undefined);
       }
-      const sessionID = deps.state.getSession(chatKey);
-      if (sessionID && turns.length) {
-        await deps.opencode.session
-          .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
-          .catch(() => {});
-      }
+      if (uncertain)
+        throw new Error(
+          "Stop requested, but the host has not confirmed that execution ended. This conversation remains blocked.",
+        );
       return turns.length > 0;
     },
 
     status(chatKey) {
       const busy = deps.state
         .listTurns()
-        .some((turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state));
+        .some(
+          (turn) => turn.chatKey === chatKey && ACTIVE.has(turn.state) && !turn.executionFenced,
+        );
       return { busy, sessionID: deps.state.getSession(chatKey) };
     },
 
     async catchUp() {
+      if (deps.config.gateway.slackEnabled) await activity.recover();
       const recoverable = deps.state
         .listTurns()
         .filter((turn) => !TERMINAL.has(turn.state) && !turn.hostedCapture && !turn.a2aContext)
@@ -1333,6 +1714,8 @@ export function createSessionManager(
         if (turn.state === "delivery_started") {
           deps.state.updateTurn(turn.id, {
             state: turn.companion ? "paused" : "failed",
+            uncertainStage: "delivery",
+            executionFenced: true,
             error: "Reply delivery outcome is ambiguous after restart.",
           });
         } else enqueue(turn);
@@ -1341,6 +1724,7 @@ export function createSessionManager(
 
     async close() {
       closing = true;
+      await activity.close();
       for (const turn of deps.state.listTurns()) {
         if (turn.ownerId === ownerId && turn.state !== "delivery_started")
           deps.state.updateTurn(turn.id, { ownerId: undefined, leaseUntil: 0 });

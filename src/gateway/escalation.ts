@@ -14,7 +14,12 @@ export interface PendingPermission {
 export interface EscalationRelay {
   // Ask the human on their channel; returns their raw reply text, or
   // undefined on timeout. The relay owns delivery + capturing the reply.
-  ask(chatKey: string, prompt: string, target?: ReplyTarget): Promise<string | undefined>;
+  ask(
+    chatKey: string,
+    prompt: string,
+    target?: ReplyTarget,
+    options?: { signal: AbortSignal; timeoutMs: number },
+  ): Promise<string | undefined>;
 }
 
 export interface EscalationDeps {
@@ -36,7 +41,21 @@ export interface EscalationDeps {
 export function parsePermissionReply(raw: string): "once" | "always" | "reject" {
   const v = (raw ?? "").trim().toLowerCase();
   if (["2", "always", "allow always", "yes always"].includes(v)) return "always";
-  if (["1", "y", "yes", "ok", "okay", "approve", "allow", "sure", "go", "go ahead"].includes(v)) {
+  if (
+    [
+      "1",
+      "y",
+      "yes",
+      "yes please go ahead",
+      "ok",
+      "okay",
+      "approve",
+      "allow",
+      "sure",
+      "go",
+      "go ahead",
+    ].includes(v)
+  ) {
     return "once";
   }
   return "reject";
@@ -54,6 +73,9 @@ function menu(title: string): string {
 // API. Works identically from the sidecar and in-plugin (pure server API).
 export function createEscalationBridge(deps: EscalationDeps) {
   const inFlight = new Set<string>();
+  const controllers = new Map<string, AbortController>();
+  const resolved = new Set<string>();
+  let closed = false;
 
   async function handlePermission(perm: PendingPermission, recovering = false): Promise<void> {
     const chatKey = perm.chatKey ?? deps.chatKeyForSession(perm.sessionID);
@@ -61,7 +83,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
       // Not a gateway session we own — leave it for whoever does.
       return;
     }
-    if (inFlight.has(perm.permissionID)) return;
+    if (closed || resolved.has(perm.permissionID) || inFlight.has(perm.permissionID)) return;
     const existing = deps.state
       .listPermissions()
       .find((candidate) => candidate.permissionID === perm.permissionID);
@@ -88,6 +110,8 @@ export function createEscalationBridge(deps: EscalationDeps) {
       state: "pending",
     });
     inFlight.add(perm.permissionID);
+    const controller = new AbortController();
+    controllers.set(perm.permissionID, controller);
     try {
       const expired = deadline <= Date.now();
       const remaining = deps.timeoutMs > 0 ? Math.max(0, deadline - Date.now()) : 0;
@@ -104,7 +128,14 @@ export function createEscalationBridge(deps: EscalationDeps) {
         });
         const reply = expired
           ? undefined
-          : await withTimeout(deps.relay.ask(chatKey, menu(perm.title), origin), remaining);
+          : await withTimeout(
+              deps.relay.ask(chatKey, menu(perm.title), origin, {
+                signal: controller.signal,
+                timeoutMs: remaining,
+              }),
+              remaining,
+            );
+        if (closed || resolved.has(perm.permissionID)) return;
         response = reply === undefined ? "reject" : parsePermissionReply(reply);
         if (reply === undefined) {
           deps.logger.info("escalation.timeout", { permissionID: perm.permissionID, chatKey });
@@ -136,6 +167,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
       deps.state.removePermission(perm.permissionID);
       deps.logger.info("escalation.resolved", { permissionID: perm.permissionID, response });
     } catch (err) {
+      if (closed || resolved.has(perm.permissionID)) return;
       deps.logger.error("escalation.failed", {
         permissionID: perm.permissionID,
         error: String(err),
@@ -149,12 +181,23 @@ export function createEscalationBridge(deps: EscalationDeps) {
         })
         .catch(() => {});
     } finally {
+      controller.abort();
+      if (controllers.get(perm.permissionID) === controller) controllers.delete(perm.permissionID);
       inFlight.delete(perm.permissionID);
     }
   }
 
   return {
     handlePermission,
+    resolved(permissionID: string) {
+      resolved.add(permissionID);
+      controllers.get(permissionID)?.abort();
+      deps.state.removePermission(permissionID);
+    },
+    close() {
+      closed = true;
+      for (const controller of controllers.values()) controller.abort();
+    },
     isInFlight: (permissionID: string) => inFlight.has(permissionID),
     async catchUp() {
       await Promise.all(

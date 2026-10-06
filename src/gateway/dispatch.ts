@@ -1,6 +1,7 @@
 import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
+import { ownsNativeFailure } from "../imessage-native.js";
 import type { BurstBuffer } from "./burst.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
@@ -11,6 +12,7 @@ import { deliveryFailureKey, deliveryFailureRecovery } from "./delivery-policy.j
 import { isSuccessfulHostedSmsMessage } from "./hosted-call-registry.js";
 import { downloadMedia, mediaDir } from "./media.js";
 import { SILENT } from "./prompts.js";
+import { dispatchSlack } from "./slack.js";
 import type {
   Channel,
   GatewayLogger,
@@ -61,6 +63,7 @@ export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): P
     return true;
   }
   const type = event.eventType ?? inferType(event.body);
+  if (type?.startsWith("slack.")) return dispatchSlack(deps, event);
   switch (type) {
     case "message.received":
       return handleInbound(deps, "email", event);
@@ -159,7 +162,7 @@ export function senderAllowed(
 // address and RFC Message-ID; texts by remote number + conversation; iMessage
 // by remote number + conversation, with `content` as the body.
 function extractInbound(
-  channel: Exclude<Channel, "voice">,
+  channel: Exclude<Channel, "voice" | "slack">,
   body: Record<string, unknown>,
 ): {
   resource?: Record<string, unknown>;
@@ -205,7 +208,7 @@ function extractInbound(
 
 async function handleInbound(
   deps: DispatchDeps,
-  channel: Exclude<Channel, "voice">,
+  channel: Exclude<Channel, "voice" | "slack">,
   event: VerifiedEvent,
 ): Promise<boolean> {
   const info = extractInbound(channel, event.body);
@@ -256,6 +259,26 @@ async function handleInbound(
           : [],
         handle: identity.agentHandle,
         sourceId: info.messageId,
+        ...(channel === "imessage" &&
+        deps.config.gateway.imessageThreadedReplies &&
+        info.conversationId
+          ? {
+              imessageSource: {
+                messageId: info.messageId,
+                conversationId: info.conversationId,
+                parentMessageId:
+                  typeof info.resource?.reply_to_message_id === "string"
+                    ? info.resource.reply_to_message_id
+                    : null,
+                threadId:
+                  typeof info.resource?.thread_id === "string" ? info.resource.thread_id : null,
+                rootMessageId:
+                  typeof info.resource?.thread_root_message_id === "string"
+                    ? info.resource.thread_root_message_id
+                    : null,
+              },
+            }
+          : {}),
         from: info.from,
         initialization: metadata.phase === "initialization",
         mailBodyPending:
@@ -306,7 +329,10 @@ async function handleInbound(
   const chatKey = deps.contacts.chatKeyFor({
     // A group is one shared context for everyone in it, so the conversation -
     // not the sender's contact - keys the chat. 1:1 keeps its per-contact chat.
-    contactId: participants > 1 ? undefined : contactId,
+    contactId:
+      participants > 1 || (channel === "imessage" && deps.config.gateway.imessageThreadedReplies)
+        ? undefined
+        : contactId,
     channel,
     threadId: info.threadId,
     conversationId: info.conversationId,
@@ -347,6 +373,26 @@ async function handleInbound(
     messageId: info.messageId,
     rfcMessageId: info.rfcMessageId,
     ...resolved,
+    ...(channel === "imessage" &&
+    deps.config.gateway.imessageThreadedReplies &&
+    info.messageId &&
+    info.conversationId
+      ? {
+          imessageSource: {
+            messageId: info.messageId,
+            conversationId: info.conversationId,
+            parentMessageId:
+              typeof info.resource?.reply_to_message_id === "string"
+                ? info.resource.reply_to_message_id
+                : null,
+            threadId: typeof info.resource?.thread_id === "string" ? info.resource.thread_id : null,
+            rootMessageId:
+              typeof info.resource?.thread_root_message_id === "string"
+                ? info.resource.thread_root_message_id
+                : null,
+          },
+        }
+      : {}),
     ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
     text: info.text,
@@ -360,6 +406,11 @@ async function handleInbound(
   // A media-only message still wakes the agent.
   if (msg.text.trim() === "" && msg.mediaPaths.length === 0) {
     deps.logger.info("dispatch.empty", { channel });
+    return true;
+  }
+
+  if (msg.imessageSource) {
+    await deps.sessions.handleInbound(msg);
     return true;
   }
 
@@ -413,7 +464,7 @@ function participantNames(body: Record<string, unknown>): string[] {
 // `from`-bucket entry whose address matches the sender (mail resolves
 // identities per recipient bucket). Zero or many matches means unknown.
 function senderAgentIdentity(
-  channel: Exclude<Channel, "voice">,
+  channel: Exclude<Channel, "voice" | "slack">,
   body: Record<string, unknown>,
   from: string,
 ): SenderAgentIdentity | undefined {
@@ -521,6 +572,16 @@ async function handleDeliveryFailure(
     deps.logger.info("dispatch.hosted_sms_delivery_failed");
     return true;
   }
+  if (isImessage) {
+    const identity = await deps.inkbox.getIdentity();
+    if (
+      deps.config.gateway.imessageThreadedReplies ||
+      ownsNativeFailure(identity.id, messageId, str(r?.conversation_id))
+    ) {
+      deps.logger.info("dispatch.native_imessage_delivery_failure_context_only", { messageId });
+      return true;
+    }
+  }
   const recipientRows = Array.isArray(r?.recipients) ? r.recipients : [];
   const failedRecipient = recipientRows
     .map((item) => record(item))
@@ -542,14 +603,17 @@ async function handleDeliveryFailure(
     event.body,
   );
   const chatKey = deps.contacts.chatKeyFor({
-    contactId: participants > 1 ? undefined : contactId,
+    contactId:
+      participants > 1 || (channel === "imessage" && deps.config.gateway.imessageThreadedReplies)
+        ? undefined
+        : contactId,
     conversationId: companionConversationId,
     threadId: channel === "email" ? companionConversationId : undefined,
     channel: (type.startsWith("imessage")
       ? "imessage"
       : type.startsWith("text")
         ? "sms"
-        : "email") as Exclude<Channel, "voice">,
+        : "email") as Exclude<Channel, "voice" | "slack">,
     from,
   });
   const reason =
@@ -581,7 +645,7 @@ async function handleDeliveryFailure(
 const conversationKinds = new WeakMap<InkboxRuntime, Map<string, number>>();
 async function conversationParticipants(
   deps: DispatchDeps,
-  channel: Exclude<Channel, "voice">,
+  channel: Exclude<Channel, "voice" | "slack">,
   id: string | undefined,
   body: Record<string, unknown>,
 ): Promise<number> {

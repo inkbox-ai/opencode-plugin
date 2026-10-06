@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.16 (unreleased)
+
+- Adds opt-in Slack setup, six identity-owned tools, signed inbound routing, and channel-wide Companion context with exact source-thread replies.
+- Uses inline eyes only for top-level replies and native working/awaiting-input status in Slack subthreads, including approval and shutdown cleanup.
+- Adds opt-in native iMessage replies, durable source admission, bounded first-source bursts, serialized follow-ups, bounded thread reads, and observed-send deduplication.
+- Preserves unknown submission/send outcomes without replay. Native execution must be positively fenced before later work can proceed; diagnostics separate liveness from queue readiness.
+- Serializes remote approval prompts, preserves control and fresh-message routing, and binds shared-route responses to the prompted author.
+- Keeps Vault tools optional: metadata remains locked-safe, individual credentials and grants are refreshed, login TOTP seeds are redacted, and the generic credential read requires exact-name enablement.
+- Requires published `@inkbox/sdk` 0.7.14. Migrate the default Vault key environment variable to `INKBOX_OPENCODE_VAULT_KEY`; a custom `vault.keyEnvVar` remains supported.
+
 ## 0.2.15 (unreleased)
 
 - Adds Companion mode for sponsored email, MMS, and iMessage groups with isolated conversation sessions and one complete initialization input.

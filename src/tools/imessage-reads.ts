@@ -64,6 +64,65 @@ type MarkIMessageConversationReadArgs = z.infer<
 export function imessageReadTools(deps: ToolDeps): RegisteredTool[] {
   const { runtime } = deps;
   return [
+    ...(deps.config.gateway?.imessageThreadedReplies
+      ? ([
+          {
+            name: "inkbox_get_imessage_thread",
+            group: "imessage",
+            defaultEnabled: true,
+            definition: {
+              description:
+                "Read a bounded chronological native iMessage thread from a visible message ID. Follow nextCursor; a native thread ID is opaque and is not a message ID.",
+              args: {
+                messageId: z.string().min(1),
+                limit: z.number().int().min(1).max(100).optional(),
+                cursor: z.string().min(1).optional(),
+              },
+              async execute(args: { messageId: string; limit?: number; cursor?: string }) {
+                return runTool(async () =>
+                  formatJson(
+                    await (await runtime.getIdentity()).getIMessageThread(args.messageId, {
+                      limit: args.limit ?? 50,
+                      cursor: args.cursor,
+                    }),
+                  ),
+                );
+              },
+            },
+          },
+          {
+            name: "inkbox_get_imessage_conversation_thread",
+            group: "imessage",
+            defaultEnabled: true,
+            definition: {
+              description:
+                "Read a bounded chronological native thread by its opaque thread ID within a visible iMessage conversation. Does not widen Companion history.",
+              args: {
+                conversationId: z.string().min(1),
+                threadId: z.string().min(1),
+                limit: z.number().int().min(1).max(100).optional(),
+                cursor: z.string().min(1).optional(),
+              },
+              async execute(args: {
+                conversationId: string;
+                threadId: string;
+                limit?: number;
+                cursor?: string;
+              }) {
+                return runTool(async () =>
+                  formatJson(
+                    await (await runtime.getIdentity()).getIMessageConversationThread(
+                      args.conversationId,
+                      args.threadId,
+                      { limit: args.limit ?? 50, cursor: args.cursor },
+                    ),
+                  ),
+                );
+              },
+            },
+          },
+        ] satisfies RegisteredTool[])
+      : []),
     {
       name: "inkbox_list_imessage_conversations",
       group: "imessage",
