@@ -132,6 +132,16 @@ describe("Slack signed source and published SDK contract", () => {
     ).rejects.toThrow("identity");
     expect(sdk.slack.sendMessage).toHaveBeenCalledTimes(1);
   });
+  it("rejects a changed connection workspace before a saved reply is sent", async () => {
+    const sdk = client();
+    sdk.slack.listConnections.mockResolvedValue({
+      connections: [{ ...connection, workspaceId: "TOTHER" }],
+    });
+    await expect(
+      sendSlackReply(sdk as any, parseSlack(event(), identityId)!, "saved answer"),
+    ).rejects.toThrow("identity");
+    expect(sdk.slack.sendMessage).not.toHaveBeenCalled();
+  });
   it("adds only missing subscription events without replacing unrelated delivery", async () => {
     const update = vi.fn(),
       create = vi.fn();

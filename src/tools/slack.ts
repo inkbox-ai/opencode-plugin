@@ -102,6 +102,7 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
                 summary: "Send a Slack message",
                 metadata: { textChars: args.text.length },
               });
+              await ownSlackConnection(client, identity.id, args.connectionId);
               result = await client.slack.sendMessage(args.connectionId, {
                 conversationId: args.conversationId,
                 text: args.text,

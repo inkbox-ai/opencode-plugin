@@ -111,6 +111,7 @@ export async function ownSlackConnection(
   client: Inkbox,
   identityId: string,
   connectionId: string,
+  workspaceId?: string,
 ): Promise<SlackConnection> {
   const matches = (await client.slack.listConnections(identityId)).connections.filter(
     (c) => c.id === connectionId,
@@ -118,7 +119,8 @@ export async function ownSlackConnection(
   if (
     matches.length !== 1 ||
     matches[0]?.identityId !== identityId ||
-    matches[0]?.status !== "connected"
+    matches[0]?.status !== "connected" ||
+    (workspaceId !== undefined && matches[0]?.workspaceId !== workspaceId)
   )
     throw new Error("Slack connection is not connected to this identity.");
   return matches[0]!;
@@ -157,7 +159,7 @@ export async function sendSlackReply(
   text: string,
 ): Promise<string> {
   slackText(text);
-  await ownSlackConnection(client, route.identityId, route.connectionId);
+  await ownSlackConnection(client, route.identityId, route.connectionId, route.workspaceId);
   const key = createHash("sha256")
     .update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text]))
     .digest("hex");

@@ -146,7 +146,7 @@ export function createSessionManager(
       if (route) {
         if ((await deps.inkbox.getIdentity()).id !== route.identityId)
           throw new Error("Slack activity identity changed.");
-        await ownSlackConnection(client, route.identityId, route.connectionId);
+        await ownSlackConnection(client, route.identityId, route.connectionId, route.workspaceId);
       }
       return client.slack;
     },
@@ -167,7 +167,7 @@ export function createSessionManager(
     const identity = await deps.inkbox.getIdentity();
     if (identity.id !== route.identityId) throw new Error("Slack identity changed.");
     const client = await deps.inkbox.getClient();
-    await ownSlackConnection(client, identity.id, route.connectionId);
+    await ownSlackConnection(client, identity.id, route.connectionId, route.workspaceId);
     const c = turn.companion;
     if (c?.metadata.activation_id) {
       const page = await client.companion.activationMessages(c.handle, c.metadata.activation_id, {

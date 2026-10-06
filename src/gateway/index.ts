@@ -14,7 +14,13 @@ import { createHostedCallCompletion } from "./hosted-call-completion.js";
 import { createPendingReplies } from "./pending.js";
 import { queueReadiness } from "./readiness.js";
 import { deliverReply } from "./reply.js";
-import { companionWakes, controlText, isPermissionReply, sameAuthor } from "./response-policy.js";
+import {
+  companionWakes,
+  controlText,
+  isPermissionReply,
+  mentionsAgent,
+  sameAuthor,
+} from "./response-policy.js";
 import { createWebhookServer } from "./server.js";
 import { createSessionManager } from "./sessions.js";
 import { createStateStore } from "./state.js";
@@ -387,6 +393,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
         };
         const raw = msg.rawText ?? msg.text;
+        const admitted =
+          !msg.reaction &&
+          (!msg.group ||
+            msg.channel === "email" ||
+            g.groupReplyMode !== "mention" ||
+            (msg.slack
+              ? msg.slack.direct || msg.slack.mentioned
+              : mentionsAgent(raw, (await opts.inkbox.getIdentity()).agentHandle)));
+        if (!admitted) {
+          await sessions.handleInbound(msg);
+          return;
+        }
         if (
           !msg.reaction &&
           isPermissionReply(raw) &&
@@ -476,7 +494,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
-        if (!msg.reaction && !msg.group)
+        if (admitted)
           pending.cancelFor(msg.chatKey, {
             sender: msg.from,
             channel: msg.channel,

@@ -11,7 +11,7 @@ const hooks = vi.hoisted(() => ({
   manager: undefined as any,
   escalation: undefined as any,
   server: undefined as any,
-  inbound: vi.fn(async () => {}),
+  inbound: vi.fn(async (_message: any) => {}),
   abort: vi.fn(async () => true),
   reset: vi.fn(async (_key: string) => {}),
 }));
@@ -99,7 +99,7 @@ async function start() {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
-  return { config, identity };
+  return { config, identity, inkbox };
 }
 function inbound(text: string, sender: string, channel = "sms", group = false) {
   return hooks.server.onEvent({
@@ -151,7 +151,7 @@ it("binds a shared group's approval to its asked author and requires an approval
   };
   const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target);
   await inbound("allow", "+15550000002", "sms", true);
-  await inbound("unrelated conversation", target.sender ?? "", "sms", true);
+  await inbound("unrelated conversation", "+15550000002", "sms", true);
   expect(hooks.inbound).toHaveBeenCalledTimes(2);
   await inbound("allow", target.sender ?? "", "sms", true);
   expect(await answer).toBe("allow");
@@ -297,4 +297,106 @@ it("resets the old ordinary group turn before a valid asked-author resume select
   await inbound("2", sender, "sms", true);
   expect(hooks.reset).toHaveBeenCalledExactlyOnceWith("contact-1");
   expect(hooks.manager.state.getSession("contact-1")).toBe("session-b");
+});
+
+it("cancels only an admitted same-author group instruction's obsolete permission", async () => {
+  const d = await start();
+  d.config.gateway.groupReplyMode = "mention";
+  const target: ReplyTarget = {
+    channel: "sms",
+    conversationId: "group-1",
+    sender: "+15550000001",
+    group: true,
+  };
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Approve?", target)
+    .then((value: unknown) => {
+      settled = true;
+      return value;
+    });
+  await inbound("yes", target.sender!, "sms", true);
+  await inbound("@agent do another task", "+15550000002", "sms", true);
+  expect(settled).toBe(false);
+  await inbound("@agent implement the new request", target.sender!, "sms", true);
+  expect(await answer).toBeUndefined();
+  expect(hooks.inbound).toHaveBeenCalledTimes(3);
+  expect(hooks.inbound.mock.calls[2][0]).toMatchObject({
+    text: "@agent implement the new request",
+  });
+  expect(hooks.abort).not.toHaveBeenCalled();
+});
+
+it("keeps ordinary Slack approval ownership scoped to admitted actor and native thread", async () => {
+  const d = await start();
+  d.config.gateway.slackEnabled = true;
+  d.config.gateway.groupReplyMode = "mention";
+  const route = {
+    identityId: "identity",
+    connectionId: "connection",
+    workspaceId: "TTEAM",
+    conversationId: "CROOM",
+    actorId: "UPERSON",
+    messageTs: "100.000001",
+    threadTs: "100.000001",
+    sourceEventId: "permission-owner",
+    author: "TTEAM:UPERSON",
+    mentioned: true,
+    addressed: true,
+    direct: false,
+    rawText: "question",
+    text: "question",
+  };
+  const sendMessage = vi.fn(async () => ({ status: "sent", id: "action" }));
+  d.inkbox.getClient = async () =>
+    ({
+      slack: {
+        listConnections: async () => ({
+          connections: [
+            {
+              id: route.connectionId,
+              identityId: route.identityId,
+              workspaceId: route.workspaceId,
+              status: "connected",
+            },
+          ],
+        }),
+        sendMessage,
+      },
+    }) as any;
+  const target: ReplyTarget = { channel: "slack", slack: route, sender: route.author, group: true };
+  let settled = false;
+  const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target).then((v: unknown) => {
+    settled = true;
+    return v;
+  });
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+  const message = async (text: string, changes = {}) => {
+    const slack = { ...route, ...changes };
+    await hooks.server.onEvent({
+      body: {
+        message: {
+          chatKey: "contact-1",
+          channel: "slack",
+          from: slack.author,
+          slack,
+          text,
+          rawText: text,
+          group: { participantCount: 2 },
+          mediaPaths: [],
+        },
+      },
+    });
+  };
+  await message("yes", { mentioned: false });
+  await message("new task", { author: "TTEAM:UOTHER", actorId: "UOTHER" });
+  await message("new task", { threadTs: "200.000002" });
+  expect(settled).toBe(false);
+  await message("implement this new request");
+  expect(await answer).toBeUndefined();
+  expect(hooks.inbound).toHaveBeenCalledTimes(4);
+  expect(
+    hooks.inbound.mock.calls.filter(([m]) => m.text === "implement this new request"),
+  ).toHaveLength(1);
+  expect(hooks.abort).not.toHaveBeenCalled();
 });
