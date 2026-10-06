@@ -85,23 +85,33 @@ async function until(predicate, detail) {
   );
 }
 try {
-  const inbound = (messageId, text, threadId = null) => ({
+  const inbound = (messageId, text, parentMessageId = null) => ({
     channel: "imessage",
     chatKey: "native-conversation",
     from: "+15550000001",
     conversationId: "conversation",
     messageId,
-    imessageSource: { messageId, conversationId: "conversation", threadId },
+    imessageSource: {
+      messageId,
+      conversationId: "conversation",
+      threadId: `opaque-${messageId}`,
+      rootMessageId: parentMessageId ?? messageId,
+      parentMessageId,
+    },
     text,
     mediaPaths: [],
   });
   await manager.handleInbound(inbound("first", "smoke-aabbcc11"));
   await manager.handleInbound(inbound("fragment", "same thought"));
-  await manager.handleInbound(inbound("next", "smoke-aabbcc22", "opaque-thread"));
+  await manager.handleInbound(inbound("next", "smoke-aabbcc22", "earlier-source"));
   assert.equal(
     state.listTurns().length,
     2,
     "durable burst receipts must exist before acceptance returns",
+  );
+  assert.deepEqual(
+    state.listTurns().map((turn) => turn.sourceIds),
+    [["first", "fragment"], ["next"]],
   );
   await until(() => sends.length === 2, "serialized native replies");
   assert.deepEqual(

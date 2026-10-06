@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inkbox } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultGatewayConfig } from "../../src/config.js";
+import { dispatchSlack } from "../../src/gateway/slack.js";
 import {
   parseSlack,
   prepareSlackSource,
@@ -70,6 +72,124 @@ function client() {
 }
 afterEach(() => vi.unstubAllGlobals());
 describe("Slack signed source and published SDK contract", () => {
+  it("keeps ordinary approval authors stable when optional home-workspace profiles appear or disappear", () => {
+    expect(parseSlack(event(), identityId)?.author).toBe("TINSTALL:UPERSON");
+    expect(parseSlack(event({ actor_profile: undefined }), identityId)?.author).toBe(
+      "TINSTALL:UPERSON",
+    );
+  });
+  it("ignores a profile belonging to another Slack actor", () => {
+    const route = parseSlack(
+      event({
+        actor_profile: {
+          id: "UOTHER",
+          team_id: "TOTHER",
+          profile: { email: "other@example.test" },
+        },
+      }),
+      identityId,
+    )!;
+    expect(route.author).toBe("TINSTALL:UPERSON");
+    expect(route.senderContext).toBeUndefined();
+  });
+  it.each(["UPERSON", "UOTHER"])(
+    "keeps ordinary Stop independent of profile lookup for actor %s",
+    async (actorId) => {
+      const sdk = client();
+      sdk.slack.getUser.mockRejectedValue(new Error("profile lookup unavailable"));
+      const stopSlack = vi.fn();
+      const body = {
+        ...event({
+          actor_id: actorId,
+          actor_profile: undefined,
+          thread_ts: "1770000000.000123",
+          event: { type: "agent_session_stopped" },
+        }),
+        event_type: "slack.session_stopped",
+      };
+      await dispatchSlack(
+        {
+          config: {
+            gateway: {
+              ...defaultGatewayConfig(),
+              slackEnabled: true,
+              allowedUsers: ["TINSTALL:UPERSON"],
+              allowAllUsers: false,
+            },
+          },
+          inkbox: { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk },
+          sessions: { stopSlack },
+        } as any,
+        { body, provider: "inkbox", verified: true, headers: {}, requestId: "stop" },
+      );
+      expect(sdk.slack.getUser).not.toHaveBeenCalled();
+      expect(stopSlack).toHaveBeenCalledTimes(actorId === "UPERSON" ? 1 : 0);
+      if (actorId === "UPERSON") expect(stopSlack.mock.calls[0][0].author).toBe("TINSTALL:UPERSON");
+    },
+  );
+  it.each(["THOME:UPERSON", "TINSTALL:UPERSON", "UPERSON", "TOTHER:UPERSON", "THOME:UOTHER"])(
+    "checks Companion ingress against canonical actor and installation aliases: %s",
+    async (allowed) => {
+      const sdk = client();
+      sdk.slack.getUser.mockResolvedValue({ id: "UPERSON", team_id: "THOME" });
+      const acceptCompanion = vi.fn(),
+        stopSlack = vi.fn();
+      const deps: any = {
+        config: {
+          gateway: {
+            ...defaultGatewayConfig(),
+            slackEnabled: true,
+            allowedUsers: [allowed],
+            allowAllUsers: false,
+          },
+        },
+        inkbox: {
+          getIdentity: async () => ({ id: identityId, agentHandle: "example-agent" }),
+          getClient: async () => sdk,
+        },
+        sessions: { acceptCompanion, stopSlack },
+      };
+      const body = {
+        ...event({ actor_profile: undefined }),
+        companion: {
+          channel: "slack",
+          scope_id: "scope",
+          conversation_id: "conversation",
+          activation_id: "activation",
+          phase: "live",
+          sequence: 2,
+        },
+      };
+      await dispatchSlack(deps, {
+        body,
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "request",
+      });
+      const permitted = ["THOME:UPERSON", "TINSTALL:UPERSON", "UPERSON"].includes(allowed);
+      expect(acceptCompanion).toHaveBeenCalledTimes(permitted ? 1 : 0);
+      if (permitted) expect(acceptCompanion.mock.calls[0][0].from).toBe("THOME:UPERSON");
+      const stop = {
+        ...body,
+        event_type: "slack.session_stopped",
+        data: {
+          ...body.data,
+          thread_ts: "1770000000.000123",
+          event: { type: "agent_session_stopped" },
+        },
+      };
+      await dispatchSlack(deps, {
+        body: stop,
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "stop",
+      });
+      expect(stopSlack).toHaveBeenCalledTimes(permitted ? 1 : 0);
+      if (permitted) expect(stopSlack.mock.calls[0][0].author).toBe("THOME:UPERSON");
+    },
+  );
   it.each(["denied", "unknown", "sponsored", "other"])(
     "drops %s ordinary sender access",
     (sender_access) => {

@@ -4,9 +4,11 @@
 
 - Adds opt-in Slack setup, six identity-owned tools, signed inbound routing, and channel-wide Companion context with exact source-thread replies.
 - Uses inline eyes only for top-level replies and native working/awaiting-input status in Slack subthreads, including approval and shutdown cleanup.
+- Ignores unengaged Slack channel chatter, preserves bounded sender-profile context, honors canonical home-workspace allowlists, and marks failed inline replies with an X.
 - Verifies native iMessage source/backend support before send checkpoints or uploads; doctor reports read-only channel capability and webhook readiness without claiming delivery.
 - Adds opt-in native iMessage replies, durable source admission, bounded first-source bursts, serialized follow-ups, bounded thread reads, and observed-send deduplication.
 - Preserves unknown submission/send outcomes without replay. Native execution must be positively fenced before later work can proceed; diagnostics separate liveness from queue readiness.
+- Releases definite pre-submission failures for later valid work, retains proactive iMessage failures as quiet context, and keeps reactions and compatible message bursts in their native conversation queue.
 - Serializes remote approval prompts, preserves control and fresh-message routing, and binds shared-route responses to the prompted author.
 - Keeps Vault tools optional: metadata remains locked-safe, individual credentials and grants are refreshed, login TOTP seeds are redacted, and the generic credential read requires exact-name enablement.
 - Requires published `@inkbox/sdk` 0.7.14. Migrate the default Vault key environment variable to `INKBOX_OPENCODE_VAULT_KEY`; a custom `vault.keyEnvVar` remains supported.

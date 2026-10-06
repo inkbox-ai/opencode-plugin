@@ -370,7 +370,8 @@ inbound events. What it does:
 - **Email / SMS / iMessage** arrive as sessions keyed per contact (one person,
   one ongoing conversation across channels); replies go back on the channel the
   message came in on, threaded for email. Delivery failures wake the agent to
-  retry or switch channels.
+  retry or switch channels, except native iMessage delivery failures, which are
+  retained as quiet context without an automatic retry.
 - **Contact memories** from verified inbound events are included as optional
   background context by default. Set `gateway.contactMemories: false` or
   `INKBOX_CONTACT_MEMORIES_ENABLED=false` to omit them from every channel.
@@ -474,15 +475,17 @@ Slack is off by default. Run `inkbox-opencode setup` to enable it, select the ap
 
 The six Slack tools are `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Search covers retained message text, not all workspace history or files; follow `nextCursor` even when a page is empty. Reuse the same idempotency key for a send retry and inspect unknown actions before doing anything else.
 
-Slack Companion context spans the channel within one identity, installation, and activation. Replies and approvals remain bound to the current native thread; a null thread stays top-level. The existing Safe/Relaxed and Auto/Mention settings apply. Quiet context makes no model/tool/activity calls. Local Slack allowlists may use a bare actor ID or `WORKSPACE_ID:ACTOR_ID`; verified profile fields provide context, never additional authority.
+Ordinary Slack channel traffic starts a session only when addressed; later messages in that engaged thread can continue it. Unmentioned traffic in unrelated threads does not wake the agent or display activity. DMs and group DMs do not require a prior session.
 
-Top-level inline replies show eyes while working or awaiting approval. Native thread replies use Slack's working/awaiting-input/ready indicator, never eyes. Indicators are best-effort and cannot prove visible client behavior: verify the actual Slack UI during acceptance.
+Slack Companion context spans the channel within one identity, installation, and activation. Replies and approvals remain bound to the current native thread; a null thread stays top-level. The existing Safe/Relaxed and Auto/Mention settings apply. Quiet context makes no model/tool/activity calls. Local Slack allowlists may use a bare actor ID or the installation-workspace `WORKSPACE_ID:ACTOR_ID`; Companion also recognizes the canonical home-workspace author. Matching sender-profile fields provide bounded context, never additional authority.
+
+Top-level inline replies show eyes while working or awaiting approval; a failed reply clears eyes and adds an X. Native thread replies use Slack's working/awaiting-input/ready indicator, never eyes. Indicators are best-effort and cannot prove visible client behavior: verify the actual Slack UI during acceptance.
 
 Set `INKBOX_IMESSAGE_THREADED_REPLIES=true` (or `gateway.imessageThreadedReplies`) to target known-source replies natively. Compatible fragments share a 750 ms quiet window capped at 2 seconds and reply to the first source. Different senders, explicit thread contexts, media, and Companion receipts are separate. Follow-ups queue without interrupting the active native turn. `inkbox_get_imessage_thread` and `inkbox_get_imessage_conversation_thread` provide bounded chronological reads; opaque thread IDs are not message IDs.
 
 Before a targeted send or local media upload, the bridge verifies the admitted source conversation and reads at most one native thread item. Unsupported endpoints fail explicitly; fetched history is not injected into Companion context. Safe read failures retain the completed reply for retry without another model turn.
 
-The bridge owns automatic and source-correlated tool reply targets and allows only API-controlled same-conversation fallback. Proactive turns do not inherit an earlier target. Durable records checkpoint admission, model output, and send attempts. An uncertain send is retained without plain resend or model replay; it is not proof of failure or of visible phone delivery. Check the receiving phone for native UI acceptance.
+The bridge owns automatic and source-correlated tool reply targets and allows only API-controlled same-conversation fallback. Proactive turns do not inherit an earlier target. Native messages and reactions share the conversation session; reactions do not inherit a native reply source or interrupt active work. Delivery failures, including unmatched proactive sends, are retained as quiet context for later input, never automatic resend requests. Durable records checkpoint admission, model output, and send attempts. An uncertain send is retained without plain resend or model replay; it is not proof of failure or of visible phone delivery. Check the receiving phone for native UI acceptance.
 
 Approval prompts serialize per conversation. Only explicit approval tokens answer them; Stop and fresh instructions are not swallowed. Shared-channel replies require the prompted author and exact native route. `/health`, the CLI doctor, and `inkbox_doctor` expose pending/unconfirmed/blocked counts separately from process liveness. Never delete the durable journal to clear an uncertainty warning.
 

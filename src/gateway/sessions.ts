@@ -191,7 +191,7 @@ export function createSessionManager(
     if (!c.slack) return true;
     const actorId = author.split(":")[1];
     if (!actorId) return false;
-    return slackSenderAllowed({ ...c.slack, actorId }, deps.config);
+    return slackSenderAllowed({ ...c.slack, actorId, author }, deps.config);
   }
   const generations = new Map<string, number>();
 
@@ -888,6 +888,8 @@ export function createSessionManager(
         }
         if (!current.replyTarget?.imessageSource && !current.replyTarget?.slack)
           recoverReply(current, err, output);
+        settle(current.id, output);
+        return;
       }
     }
     if (current.deliver && output === undefined)
@@ -977,6 +979,11 @@ export function createSessionManager(
             retryCount,
             retryAt: undefined,
             state: latest.companion ? "paused" : "failed",
+            // These persisted states precede the submission checkpoint. Keep
+            // the failed receipt without blocking new, independently valid work.
+            ...(["hydrating", "queued"].includes(latest.state) && !latest.uncertainStage
+              ? { executionFenced: true }
+              : {}),
             error: String(err),
           });
           settle(id, undefined, err);
@@ -1474,9 +1481,13 @@ export function createSessionManager(
                     ? JSON.stringify([
                         msg.from,
                         msg.imessageSource.conversationId,
-                        msg.imessageSource.parentMessageId,
-                        msg.imessageSource.threadId,
-                        msg.imessageSource.rootMessageId,
+                        msg.imessageSource.parentMessageId ||
+                        (msg.imessageSource.rootMessageId &&
+                          msg.imessageSource.rootMessageId !== msg.imessageSource.messageId)
+                          ? msg.imessageSource.rootMessageId ||
+                            msg.imessageSource.threadId ||
+                            msg.imessageSource.parentMessageId
+                          : null,
                       ])
                     : undefined,
                 burstTextChars: msg.text.length,
@@ -1539,7 +1550,7 @@ export function createSessionManager(
         .listTurns()
         .filter(
           (candidate) =>
-            !(msg.slack || msg.imessageSource) &&
+            !(msg.slack || (msg.channel === "imessage" && g.imessageThreadedReplies)) &&
             candidate.chatKey === msg.chatKey &&
             candidate.kind === "normal" &&
             Boolean(candidate.ownerId) &&

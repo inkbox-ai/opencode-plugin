@@ -168,7 +168,7 @@ export function noteNativeFailure(
   messageId?: string,
   conversationId?: string,
   store = createStateStore(),
-): void {
+): boolean {
   const sends = Object.values((store.read().imessageSends ?? {}) as Record<string, NativeSend>);
   const exact = sends.filter(
     (send) => send.identityId === identityId && messageId && send.messageId === messageId,
@@ -184,7 +184,7 @@ export function noteNativeFailure(
       );
   // A callback can arrive before the send response. Correlate only a unique
   // durable effect; a conversation match alone must not pick an arbitrary job.
-  if (candidates.length !== 1) return;
+  if (candidates.length !== 1) return false;
   const send = candidates[0]!;
   const owners = store
     .listTurns()
@@ -194,7 +194,7 @@ export function noteNativeFailure(
         turn.replyTarget.imessageSource.conversationId === send.conversationId,
     );
   const keys = new Set(owners.map((turn) => turn.chatKey));
-  if (keys.size !== 1) return;
+  if (keys.size !== 1) return false;
   const chatKey = owners[0]!.chatKey;
   const id = `native-failure:${send.key}`;
   store.reserveTurns([
@@ -210,4 +210,5 @@ export function noteNativeFailure(
       updatedAt: Date.now(),
     },
   ]);
+  return true;
 }

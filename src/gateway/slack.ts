@@ -2,6 +2,7 @@ import {
   ownSlackConnection,
   parseSlack,
   prepareSlackSource,
+  resolveSlackAuthor,
   type SlackRoute,
   slackControlText,
   slackRouteKey,
@@ -21,7 +22,7 @@ export function slackSenderAllowed(route: SlackRoute, config: DispatchDeps["conf
     g.allowAllUsers ||
     !g.allowedUsers.length ||
     g.allowedUsers.some((value) =>
-      [route.actorId, `${route.workspaceId}:${route.actorId}`].includes(value),
+      [route.author, route.actorId, `${route.workspaceId}:${route.actorId}`].includes(value),
     )
   );
 }
@@ -34,12 +35,17 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
   const connection = await ownSlackConnection(client, identity.id, route.connectionId);
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack connection workspace mismatch.");
-  if (!slackSenderAllowed(route, deps.config)) return true;
   const nativeText = slackControlText(route, connection.botUserId);
   if (event.body.companion) {
     const metadata = companionMetadata(event.body.companion);
     if (metadata.channel !== "slack") throw new Error("Slack Companion channel mismatch.");
     if (route.nativeStop) {
+      await resolveSlackAuthor(
+        client,
+        route,
+        (event.body.data as Record<string, unknown>).actor_profile,
+      );
+      if (!slackSenderAllowed(route, deps.config)) return true;
       if (!metadata.activation_id || !deps.sessions.stopSlack) return true;
       await deps.sessions.stopSlack(
         route,
@@ -48,6 +54,7 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
       return true;
     }
     const source = await prepareSlackSource(client, identity.id, event.body);
+    if (!slackSenderAllowed(source.route, deps.config)) return true;
     const turn = {
       metadata,
       identityId: identity.id,
@@ -68,14 +75,20 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     });
     return true;
   }
+  if (!slackSenderAllowed(route, deps.config)) return true;
   if (route.nativeStop) {
     await deps.sessions.stopSlack?.(route);
     return true;
   }
+  const chatKey = `slack:${encodeURIComponent(deps.config.baseUrl ?? "https://inkbox.ai")}:${slackRouteKey(route)}`;
+  const engagement = deps.sessions.status(chatKey);
+  // Quiet channel traffic cannot start a session, invoke controls or display
+  // activity. An admitted turn counts even before its host session is created.
+  if (!route.addressed && !engagement.sessionID && !engagement.busy) return true;
   await deps.sessions.handleInbound({
     channel: "slack",
     slack: route,
-    chatKey: `slack:${encodeURIComponent(deps.config.baseUrl ?? "https://inkbox.ai")}:${slackRouteKey(route)}`,
+    chatKey,
     from: route.author,
     messageId: route.sourceEventId,
     conversationId: route.conversationId,

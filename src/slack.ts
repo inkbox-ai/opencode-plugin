@@ -28,7 +28,19 @@ export type SlackRoute = {
   senderAccess?: string;
   contactId?: string;
   nativeStop?: boolean;
+  senderContext?: Partial<
+    Record<"display_name" | "real_name" | "email" | "phone" | "title", string>
+  >;
 };
+function senderContext(profile: unknown, actorId: string): SlackRoute["senderContext"] {
+  if (!record(profile) || profile.id !== actorId || !record(profile.profile)) return;
+  const context: NonNullable<SlackRoute["senderContext"]> = {};
+  for (const key of ["display_name", "real_name", "email", "phone", "title"] as const) {
+    const value = profile.profile[key];
+    if (nonempty(value)) context[key] = value.slice(0, 500);
+  }
+  return Object.keys(context).length ? context : undefined;
+}
 const record = (v: unknown): v is Record<string, any> =>
   Boolean(v) && typeof v === "object" && !Array.isArray(v);
 const nonempty = (v: unknown): v is string =>
@@ -92,7 +104,20 @@ export function parseSlack(event: Record<string, any>, identityId: string): Slac
     senderAccess: d.sender_access,
     contactId: typeof d.contact_id === "string" ? d.contact_id : undefined,
     nativeStop: stop,
+    senderContext: senderContext(d.actor_profile, d.actor_id),
   };
+}
+export async function resolveSlackAuthor(
+  client: Inkbox,
+  route: SlackRoute,
+  profile: any,
+): Promise<void> {
+  if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(profile?.team_id ?? ""))
+    profile = await client.slack.getUser(route.connectionId, route.actorId);
+  if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(profile?.team_id ?? ""))
+    throw new Error("Slack sender home workspace is unavailable.");
+  route.author = `${profile.team_id}:${route.actorId}`;
+  route.senderContext = senderContext(profile, route.actorId);
 }
 export function slackRouteKey(route: SlackRoute): string {
   return JSON.stringify([
@@ -245,12 +270,7 @@ export async function prepareSlackSource(
     thread(source.messageTs, source.threadTs) !== route.threadTs
   )
     throw new Error("Slack archived source does not match the current message.");
-  let profile = event.data.actor_profile;
-  if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(profile?.team_id ?? ""))
-    profile = await client.slack.getUser(route.connectionId, route.actorId);
-  if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(profile?.team_id ?? ""))
-    throw new Error("Slack sender home workspace is unavailable.");
-  route.author = `${profile.team_id}:${route.actorId}`;
+  await resolveSlackAuthor(client, route, event.data.actor_profile);
   return {
     id: source.id,
     author: route.author,

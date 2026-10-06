@@ -343,6 +343,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         inkbox: opts.inkbox,
         contacts,
         sessions: wrapSessions(),
+        state,
         notify,
         logger,
         bursts,
