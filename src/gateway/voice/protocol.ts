@@ -44,6 +44,29 @@ export function sendAudioDone(ws: WebSocket): void {
   ws.send(JSON.stringify({ event: "audio_done" }));
 }
 
+// Client-owned speech publishes its final transcripts on the same call socket.
+export function sendTranscript(
+  ws: WebSocket,
+  party: "local" | "remote",
+  text: string,
+  onError: () => void,
+): boolean {
+  const value = text.trim();
+  if (!value || ws.readyState !== ws.OPEN) return false;
+  try {
+    ws.send(
+      JSON.stringify({ event: "transcript", party, text: value, is_final: true }),
+      (error) => {
+        if (error) onError();
+      },
+    );
+    return true;
+  } catch {
+    onError();
+    return false;
+  }
+}
+
 // Drop queued outbound audio on the phone side — sent on caller barge-in so
 // the agent goes quiet the moment the caller starts talking.
 export function sendClear(ws: WebSocket): void {

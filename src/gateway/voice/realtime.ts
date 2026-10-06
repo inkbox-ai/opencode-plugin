@@ -211,6 +211,20 @@ export function openRealtimeBridge(
   // name + call id, arguments.delta streams the JSON, arguments.done fires the
   // dispatch. Accumulate by item/call id.
   const fnCalls = new Map<string, FnCall>();
+  const finalTranscriptItems = new Set<string>();
+  const emitTranscript = (party: "caller" | "agent", evt: any) => {
+    const text = String(evt.transcript ?? "").trim();
+    if (!text) return;
+    // Event aliases/replays identify the same final by item, not spoken text:
+    // different turns may legitimately repeat the same words.
+    const item = evt.item_id || evt.response_id;
+    if (typeof item === "string") {
+      const key = JSON.stringify([party, item, evt.output_index ?? 0, evt.content_index ?? 0]);
+      if (finalTranscriptItems.has(key)) return;
+      finalTranscriptItems.add(key);
+    }
+    cb.onTranscript?.(party, text);
+  };
   let readySettled = false;
   let resolveReady: () => void;
   let rejectReady: (err: unknown) => void;
@@ -265,6 +279,7 @@ export function openRealtimeBridge(
   });
 
   ws.on("message", (data) => {
+    if (closed) return;
     let evt: any;
     try {
       evt = JSON.parse(String(data));
@@ -319,14 +334,13 @@ export function openRealtimeBridge(
         break;
       }
       case "conversation.item.input_audio_transcription.completed": {
-        const text = String(evt.transcript ?? "").trim();
-        if (text) cb.onTranscript?.("caller", text);
+        emitTranscript("caller", evt);
         break;
       }
       case "response.output_audio_transcript.done":
       case "response.audio_transcript.done": {
         const text = String(evt.transcript ?? "").trim();
-        if (text) cb.onTranscript?.("agent", text);
+        emitTranscript("agent", evt);
         const responseId = String(evt.response_id ?? evt.response?.id ?? "");
         const owned = ownedResponses.get(responseId);
         if (owned && text) {
@@ -518,6 +532,7 @@ export function openRealtimeBridge(
       pendingWork.clear();
       responseOwners.length = 0;
       ownedResponses.clear();
+      finalTranscriptItems.clear();
       try {
         ws.close();
       } catch {

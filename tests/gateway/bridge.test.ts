@@ -97,6 +97,41 @@ async function waitForCalls(mock: ReturnType<typeof vi.fn>, count: number): Prom
 }
 
 describe("call bridge signed context", () => {
+  it("forwards realtime final transcripts only to their active call socket", async () => {
+    const { bridgeDeps } = deps(true);
+    let callbacks: RealtimeCallbacks | undefined;
+    const openRealtime = vi.fn((_cfg: RealtimeConfig, _registry, cb: RealtimeCallbacks) => {
+      callbacks = cb;
+      cb.onTranscript?.("agent", "before attachment");
+      return {
+        ready: Promise.resolve(),
+        start: vi.fn(),
+        pushAudio: vi.fn(),
+        setAudioFormat: vi.fn(),
+        close: vi.fn(async () => {}),
+      };
+    });
+    process.env.INKBOX_REALTIME_API_KEY = "test-key";
+    const ws = await connect(createCallBridge(bridgeDeps, openRealtime as never));
+    const frames: unknown[] = [];
+    ws.on("message", (data) => frames.push(JSON.parse(String(data))));
+    callbacks?.onTranscript?.("caller", "caller request");
+    callbacks?.onTranscript?.("agent", "spoken answer");
+    await vi.waitFor(() => expect(frames).toHaveLength(2));
+    expect(frames).toEqual([
+      { event: "transcript", party: "remote", text: "caller request", is_final: true },
+      { event: "transcript", party: "local", text: "spoken answer", is_final: true },
+    ]);
+    // Incoming transcript frames are not echoed in client-owned speech mode.
+    ws.send(JSON.stringify({ event: "transcript", text: "incoming echo", is_final: true }));
+    const closed = new Promise<void>((resolve) => ws.once("close", resolve));
+    ws.close();
+    await closed;
+    expect(() => callbacks?.onTranscript?.("agent", "late final")).not.toThrow();
+    expect(frames).toHaveLength(2);
+    expect(bridgeDeps.logger.warn).not.toHaveBeenCalled();
+  });
+
   it("lets plugin hangup close the call and realtime bridge exactly once", async () => {
     const { bridgeDeps, runText } = deps(true);
     let callbacks: RealtimeCallbacks | undefined;
