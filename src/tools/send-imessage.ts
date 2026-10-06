@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
 import { uploadLocalMedia } from "../gateway/media.js";
-import { nativeTarget, preflightNativeIMessage, sendNativeIMessage } from "../imessage-native.js";
+import {
+  assertNativeOwner,
+  nativeSource,
+  preflightNativeIMessage,
+  prepareNativeIMessage,
+} from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, IMESSAGE_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -133,17 +138,17 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use an explicit `to` recipient or adjust the allowlist.",
               );
             }
-            const sourceTarget = async () => {
-              const source = await nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode);
+            const sourceOwner = async () => {
+              const source = await nativeSource(ctx.sessionID, ctx, deps.opencode);
               if (source && !config.gateway?.imessageThreadedReplies)
                 throw new Error(
-                  "Native iMessage replies are disabled; the owned source cannot be downgraded to a plain send.",
+                  "Native iMessage replies are disabled; the originating turn cannot continue sending.",
                 );
               return source;
             };
-            // Fail closed before approval or media effects for stale owners and
-            // destination overrides. A proven proactive parent remains independent.
-            await sourceTarget();
+            // Independent destinations do not inherit the current reply target,
+            // but the originating turn must still own every requested effect.
+            await sourceOwner();
             const detail = text ? `${text.length} chars` : "media attachment";
             await approveOutbound(ctx, config, {
               tool: "inkbox_send_imessage",
@@ -164,26 +169,40 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "Starting an iMessage group requires a dedicated outbound iMessage line. Reply to an existing group with `conversationId`.",
               );
             }
-            const verifiedSource = await sourceTarget();
-            if (verifiedSource) await preflightNativeIMessage(identity, verifiedSource);
-            await sourceTarget();
+            const verifiedSource = await sourceOwner();
+            if (verifiedSource?.imessageSource?.conversationId === conversationId)
+              await preflightNativeIMessage(identity, verifiedSource);
+            await sourceOwner();
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = mediaPaths?.length
               ? await uploadLocalMedia(identity, mediaPaths, {
                   beforeUpload: async () => {
-                    await sourceTarget();
+                    const source = await sourceOwner();
+                    if (source) assertNativeOwner(source);
                   },
                 })
               : [];
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
-            const native = await sourceTarget();
+            const source = await sourceOwner();
+            const native =
+              source?.imessageSource?.conversationId === conversationId ? source : undefined;
             const payload = {
               ...(text ? { text } : {}),
               ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
               ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
             };
-            const msg = native
-              ? await sendNativeIMessage(identity, native, payload)
+            const prepared = native
+              ? await prepareNativeIMessage(identity, native, payload)
+              : undefined;
+            if (source) {
+              if (!config.gateway?.imessageThreadedReplies)
+                throw new Error(
+                  "Native iMessage replies are disabled; the owned source cannot continue sending.",
+                );
+              assertNativeOwner(source);
+            }
+            const msg = prepared
+              ? await prepared()
               : await identity.sendIMessage({
                   ...(conversationId
                     ? { conversationId }

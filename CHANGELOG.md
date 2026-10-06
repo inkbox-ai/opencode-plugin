@@ -7,6 +7,7 @@
 - Ignores unengaged Slack channel chatter, preserves bounded sender-profile context, honors canonical home-workspace allowlists, and marks failed inline replies with an X.
 - Verifies native iMessage source/backend support before send checkpoints or uploads; doctor reports read-only channel capability and webhook readiness without claiming delivery.
 - Adds opt-in native iMessage replies, durable source admission, bounded first-source bursts, serialized follow-ups, bounded thread reads, and observed-send deduplication.
+- Preserves explicitly requested sends to other iMessage recipients or conversations without borrowing the current reply target or suppressing its answer; stale source turns remain fenced.
 - Preserves unknown submission/send outcomes without replay. Native execution must be positively fenced before later work can proceed; diagnostics separate liveness from queue readiness.
 - Releases definite pre-submission failures for later valid work, retains proactive iMessage failures as quiet context, and keeps reactions and compatible message bursts in their native conversation queue.
 - Serializes remote approval prompts, preserves control and fresh-message routing, and binds shared-route responses to the prompted author.

@@ -14,9 +14,8 @@ export interface NativeSend {
   messageId?: string;
 }
 type NativeReplyTarget = ReplyTarget & { nativeOwner?: { turnId: string; ownerId: string } };
-export async function nativeTarget(
+export async function nativeSource(
   sessionID: string,
-  conversationId: string,
   context: { messageID: string; directory: string },
   client?: OpencodeClient,
   store = createStateStore(),
@@ -47,8 +46,8 @@ export async function nativeTarget(
     (turn.leaseUntil ?? 0) <= Date.now()
   )
     throw new Error("This native iMessage turn no longer owns tool sends.");
-  if (turn.replyTarget?.imessageSource?.conversationId !== conversationId)
-    throw new Error("Native iMessage sends must stay in the active source conversation.");
+  if (!turn.replyTarget?.imessageSource)
+    throw new Error("The originating native iMessage source is unavailable.");
   return { ...turn.replyTarget, nativeOwner: { turnId: turn.id, ownerId: turn.ownerId } };
 }
 export async function sendNativeIMessage(
@@ -60,7 +59,10 @@ export async function sendNativeIMessage(
   return (await prepareNativeIMessage(identity, target, payload, store))();
 }
 
-function assertNativeOwner(target: NativeReplyTarget, store: StateStore): void {
+export function assertNativeOwner(
+  target: NativeReplyTarget,
+  store: StateStore = createStateStore(),
+): void {
   if (!target.nativeOwner) return;
   const current = store.getTurn(target.nativeOwner.turnId);
   if (

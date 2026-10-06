@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
 import {
-  nativeTarget,
+  nativeSource,
   noteNativeFailure,
   ownsNativeFailure,
   prepareNativeIMessage,
@@ -183,29 +183,21 @@ it("binds tool targeting to the exact native parent and rejects stale owners", a
     },
   };
   const context = { messageID: "assistant-message", directory: "/synthetic" };
-  const owned = await nativeTarget("session", "conversation", context, host, state);
+  const owned = await nativeSource("session", context, host, state);
   expect(owned).toEqual({ ...target, nativeOwner: { turnId: "turn", ownerId: "owner" } });
-  await expect(nativeTarget("session", "other-conversation", context, host, state)).rejects.toThrow(
-    "active source conversation",
-  );
-  await expect(nativeTarget("session", "", context, host, state)).rejects.toThrow(
-    "active source conversation",
-  );
   host.session.message.mockResolvedValueOnce({ data: { info: { role: "assistant" } } });
-  await expect(nativeTarget("session", "conversation", context, host, state)).rejects.toThrow(
+  await expect(nativeSource("session", context, host, state)).rejects.toThrow(
     "parent is unavailable",
   );
   host.session.message.mockResolvedValueOnce({
     data: { info: { role: "assistant", parentID: "proactive-host-message" } },
   });
-  expect(await nativeTarget("session", "conversation", context, host, state)).toBeUndefined();
+  expect(await nativeSource("session", context, host, state)).toBeUndefined();
   host.session.message.mockImplementationOnce(async () => {
     state.updateTurn("turn", { state: "interrupted" });
     return { data: { info: { role: "assistant", parentID: "source-host-message" } } };
   });
-  await expect(nativeTarget("session", "conversation", context, host, state)).rejects.toThrow(
-    "no longer owns",
-  );
+  await expect(nativeSource("session", context, host, state)).rejects.toThrow("no longer owns");
   const identity: any = { ...nativeReads(), id: "identity", sendIMessage: vi.fn() };
   await expect(sendNativeIMessage(identity, owned!, { text: "too late" }, state)).rejects.toThrow(
     "no longer owns",
@@ -310,6 +302,14 @@ it.each([
   "disabled",
   "valid",
   "proactive",
+  "recipient-stale",
+  "recipient-approval-cancel",
+  "recipient-upload-cancel",
+  "recipient-disabled",
+  "recipient-disable-during-upload",
+  "recipient-allowlist-denied",
+  "final-preflight-disable",
+  "final-preflight-cancel",
 ])("checks native %s ownership before approval, media upload and sending", async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), "native-tool-effect-"));
   dirs.push(dir);
@@ -321,7 +321,7 @@ it.each([
     sessionID: "session",
     chatKey: "chat",
     kind: "normal",
-    state: scenario === "stale" ? "interrupted" : "submitted",
+    state: scenario.endsWith("stale") ? "interrupted" : "submitted",
     text: "question",
     deliver: true,
     replyTarget: target,
@@ -330,16 +330,45 @@ it.each([
     createdAt: 1,
     updatedAt: 1,
   });
+  const config = {
+    gateway: { imessageThreadedReplies: !scenario.endsWith("disabled") },
+    outbound: {
+      allowedRecipients: scenario === "recipient-allowlist-denied" ? ["+14155550999"] : [],
+      approval: "ask",
+      askTimeoutMs: 0,
+    },
+  };
   const identity = {
     ...nativeReads(),
     id: "identity",
-    uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/synthetic.png" })),
+    uploadIMessageMedia: vi.fn(async () => {
+      if (scenario === "recipient-upload-cancel")
+        state.updateTurn("turn", { state: "interrupted" });
+      if (scenario === "recipient-disable-during-upload")
+        config.gateway.imessageThreadedReplies = false;
+      return { mediaUrl: "https://media.example/synthetic.png" };
+    }),
     sendIMessage: vi.fn(async (_input: any) => ({
       id: "sent",
       conversationId: "conversation",
       status: "sent",
     })),
   };
+  let releaseProbe!: () => void, enterProbe!: () => void;
+  const probeStarted = new Promise<void>((resolve) => {
+    enterProbe = resolve;
+  });
+  const probeHeld = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  let threadReads = 0;
+  identity.getIMessageThread.mockImplementation(async () => {
+    if (++threadReads === 2 && scenario.startsWith("final-preflight")) {
+      enterProbe();
+      await probeHeld;
+    }
+    return { conversationId: "conversation", messages: [] };
+  });
   const host = {
     session: {
       message: vi.fn(async () => ({
@@ -353,20 +382,17 @@ it.each([
     },
   };
   const ask = vi.fn(async () => {
-    if (scenario === "approval-cancel") state.updateTurn("turn", { state: "interrupted" });
+    if (scenario.endsWith("approval-cancel")) state.updateTurn("turn", { state: "interrupted" });
   });
   const tool = sendIMessageTools({
     runtime: { getIdentity: async () => identity },
     opencode: host,
-    config: {
-      gateway: { imessageThreadedReplies: scenario !== "disabled" },
-      outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0 },
-    },
+    config,
   } as any)[0]!;
   const file = join(dir, "synthetic.png");
   writeFileSync(file, "synthetic-image");
   const args = {
-    ...(scenario === "recipient" || scenario === "proactive"
+    ...(scenario.startsWith("recipient") || scenario === "proactive"
       ? { to: "+14155550123" }
       : { conversationId: scenario === "other-conversation" ? "other" : "conversation" }),
     text: "answer",
@@ -379,27 +405,53 @@ it.each([
     ask,
     abort: new AbortController().signal,
   } as any);
-  if (scenario === "valid" || scenario === "proactive") {
+  if (scenario.startsWith("final-preflight")) {
+    await probeStarted;
+    if (scenario === "final-preflight-disable") config.gateway.imessageThreadedReplies = false;
+    else state.updateTurn("turn", { state: "interrupted" });
+    releaseProbe();
+  }
+  if (["valid", "proactive", "recipient", "other-conversation"].includes(scenario)) {
     await result;
     expect(identity.uploadIMessageMedia).toHaveBeenCalledOnce();
     expect(identity.sendIMessage).toHaveBeenCalledOnce();
     expect(identity.sendIMessage.mock.calls[0]![0]).toMatchObject(
       scenario === "valid"
         ? { conversationId: "conversation", replyToMessageId: "source", plainReplyFallback: true }
-        : { to: "+14155550123" },
+        : scenario === "other-conversation"
+          ? { conversationId: "other" }
+          : { to: "+14155550123" },
     );
-    if (scenario === "proactive")
+    if (scenario !== "valid") {
       expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
+      expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("plainReplyFallback");
+      expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("idempotencyKey");
+      expect(identity.getIMessage).not.toHaveBeenCalled();
+      expect(state.read().imessageSends ?? {}).toEqual({});
+      // An independent send cannot consume or deduplicate the source answer,
+      // even when its text is identical to that later automatic answer.
+      await sendNativeIMessage(identity as any, target, { text: "answer" }, state);
+      expect(identity.sendIMessage).toHaveBeenCalledTimes(2);
+      expect(identity.sendIMessage.mock.calls[1]![0]).toMatchObject({
+        conversationId: "conversation",
+        replyToMessageId: "source",
+        plainReplyFallback: true,
+      });
+    }
   } else {
     await expect(result).rejects.toThrow(
-      scenario === "other-conversation" || scenario === "recipient"
-        ? "active source conversation"
-        : scenario === "disabled"
-          ? "cannot be downgraded"
+      scenario === "recipient-allowlist-denied"
+        ? "allowlist"
+        : scenario.includes("disable")
+          ? "disabled"
           : "no longer owns",
     );
-    expect(identity.uploadIMessageMedia).not.toHaveBeenCalled();
+    const afterUpload =
+      scenario.startsWith("final-preflight") ||
+      ["recipient-upload-cancel", "recipient-disable-during-upload"].includes(scenario);
+    expect(identity.uploadIMessageMedia).toHaveBeenCalledTimes(afterUpload ? 1 : 0);
     expect(identity.sendIMessage).not.toHaveBeenCalled();
-    expect(ask).toHaveBeenCalledTimes(scenario === "approval-cancel" ? 1 : 0);
+    expect(state.read().imessageSends ?? {}).toEqual({});
+    expect(ask).toHaveBeenCalledTimes(scenario.endsWith("approval-cancel") || afterUpload ? 1 : 0);
   }
 });
