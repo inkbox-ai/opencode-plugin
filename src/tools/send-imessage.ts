@@ -133,6 +133,13 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use an explicit `to` recipient or adjust the allowlist.",
               );
             }
+            const sourceTarget = () =>
+              config.gateway?.imessageThreadedReplies
+                ? nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode)
+                : Promise.resolve(undefined);
+            // Fail closed before approval or media effects for stale owners and
+            // destination overrides. A proven proactive parent remains independent.
+            await sourceTarget();
             const detail = text ? `${text.length} chars` : "media attachment";
             await approveOutbound(ctx, config, {
               tool: "inkbox_send_imessage",
@@ -153,13 +160,17 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "Starting an iMessage group requires a dedicated outbound iMessage line. Reply to an existing group with `conversationId`.",
               );
             }
+            await sourceTarget();
             // Uploaded local files lead, then any caller-supplied URLs.
-            const uploaded = mediaPaths?.length ? await uploadLocalMedia(identity, mediaPaths) : [];
+            const uploaded = mediaPaths?.length
+              ? await uploadLocalMedia(identity, mediaPaths, {
+                  beforeUpload: async () => {
+                    await sourceTarget();
+                  },
+                })
+              : [];
             const allMediaUrls = [...uploaded, ...(mediaUrls ?? [])];
-            const native =
-              config.gateway?.imessageThreadedReplies && conversationId
-                ? await nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode)
-                : undefined;
+            const native = await sourceTarget();
             const payload = {
               ...(text ? { text } : {}),
               ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),

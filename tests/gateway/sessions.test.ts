@@ -2180,3 +2180,37 @@ describe("unconfirmed native execution does not replay or silently block forward
     await d.mgr.close();
   });
 });
+
+it("retains native iMessage queue across a disabled restart and drains it only after re-enable", async () => {
+  const d = makeManager();
+  const target = {
+    channel: "imessage" as const,
+    conversationId: "conversation",
+    imessageSource: { messageId: "source", conversationId: "conversation" },
+  };
+  d.state.saveTurn({
+    id: "disabled-native",
+    messageID: "native-host",
+    chatKey: "native-chat",
+    kind: "normal",
+    state: "queued",
+    text: "retained input",
+    deliver: true,
+    replyTarget: target,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await d.mgr.catchUp();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(d.state.getTurn("disabled-native")?.state).toBe("queued");
+  expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+  expect(d.identity.sendIMessage).not.toHaveBeenCalled();
+  d.config.gateway.imessageThreadedReplies = true;
+  await d.mgr.catchUp();
+  await vi.waitFor(() => expect(d.identity.sendIMessage).toHaveBeenCalledOnce());
+  expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+  expect(d.identity.sendIMessage).toHaveBeenCalledWith(
+    expect.objectContaining({ replyToMessageId: "source", plainReplyFallback: true }),
+  );
+  await d.mgr.close();
+});

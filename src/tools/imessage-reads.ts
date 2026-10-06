@@ -1,7 +1,66 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
 import { formatJson, formatWithHeader } from "../format.js";
+import { createStateStore } from "../gateway/state.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
+
+type NativeReadContext = { sessionID: string; messageID: string; directory: string };
+
+async function nativeReadOwner(deps: ToolDeps, context: NativeReadContext) {
+  const store = createStateStore();
+  const known = store
+    .listTurns()
+    .filter(
+      (turn) =>
+        turn.sessionID === context.sessionID &&
+        (turn.replyTarget?.imessageSource || turn.companion || turn.replyTarget?.companionMode),
+    );
+  if (!known.length) return;
+  if (!deps.opencode) throw new Error("Native iMessage read ownership cannot be verified.");
+  const message = await deps.opencode.session.message({
+    path: { id: context.sessionID, messageID: context.messageID },
+    query: { directory: context.directory },
+  });
+  const info = message.data?.info;
+  if (message.error || info?.role !== "assistant")
+    throw new Error("Native iMessage read source is unavailable.");
+  const parentID = (info as { parentID?: string }).parentID;
+  if (!parentID) throw new Error("Native iMessage read parent is unavailable.");
+  const matches = known.filter((turn) => turn.messageID === parentID);
+  if (!matches.length) return; // Unrelated proactive input inherits no earlier source.
+  const original = matches[0];
+  if (matches.length !== 1 || !original)
+    throw new Error("Native iMessage read source is ambiguous.");
+  const validate = (conversationId?: string) => {
+    const current = store.getTurn(original.id);
+    if (
+      !current ||
+      current.sessionID !== context.sessionID ||
+      current.messageID !== original.messageID ||
+      !current.ownerId ||
+      current.ownerId !== original.ownerId ||
+      !["submitting", "submitted"].includes(current.state) ||
+      (current.leaseUntil ?? 0) <= Date.now()
+    )
+      throw new Error("This native iMessage turn no longer owns thread reads.");
+    if (
+      current.companion ||
+      current.replyTarget?.companionMode ||
+      original.companion ||
+      original.replyTarget?.companionMode
+    )
+      throw new Error(
+        "Use the supplied Companion history; native thread reads are unavailable in this turn.",
+      );
+    const source = current.replyTarget?.imessageSource;
+    if (!source || source.conversationId !== original.replyTarget?.imessageSource?.conversationId)
+      throw new Error("Native iMessage read source changed.");
+    if (conversationId !== undefined && conversationId !== source.conversationId)
+      throw new Error("Native iMessage thread reads must stay in the active source conversation.");
+  };
+  validate();
+  return validate;
+}
 
 const listIMessageConversationsArgs = {
   limit: z
@@ -78,15 +137,22 @@ export function imessageReadTools(deps: ToolDeps): RegisteredTool[] {
                 limit: z.number().int().min(1).max(100).optional(),
                 cursor: z.string().min(1).optional(),
               },
-              async execute(args: { messageId: string; limit?: number; cursor?: string }) {
-                return runTool(async () =>
-                  formatJson(
-                    await (await runtime.getIdentity()).getIMessageThread(args.messageId, {
-                      limit: args.limit ?? 50,
-                      cursor: args.cursor,
-                    }),
-                  ),
-                );
+              async execute(args: { messageId: string; limit?: number; cursor?: string }, context) {
+                return runTool(async () => {
+                  const validate = await nativeReadOwner(deps, context);
+                  const identity = await runtime.getIdentity();
+                  validate?.();
+                  if (validate) {
+                    const source = await identity.getIMessage(args.messageId);
+                    validate(source.conversationId ?? "");
+                  }
+                  const result = await identity.getIMessageThread(args.messageId, {
+                    limit: args.limit ?? 50,
+                    cursor: args.cursor,
+                  });
+                  validate?.();
+                  return formatJson(result);
+                });
               },
             },
           },
@@ -103,21 +169,28 @@ export function imessageReadTools(deps: ToolDeps): RegisteredTool[] {
                 limit: z.number().int().min(1).max(100).optional(),
                 cursor: z.string().min(1).optional(),
               },
-              async execute(args: {
-                conversationId: string;
-                threadId: string;
-                limit?: number;
-                cursor?: string;
-              }) {
-                return runTool(async () =>
-                  formatJson(
-                    await (await runtime.getIdentity()).getIMessageConversationThread(
-                      args.conversationId,
-                      args.threadId,
-                      { limit: args.limit ?? 50, cursor: args.cursor },
-                    ),
-                  ),
-                );
+              async execute(
+                args: {
+                  conversationId: string;
+                  threadId: string;
+                  limit?: number;
+                  cursor?: string;
+                },
+                context,
+              ) {
+                return runTool(async () => {
+                  const validate = await nativeReadOwner(deps, context);
+                  validate?.(args.conversationId);
+                  const identity = await runtime.getIdentity();
+                  validate?.(args.conversationId);
+                  const result = await identity.getIMessageConversationThread(
+                    args.conversationId,
+                    args.threadId,
+                    { limit: args.limit ?? 50, cursor: args.cursor },
+                  );
+                  validate?.(args.conversationId);
+                  return formatJson(result);
+                });
               },
             },
           },

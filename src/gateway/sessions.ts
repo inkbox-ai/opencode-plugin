@@ -829,6 +829,7 @@ export function createSessionManager(
       }
       current = completed;
     }
+    if (current.replyTarget?.imessageSource && !deps.config.gateway.imessageThreadedReplies) return;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
       await authorizeSlack(current);
@@ -1039,6 +1040,13 @@ export function createSessionManager(
       if (!turn || TERMINAL.has(turn.state)) continue;
       if (closing) return;
       if ((turn.replyTarget?.slack || turn.companion?.slack) && !deps.config.gateway.slackEnabled) {
+        entry.queue.unshift(id);
+        return;
+      }
+      if (
+        (turn.replyTarget?.imessageSource || turn.companion?.imessageSource) &&
+        !deps.config.gateway.imessageThreadedReplies
+      ) {
         entry.queue.unshift(id);
         return;
       }

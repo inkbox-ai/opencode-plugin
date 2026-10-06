@@ -24,23 +24,33 @@ export function createVaultRuntime(
   const keyEnvVar = opts.keyEnvVar ?? "INKBOX_OPENCODE_VAULT_KEY";
   let currentClient: Awaited<ReturnType<InkboxRuntime["getClient"]>> | undefined;
   let unlocking: Promise<FreshCredentials> | undefined;
+  let currentKey: string | undefined;
 
   async function getCredentials(): Promise<FreshCredentials> {
     const client = await runtime.getClient();
-    if (currentClient !== client) {
+    const key = process.env[keyEnvVar];
+    if (currentClient !== client || currentKey !== key) {
       currentClient = client;
+      currentKey = key;
       unlocking = undefined;
     }
+    if (!key) {
+      throw new Error(`Vault is locked. Set ${keyEnvVar} locally to unlock credential tools.`);
+    }
     if (!unlocking) {
-      const key = process.env[keyEnvVar];
-      if (!key) {
-        throw new Error(`Vault is locked. Set ${keyEnvVar} locally to unlock credential tools.`);
-      }
       const pending = (async (): Promise<FreshCredentials> => {
         const identity = await runtime.getIdentity();
         const unlocked = await client.vault.unlock(key, { identityId: identity.id });
+        function assertLocalKey(): void {
+          if (process.env[keyEnvVar] !== key || currentClient !== client || currentKey !== key)
+            throw new Error(
+              "The local Vault key changed; unlock credentials again before reading.",
+            );
+        }
         async function authorize(secretId: string): Promise<void> {
+          assertLocalKey();
           const rules = await client.vault.listAccessRules(secretId);
+          assertLocalKey();
           if (!rules.some((rule) => rule.identityId === identity.id)) {
             throw new Error("This credential is not shared with the configured identity.");
           }

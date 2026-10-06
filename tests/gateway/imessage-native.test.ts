@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inkbox } from "@inkbox/sdk";
@@ -11,6 +11,7 @@ import {
   ownsNativeFailure,
   sendNativeIMessage,
 } from "../../src/imessage-native.js";
+import { sendIMessageTools } from "../../src/tools/send-imessage.js";
 
 const dirs: string[] = [];
 function store() {
@@ -29,6 +30,7 @@ const target: ReplyTarget = {
 };
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 it("deduplicates an observed exact tool/automatic reply, but not unrelated output", async () => {
@@ -94,7 +96,16 @@ it("binds tool targeting to the exact native parent and rejects stale owners", a
   const context = { messageID: "assistant-message", directory: "/synthetic" };
   const owned = await nativeTarget("session", "conversation", context, host, state);
   expect(owned).toEqual({ ...target, nativeOwner: { turnId: "turn", ownerId: "owner" } });
-  expect(await nativeTarget("session", "other-conversation", context, host, state)).toBeUndefined();
+  await expect(nativeTarget("session", "other-conversation", context, host, state)).rejects.toThrow(
+    "active source conversation",
+  );
+  await expect(nativeTarget("session", "", context, host, state)).rejects.toThrow(
+    "active source conversation",
+  );
+  host.session.message.mockResolvedValueOnce({ data: { info: { role: "assistant" } } });
+  await expect(nativeTarget("session", "conversation", context, host, state)).rejects.toThrow(
+    "parent is unavailable",
+  );
   host.session.message.mockResolvedValueOnce({
     data: { info: { role: "assistant", parentID: "proactive-host-message" } },
   });
@@ -192,3 +203,97 @@ it("retains callback-first and repeated failure as one quiet notice for its orig
   expect(notices[0].text).toContain("not a new request");
   expect(identity.sendIMessage).toHaveBeenCalledOnce();
 });
+
+it.each(["other-conversation", "recipient", "stale", "approval-cancel", "valid", "proactive"])(
+  "checks native %s ownership before approval, media upload and sending",
+  async (scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), "native-tool-effect-"));
+    dirs.push(dir);
+    vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+    const state = createStateStore();
+    state.saveTurn({
+      id: "turn",
+      messageID: "input",
+      sessionID: "session",
+      chatKey: "chat",
+      kind: "normal",
+      state: scenario === "stale" ? "interrupted" : "submitted",
+      text: "question",
+      deliver: true,
+      replyTarget: target,
+      ownerId: "owner",
+      leaseUntil: Date.now() + 10000,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const identity = {
+      id: "identity",
+      uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/synthetic.png" })),
+      sendIMessage: vi.fn(async (_input: any) => ({
+        id: "sent",
+        conversationId: "conversation",
+        status: "sent",
+      })),
+    };
+    const host = {
+      session: {
+        message: vi.fn(async () => ({
+          data: {
+            info: {
+              role: "assistant",
+              parentID: scenario === "proactive" ? "unrelated-input" : "input",
+            },
+          },
+        })),
+      },
+    };
+    const ask = vi.fn(async () => {
+      if (scenario === "approval-cancel") state.updateTurn("turn", { state: "interrupted" });
+    });
+    const tool = sendIMessageTools({
+      runtime: { getIdentity: async () => identity },
+      opencode: host,
+      config: {
+        gateway: { imessageThreadedReplies: true },
+        outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0 },
+      },
+    } as any)[0]!;
+    const file = join(dir, "synthetic.png");
+    writeFileSync(file, "synthetic-image");
+    const args = {
+      ...(scenario === "recipient" || scenario === "proactive"
+        ? { to: "+14155550123" }
+        : { conversationId: scenario === "other-conversation" ? "other" : "conversation" }),
+      text: "answer",
+      mediaPaths: [file],
+    };
+    const result = tool.definition.execute(args, {
+      sessionID: "session",
+      messageID: "assistant",
+      directory: "/synthetic",
+      ask,
+      abort: new AbortController().signal,
+    } as any);
+    if (scenario === "valid" || scenario === "proactive") {
+      await result;
+      expect(identity.uploadIMessageMedia).toHaveBeenCalledOnce();
+      expect(identity.sendIMessage).toHaveBeenCalledOnce();
+      expect(identity.sendIMessage.mock.calls[0]![0]).toMatchObject(
+        scenario === "valid"
+          ? { conversationId: "conversation", replyToMessageId: "source", plainReplyFallback: true }
+          : { to: "+14155550123" },
+      );
+      if (scenario === "proactive")
+        expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
+    } else {
+      await expect(result).rejects.toThrow(
+        scenario === "other-conversation" || scenario === "recipient"
+          ? "active source conversation"
+          : "no longer owns",
+      );
+      expect(identity.uploadIMessageMedia).not.toHaveBeenCalled();
+      expect(identity.sendIMessage).not.toHaveBeenCalled();
+      expect(ask).toHaveBeenCalledTimes(scenario === "approval-cancel" ? 1 : 0);
+    }
+  },
+);

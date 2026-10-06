@@ -32,9 +32,11 @@ export async function nativeTarget(
   });
   if (message.error || message.data?.info.role !== "assistant")
     throw new Error("Native iMessage tool source is unavailable.");
-  const original = known.find(
-    (turn) => turn.messageID === (message.data!.info as { parentID?: string }).parentID,
-  );
+  const parentID = (message.data.info as { parentID?: string }).parentID;
+  if (!parentID) throw new Error("Native iMessage tool parent is unavailable.");
+  const matches = known.filter((turn) => turn.messageID === parentID);
+  if (matches.length > 1) throw new Error("Native iMessage tool source is ambiguous.");
+  const original = matches[0];
   if (!original) return; // An unrelated proactive turn has no inherited native source.
   const turn = store.getTurn(original.id);
   if (
@@ -45,9 +47,9 @@ export async function nativeTarget(
     (turn.leaseUntil ?? 0) <= Date.now()
   )
     throw new Error("This native iMessage turn no longer owns tool sends.");
-  return turn.replyTarget?.imessageSource?.conversationId === conversationId
-    ? { ...turn.replyTarget, nativeOwner: { turnId: turn.id, ownerId: turn.ownerId } }
-    : undefined;
+  if (turn.replyTarget?.imessageSource?.conversationId !== conversationId)
+    throw new Error("Native iMessage sends must stay in the active source conversation.");
+  return { ...turn.replyTarget, nativeOwner: { turnId: turn.id, ownerId: turn.ownerId } };
 }
 export async function sendNativeIMessage(
   identity: AgentIdentity,

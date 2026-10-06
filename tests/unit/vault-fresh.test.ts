@@ -132,6 +132,14 @@ it("uses published SDK cryptography, fresh reads, identity grants and seed-free 
     },
   });
   expect((await credentials.getLogin(secret.id)).password).toBe("version-two");
+  vi.stubEnv("SYNTHETIC_VAULT_TEST_KEY", undefined);
+  await expect(vault.getCredentials()).rejects.toThrow("locked");
+  await expect(credentials.getLogin(secret.id)).rejects.toThrow("local Vault key changed");
+  vi.stubEnv("SYNTHETIC_VAULT_TEST_KEY", "wrong-synthetic-key");
+  await expect(vault.getCredentials()).rejects.toThrow();
+  await expect(credentials.getTotpCode(secret.id)).rejects.toThrow("local Vault key changed");
+  vi.stubEnv("SYNTHETIC_VAULT_TEST_KEY", key);
+  expect((await (await vault.getCredentials()).getLogin(secret.id)).password).toBe("version-two");
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(1111111109000);
   const totp = await credentials.getTotpCode(secret.id);
