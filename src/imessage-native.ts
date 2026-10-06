@@ -57,54 +57,95 @@ export async function sendNativeIMessage(
   payload: { text?: string; mediaUrls?: string[]; sendStyle?: any },
   store: StateStore = createStateStore(),
 ) {
+  return (await prepareNativeIMessage(identity, target, payload, store))();
+}
+
+function assertNativeOwner(target: NativeReplyTarget, store: StateStore): void {
+  if (!target.nativeOwner) return;
+  const current = store.getTurn(target.nativeOwner.turnId);
+  if (
+    !current ||
+    current.ownerId !== target.nativeOwner.ownerId ||
+    (current.leaseUntil ?? 0) <= Date.now() ||
+    !["submitting", "submitted"].includes(current.state)
+  )
+    throw new Error("This native iMessage turn no longer owns tool sends.");
+}
+
+/** Read-only capability proof; fetched history must never enter model context. */
+export async function preflightNativeIMessage(
+  identity: AgentIdentity,
+  target: NativeReplyTarget,
+  store: StateStore = createStateStore(),
+): Promise<void> {
+  assertNativeOwner(target, store);
   const source = target.imessageSource;
-  if (!source) throw new Error("Native iMessage source is missing.");
-  const serialized = JSON.stringify([
-    payload.text ?? "",
-    payload.mediaUrls ?? [],
-    payload.sendStyle ?? null,
-  ]);
-  const key = createHash("sha256")
-    .update(JSON.stringify([identity.id, source.conversationId, source.messageId, serialized]))
-    .digest("hex");
-  let previous: NativeSend | undefined;
-  const entry: NativeSend = {
-    key,
-    identityId: identity.id,
-    sourceId: source.messageId,
-    conversationId: source.conversationId,
-    payload: serialized,
-    state: "started",
+  if (!source?.messageId || !source.conversationId)
+    throw new Error("Native iMessage source is missing.");
+  if (
+    typeof identity.getIMessage !== "function" ||
+    typeof identity.getIMessageThread !== "function"
+  )
+    throw new Error("The installed SDK does not support native iMessage reply verification.");
+  const message = await identity.getIMessage(source.messageId);
+  assertNativeOwner(target, store);
+  if (message.conversationId !== source.conversationId)
+    throw new Error("The native iMessage source belongs to a different conversation.");
+  const page = await identity.getIMessageThread(source.messageId, { limit: 1 });
+  assertNativeOwner(target, store);
+  if (page.conversationId !== source.conversationId)
+    throw new Error("Native iMessage reply support could not be verified for this conversation.");
+}
+
+/** Keep safe read failures before the caller's irreversible delivery checkpoint. */
+export async function prepareNativeIMessage(
+  identity: AgentIdentity,
+  target: NativeReplyTarget,
+  payload: { text?: string; mediaUrls?: string[]; sendStyle?: any },
+  store: StateStore = createStateStore(),
+) {
+  await preflightNativeIMessage(identity, target, store);
+  return async () => {
+    const source = target.imessageSource;
+    if (!source) throw new Error("Native iMessage source is missing.");
+    const serialized = JSON.stringify([
+      payload.text ?? "",
+      payload.mediaUrls ?? [],
+      payload.sendStyle ?? null,
+    ]);
+    const key = createHash("sha256")
+      .update(JSON.stringify([identity.id, source.conversationId, source.messageId, serialized]))
+      .digest("hex");
+    let previous: NativeSend | undefined;
+    const entry: NativeSend = {
+      key,
+      identityId: identity.id,
+      sourceId: source.messageId,
+      conversationId: source.conversationId,
+      payload: serialized,
+      state: "started",
+    };
+    store.updateIMessageSend(key, (existing) => {
+      assertNativeOwner(target, store);
+      previous = existing as NativeSend | undefined;
+      return existing ?? entry;
+    });
+    if (previous?.state === "sent" && previous.messageId)
+      return { id: previous.messageId, conversationId: source.conversationId, status: "sent" };
+    if (previous)
+      throw new Error(
+        "The previous native iMessage send has an unconfirmed outcome; do not resend it.",
+      );
+    const message = await identity.sendIMessage({
+      ...payload,
+      conversationId: source.conversationId,
+      replyToMessageId: source.messageId,
+      plainReplyFallback: true,
+      idempotencyKey: `opencode:native:${key}`,
+    });
+    store.updateIMessageSend(key, () => ({ ...entry, state: "sent", messageId: message.id }));
+    return message;
   };
-  store.updateIMessageSend(key, (existing) => {
-    if (target.nativeOwner) {
-      const current = store.getTurn(target.nativeOwner.turnId);
-      if (
-        !current ||
-        current.ownerId !== target.nativeOwner.ownerId ||
-        (current.leaseUntil ?? 0) <= Date.now() ||
-        !["submitting", "submitted"].includes(current.state)
-      )
-        throw new Error("This native iMessage turn no longer owns tool sends.");
-    }
-    previous = existing as NativeSend | undefined;
-    return existing ?? entry;
-  });
-  if (previous?.state === "sent" && previous.messageId)
-    return { id: previous.messageId, conversationId: source.conversationId, status: "sent" };
-  if (previous)
-    throw new Error(
-      "The previous native iMessage send has an unconfirmed outcome; do not resend it.",
-    );
-  const message = await identity.sendIMessage({
-    ...payload,
-    conversationId: source.conversationId,
-    replyToMessageId: source.messageId,
-    plainReplyFallback: true,
-    idempotencyKey: `opencode:native:${key}`,
-  });
-  store.updateIMessageSend(key, () => ({ ...entry, state: "sent", messageId: message.id }));
-  return message;
 }
 export function ownsNativeFailure(
   identityId: string,

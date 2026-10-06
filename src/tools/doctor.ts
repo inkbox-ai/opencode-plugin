@@ -2,6 +2,7 @@ import { VERSION as SDK_VERSION } from "@inkbox/sdk";
 import { NOT_CONFIGURED_MESSAGE } from "../client.js";
 import { inkboxErrorMessage } from "../errors.js";
 import { formatWithHeader } from "../format.js";
+import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
 import type { GatingSummary } from "./registry.js";
 import { describeGating } from "./registry.js";
@@ -52,6 +53,7 @@ export function doctorTools(deps: ToolDeps, getGating: () => GatingSummary): Reg
           }
 
           if (config.apiKey && config.identity) {
+            findings.push(...(await channelReadiness(config, runtime)));
             try {
               const inkbox = await runtime.getClient();
               const info = await inkbox.whoami();

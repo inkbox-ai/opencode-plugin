@@ -25,6 +25,8 @@ const identity = {
   id: "synthetic-identity",
   agentHandle: "synthetic",
   imessageEnabled: true,
+  getIMessage: async () => ({ id: "source", conversationId: "conversation" }),
+  getIMessageThread: async () => ({ conversationId: "conversation", messages: [] }),
   sendIMessage: async (request) => {
     sends.push(request);
     return { id: `send-${sends.length}`, conversationId: request.conversationId };

@@ -9,6 +9,7 @@ import {
   nativeTarget,
   noteNativeFailure,
   ownsNativeFailure,
+  prepareNativeIMessage,
   sendNativeIMessage,
 } from "../../src/imessage-native.js";
 import { sendIMessageTools } from "../../src/tools/send-imessage.js";
@@ -18,6 +19,12 @@ function store() {
   const dir = mkdtempSync(join(tmpdir(), "native-source-"));
   dirs.push(dir);
   return createStateStore(dir);
+}
+function nativeReads() {
+  return {
+    getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
+    getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
+  };
 }
 const target: ReplyTarget = {
   channel: "imessage",
@@ -33,9 +40,90 @@ afterEach(() => {
   vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+it.each(["missing-sdk", "source-conversation", "thread-conversation", "unsupported-endpoint"])(
+  "rejects %s before recording or attempting a native send",
+  async (failure) => {
+    const state = store();
+    const identity: any = { ...nativeReads(), id: "identity", sendIMessage: vi.fn() };
+    if (failure === "missing-sdk") delete identity.getIMessageThread;
+    if (failure === "source-conversation")
+      identity.getIMessage.mockResolvedValue({ conversationId: "other" });
+    if (failure === "thread-conversation")
+      identity.getIMessageThread.mockResolvedValue({ conversationId: "other" });
+    if (failure === "unsupported-endpoint")
+      identity.getIMessageThread.mockRejectedValue(new Error("404 native endpoint unavailable"));
+    await expect(sendNativeIMessage(identity, target, { text: "answer" }, state)).rejects.toThrow();
+    expect(identity.sendIMessage).not.toHaveBeenCalled();
+    expect(state.read().imessageSends ?? {}).toEqual({});
+    if (failure === "source-conversation")
+      expect(identity.getIMessageThread).not.toHaveBeenCalled();
+  },
+);
+it("keeps transient native preflight safely retryable and probes only one thread item", async () => {
+  const state = store();
+  const identity: any = {
+    ...nativeReads(),
+    id: "identity",
+    sendIMessage: vi.fn(async () => ({ id: "sent" })),
+  };
+  identity.getIMessageThread.mockRejectedValueOnce(new Error("503 unavailable"));
+  await expect(
+    prepareNativeIMessage(identity, target, { text: "saved answer" }, state),
+  ).rejects.toThrow("503");
+  expect(state.read().imessageSends ?? {}).toEqual({});
+  const send = await prepareNativeIMessage(identity, target, { text: "saved answer" }, state);
+  expect(identity.sendIMessage).not.toHaveBeenCalled();
+  expect(identity.getIMessageThread).toHaveBeenLastCalledWith("source", { limit: 1 });
+  await send();
+  expect(identity.sendIMessage).toHaveBeenCalledOnce();
+});
+it.each(["source-read", "thread-read", "prepared-send"])(
+  "rechecks native ownership after %s",
+  async (boundary) => {
+    const state = store();
+    state.saveTurn({
+      id: "turn",
+      messageID: "input",
+      sessionID: "session",
+      chatKey: "chat",
+      state: "submitted",
+      kind: "normal",
+      text: "question",
+      deliver: true,
+      replyTarget: target,
+      ownerId: "owner",
+      leaseUntil: Date.now() + 10000,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const owned = { ...target, nativeOwner: { turnId: "turn", ownerId: "owner" } };
+    const identity: any = { ...nativeReads(), id: "identity", sendIMessage: vi.fn() };
+    if (boundary !== "prepared-send") {
+      identity[
+        boundary === "source-read" ? "getIMessage" : "getIMessageThread"
+      ].mockImplementationOnce(async () => {
+        state.updateTurn("turn", { state: "interrupted" });
+        return { conversationId: "conversation" };
+      });
+      await expect(sendNativeIMessage(identity, owned, { text: "late" }, state)).rejects.toThrow(
+        "no longer owns",
+      );
+    } else {
+      const send = await prepareNativeIMessage(identity, owned, { text: "late" }, state);
+      state.updateTurn("turn", { state: "interrupted" });
+      await expect(send()).rejects.toThrow("no longer owns");
+    }
+    expect(identity.sendIMessage).not.toHaveBeenCalled();
+    expect(state.read().imessageSends ?? {}).toEqual({});
+  },
+);
 it("deduplicates an observed exact tool/automatic reply, but not unrelated output", async () => {
   const state = store(),
-    identity: any = { id: "identity", sendIMessage: vi.fn(async () => ({ id: "sent" })) };
+    identity: any = {
+      ...nativeReads(),
+      id: "identity",
+      sendIMessage: vi.fn(async () => ({ id: "sent" })),
+    };
   await sendNativeIMessage(identity, target, { text: "same answer" }, state);
   await sendNativeIMessage(identity, target, { text: "same answer" }, state);
   await sendNativeIMessage(identity, target, { text: "different answer" }, state);
@@ -54,6 +142,7 @@ it("checkpoints an uncertain effect before the call and never blindly retries it
   const state = store();
   let observed = false;
   const identity: any = {
+    ...nativeReads(),
     id: "identity",
     sendIMessage: vi.fn(async () => {
       observed = ownsNativeFailure("identity", undefined, "conversation", state);
@@ -117,7 +206,7 @@ it("binds tool targeting to the exact native parent and rejects stale owners", a
   await expect(nativeTarget("session", "conversation", context, host, state)).rejects.toThrow(
     "no longer owns",
   );
-  const identity: any = { id: "identity", sendIMessage: vi.fn() };
+  const identity: any = { ...nativeReads(), id: "identity", sendIMessage: vi.fn() };
   await expect(sendNativeIMessage(identity, owned!, { text: "too late" }, state)).rejects.toThrow(
     "no longer owns",
   );
@@ -131,22 +220,30 @@ it("uses the published SDK native reply wire shape and opaque bounded thread rea
     vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url: String(url), init });
       const body = String(url).includes("/thread")
-        ? { messages: [], has_more: false, next_cursor: null, thread_id: "opaque-thread" }
-        : init?.method === "POST"
-          ? {
-              message: {
-                id: "sent",
-                conversation_id: "conversation",
-                status: "queued",
+        ? {
+            conversation_id: "conversation",
+            messages: [],
+            has_more: false,
+            next_cursor: null,
+            thread_id: "opaque-thread",
+          }
+        : String(url).includes("/imessage/messages/source")
+          ? { id: "source", conversation_id: "conversation", created_at: "2026-01-01" }
+          : init?.method === "POST"
+            ? {
+                message: {
+                  id: "sent",
+                  conversation_id: "conversation",
+                  status: "queued",
+                  created_at: "2026-01-01",
+                },
+              }
+            : {
+                id: "identity",
+                agent_handle: "synthetic",
+                imessage_enabled: true,
                 created_at: "2026-01-01",
-              },
-            }
-          : {
-              id: "identity",
-              agent_handle: "synthetic",
-              imessage_enabled: true,
-              created_at: "2026-01-01",
-            };
+              };
       return new Response(JSON.stringify(body), {
         headers: { "content-type": "application/json" },
       });
@@ -187,6 +284,7 @@ it("retains callback-first and repeated failure as one quiet notice for its orig
     updatedAt: 1,
   });
   const identity: any = {
+    ...nativeReads(),
     id: "identity",
     sendIMessage: vi.fn(async () => {
       noteNativeFailure("identity", "sent", "conversation", state);
@@ -204,96 +302,104 @@ it("retains callback-first and repeated failure as one quiet notice for its orig
   expect(identity.sendIMessage).toHaveBeenCalledOnce();
 });
 
-it.each(["other-conversation", "recipient", "stale", "approval-cancel", "valid", "proactive"])(
-  "checks native %s ownership before approval, media upload and sending",
-  async (scenario) => {
-    const dir = mkdtempSync(join(tmpdir(), "native-tool-effect-"));
-    dirs.push(dir);
-    vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
-    const state = createStateStore();
-    state.saveTurn({
-      id: "turn",
-      messageID: "input",
-      sessionID: "session",
-      chatKey: "chat",
-      kind: "normal",
-      state: scenario === "stale" ? "interrupted" : "submitted",
-      text: "question",
-      deliver: true,
-      replyTarget: target,
-      ownerId: "owner",
-      leaseUntil: Date.now() + 10000,
-      createdAt: 1,
-      updatedAt: 1,
-    });
-    const identity = {
-      id: "identity",
-      uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/synthetic.png" })),
-      sendIMessage: vi.fn(async (_input: any) => ({
-        id: "sent",
-        conversationId: "conversation",
-        status: "sent",
-      })),
-    };
-    const host = {
-      session: {
-        message: vi.fn(async () => ({
-          data: {
-            info: {
-              role: "assistant",
-              parentID: scenario === "proactive" ? "unrelated-input" : "input",
-            },
+it.each([
+  "other-conversation",
+  "recipient",
+  "stale",
+  "approval-cancel",
+  "disabled",
+  "valid",
+  "proactive",
+])("checks native %s ownership before approval, media upload and sending", async (scenario) => {
+  const dir = mkdtempSync(join(tmpdir(), "native-tool-effect-"));
+  dirs.push(dir);
+  vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+  const state = createStateStore();
+  state.saveTurn({
+    id: "turn",
+    messageID: "input",
+    sessionID: "session",
+    chatKey: "chat",
+    kind: "normal",
+    state: scenario === "stale" ? "interrupted" : "submitted",
+    text: "question",
+    deliver: true,
+    replyTarget: target,
+    ownerId: "owner",
+    leaseUntil: Date.now() + 10000,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const identity = {
+    ...nativeReads(),
+    id: "identity",
+    uploadIMessageMedia: vi.fn(async () => ({ mediaUrl: "https://media.example/synthetic.png" })),
+    sendIMessage: vi.fn(async (_input: any) => ({
+      id: "sent",
+      conversationId: "conversation",
+      status: "sent",
+    })),
+  };
+  const host = {
+    session: {
+      message: vi.fn(async () => ({
+        data: {
+          info: {
+            role: "assistant",
+            parentID: scenario === "proactive" ? "unrelated-input" : "input",
           },
-        })),
-      },
-    };
-    const ask = vi.fn(async () => {
-      if (scenario === "approval-cancel") state.updateTurn("turn", { state: "interrupted" });
-    });
-    const tool = sendIMessageTools({
-      runtime: { getIdentity: async () => identity },
-      opencode: host,
-      config: {
-        gateway: { imessageThreadedReplies: true },
-        outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0 },
-      },
-    } as any)[0]!;
-    const file = join(dir, "synthetic.png");
-    writeFileSync(file, "synthetic-image");
-    const args = {
-      ...(scenario === "recipient" || scenario === "proactive"
-        ? { to: "+14155550123" }
-        : { conversationId: scenario === "other-conversation" ? "other" : "conversation" }),
-      text: "answer",
-      mediaPaths: [file],
-    };
-    const result = tool.definition.execute(args, {
-      sessionID: "session",
-      messageID: "assistant",
-      directory: "/synthetic",
-      ask,
-      abort: new AbortController().signal,
-    } as any);
-    if (scenario === "valid" || scenario === "proactive") {
-      await result;
-      expect(identity.uploadIMessageMedia).toHaveBeenCalledOnce();
-      expect(identity.sendIMessage).toHaveBeenCalledOnce();
-      expect(identity.sendIMessage.mock.calls[0]![0]).toMatchObject(
-        scenario === "valid"
-          ? { conversationId: "conversation", replyToMessageId: "source", plainReplyFallback: true }
-          : { to: "+14155550123" },
-      );
-      if (scenario === "proactive")
-        expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
-    } else {
-      await expect(result).rejects.toThrow(
-        scenario === "other-conversation" || scenario === "recipient"
-          ? "active source conversation"
+        },
+      })),
+    },
+  };
+  const ask = vi.fn(async () => {
+    if (scenario === "approval-cancel") state.updateTurn("turn", { state: "interrupted" });
+  });
+  const tool = sendIMessageTools({
+    runtime: { getIdentity: async () => identity },
+    opencode: host,
+    config: {
+      gateway: { imessageThreadedReplies: scenario !== "disabled" },
+      outbound: { allowedRecipients: [], approval: "ask", askTimeoutMs: 0 },
+    },
+  } as any)[0]!;
+  const file = join(dir, "synthetic.png");
+  writeFileSync(file, "synthetic-image");
+  const args = {
+    ...(scenario === "recipient" || scenario === "proactive"
+      ? { to: "+14155550123" }
+      : { conversationId: scenario === "other-conversation" ? "other" : "conversation" }),
+    text: "answer",
+    mediaPaths: [file],
+  };
+  const result = tool.definition.execute(args, {
+    sessionID: "session",
+    messageID: "assistant",
+    directory: "/synthetic",
+    ask,
+    abort: new AbortController().signal,
+  } as any);
+  if (scenario === "valid" || scenario === "proactive") {
+    await result;
+    expect(identity.uploadIMessageMedia).toHaveBeenCalledOnce();
+    expect(identity.sendIMessage).toHaveBeenCalledOnce();
+    expect(identity.sendIMessage.mock.calls[0]![0]).toMatchObject(
+      scenario === "valid"
+        ? { conversationId: "conversation", replyToMessageId: "source", plainReplyFallback: true }
+        : { to: "+14155550123" },
+    );
+    if (scenario === "proactive")
+      expect(identity.sendIMessage.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
+  } else {
+    await expect(result).rejects.toThrow(
+      scenario === "other-conversation" || scenario === "recipient"
+        ? "active source conversation"
+        : scenario === "disabled"
+          ? "cannot be downgraded"
           : "no longer owns",
-      );
-      expect(identity.uploadIMessageMedia).not.toHaveBeenCalled();
-      expect(identity.sendIMessage).not.toHaveBeenCalled();
-      expect(ask).toHaveBeenCalledTimes(scenario === "approval-cancel" ? 1 : 0);
-    }
-  },
-);
+    );
+    expect(identity.uploadIMessageMedia).not.toHaveBeenCalled();
+    expect(identity.sendIMessage).not.toHaveBeenCalled();
+    expect(ask).toHaveBeenCalledTimes(scenario === "approval-cancel" ? 1 : 0);
+  }
+});

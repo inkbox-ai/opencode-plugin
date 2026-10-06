@@ -2,6 +2,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
+import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
 import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
@@ -68,6 +69,7 @@ export async function runDoctor(
         identity: config.identity,
         baseUrl: config.baseUrl,
       }));
+    findings.push(...(await channelReadiness(config, runtime)));
     try {
       const inkbox = await runtime.getClient();
       const info = await inkbox.whoami();

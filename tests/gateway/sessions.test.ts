@@ -50,6 +50,8 @@ function makeIdentity() {
       },
     })),
     sendText: vi.fn(async () => ({ id: "sms-1" })),
+    getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
+    getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
   };
 }
@@ -1932,6 +1934,22 @@ describe("native iMessage durable source ownership", () => {
     expect(d.identity.sendIMessage.mock.calls[1]).toEqual([
       expect.objectContaining({ replyToMessageId: "second" }),
     ]);
+    await d.mgr.close();
+  });
+  it("retries a safe native endpoint read with the saved answer, without another model turn", async () => {
+    const d = makeManager();
+    d.config.gateway.imessageThreadedReplies = true;
+    d.identity.getIMessageThread.mockRejectedValueOnce(new Error("503 unavailable"));
+    await d.mgr.handleInbound(incoming("first", "question", { mediaPaths: ["/synthetic.png"] }));
+    await vi.waitFor(() => expect(d.state.listTurns()[0].retryAt).toBeGreaterThan(0));
+    expect(d.state.listTurns()[0].state).toBe("completed");
+    expect(d.state.read().imessageSends ?? {}).toEqual({});
+    expect(d.identity.sendIMessage).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(d.identity.sendIMessage).toHaveBeenCalledOnce(), {
+      timeout: 3000,
+    });
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(d.state.listTurns()[0].state).toBe("delivered");
     await d.mgr.close();
   });
 });

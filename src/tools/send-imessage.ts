@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { runTool } from "../errors.js";
 import { uploadLocalMedia } from "../gateway/media.js";
-import { nativeTarget, sendNativeIMessage } from "../imessage-native.js";
+import { nativeTarget, preflightNativeIMessage, sendNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, IMESSAGE_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -133,10 +133,14 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "`conversationId` sends cannot be checked against the local outbound recipient allowlist. Use an explicit `to` recipient or adjust the allowlist.",
               );
             }
-            const sourceTarget = () =>
-              config.gateway?.imessageThreadedReplies
-                ? nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode)
-                : Promise.resolve(undefined);
+            const sourceTarget = async () => {
+              const source = await nativeTarget(ctx.sessionID, conversationId, ctx, deps.opencode);
+              if (source && !config.gateway?.imessageThreadedReplies)
+                throw new Error(
+                  "Native iMessage replies are disabled; the owned source cannot be downgraded to a plain send.",
+                );
+              return source;
+            };
             // Fail closed before approval or media effects for stale owners and
             // destination overrides. A proven proactive parent remains independent.
             await sourceTarget();
@@ -160,6 +164,8 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                 "Starting an iMessage group requires a dedicated outbound iMessage line. Reply to an existing group with `conversationId`.",
               );
             }
+            const verifiedSource = await sourceTarget();
+            if (verifiedSource) await preflightNativeIMessage(identity, verifiedSource);
             await sourceTarget();
             // Uploaded local files lead, then any caller-supplied URLs.
             const uploaded = mediaPaths?.length

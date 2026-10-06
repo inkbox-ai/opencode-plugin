@@ -158,22 +158,31 @@ export async function sendSlackReply(
   route: SlackRoute,
   text: string,
 ): Promise<string> {
+  return (await prepareSlackReply(client, route, text))();
+}
+export async function prepareSlackReply(
+  client: Inkbox,
+  route: SlackRoute,
+  text: string,
+): Promise<() => Promise<string>> {
   slackText(text);
   await ownSlackConnection(client, route.identityId, route.connectionId, route.workspaceId);
-  const key = createHash("sha256")
-    .update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text]))
-    .digest("hex");
-  const action = await client.slack.sendMessage(route.connectionId, {
-    conversationId: route.conversationId,
-    threadTs: route.threadTs,
-    text,
-    idempotencyKey: `opencode:${key}`,
-  });
-  if (action.status !== "sent")
-    throw new Error(
-      `Slack action ${action.id} is ${action.status}; inspect it with inkbox_slack_get_action before deciding whether to send again.`,
-    );
-  return action.id;
+  return async () => {
+    const key = createHash("sha256")
+      .update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text]))
+      .digest("hex");
+    const action = await client.slack.sendMessage(route.connectionId, {
+      conversationId: route.conversationId,
+      threadTs: route.threadTs,
+      text,
+      idempotencyKey: `opencode:${key}`,
+    });
+    if (action.status !== "sent")
+      throw new Error(
+        `Slack action ${action.id} is ${action.status}; inspect it with inkbox_slack_get_action before deciding whether to send again.`,
+      );
+    return action.id;
+  };
 }
 function timestampTicks(value: unknown): bigint {
   if (typeof value !== "string" || !/^\d{1,12}\.\d{1,6}$/.test(value))

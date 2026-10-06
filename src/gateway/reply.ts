@@ -1,7 +1,7 @@
 import type { InkboxRuntime } from "../client.js";
-import { sendNativeIMessage } from "../imessage-native.js";
+import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
-import { ownSlackConnection, sendSlackReply, slackText } from "../slack.js";
+import { prepareSlackReply } from "../slack.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
@@ -28,13 +28,12 @@ export async function prepareReply(
     return async () => ({ delivered: false, reason: trimmed ? "silent" : "empty" });
   if (target.channel === "slack") {
     if (!target.slack) throw new ReplyPreparationError("Slack reply route is missing.");
-    slackText(trimmed);
     const client = await runtime.getClient();
-    await ownSlackConnection(client, target.slack.identityId, target.slack.connectionId);
+    const send = await prepareSlackReply(client, target.slack, trimmed);
     return async () => ({
       delivered: true,
       reason: "sent",
-      messageId: await sendSlackReply(client, target.slack!, trimmed),
+      messageId: await send(),
     });
   }
   const parentId = target.companion?.replyToMessageId ?? target.messageId ?? "";
@@ -48,6 +47,10 @@ export async function prepareReply(
     throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
   }
   const identity = await runtime.getIdentity();
+  const nativeSend =
+    target.channel === "imessage" && target.imessageSource
+      ? await prepareNativeIMessage(identity, target, { text: body }, store)
+      : undefined;
   return async () => {
     const message =
       target.channel === "email"
@@ -59,8 +62,8 @@ export async function prepareReply(
                 ? { conversationId: target.conversationId }
                 : { to: target.to }),
             })
-          : target.imessageSource
-            ? await sendNativeIMessage(identity, target, { text: body }, store)
+          : nativeSend
+            ? await nativeSend()
             : await identity.sendIMessage({
                 text: body,
                 ...(target.conversationId
