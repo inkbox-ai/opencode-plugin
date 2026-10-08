@@ -597,19 +597,24 @@ export function createSlackProgress(options: {
     },
     async close() {
       while (intents.size) await Promise.all([...intents.values()]);
-      for (const id of mine) {
-        const entry = read()[id];
-        if (entry && !entry.terminal && (entry.streamId || entry.messageTs || entry.pending))
-          desired(
-            entry.route,
-            {
-              type: "task_update",
-              id: "work",
-              title: "Paused while reconnecting…",
-              status: "in_progress",
-            },
-            false,
-          );
+      try {
+        const rows = read();
+        for (const id of mine) {
+          const entry = rows[id];
+          if (entry && !entry.terminal && (entry.streamId || entry.messageTs || entry.pending))
+            desired(
+              entry.route,
+              {
+                type: "task_update",
+                id: "work",
+                title: "Paused while reconnecting…",
+                status: "in_progress",
+              },
+              false,
+            );
+        }
+      } catch {
+        warn("Slack progress cleanup is unavailable; shutdown will continue.");
       }
       closing = true;
       let timer: ReturnType<typeof setTimeout> | undefined;

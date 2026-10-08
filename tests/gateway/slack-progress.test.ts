@@ -284,6 +284,19 @@ describe("durable Slack task progress", () => {
     expect(d.slack.sendMessage).toHaveBeenCalledOnce();
     expect(d.slack.updateMessage.mock.calls.at(-1)?.[3]).toBe("Completed");
   });
+  it("does not let an unreadable progress journal prevent host shutdown", async () => {
+    const d = fixture();
+    d.p.notify(route, "accepted");
+    await d.p.flush();
+    writeFileSync(d.options.path, "not JSON");
+    await expect(d.p.close()).resolves.toBeUndefined();
+    expect(d.options.warn).toHaveBeenCalledWith(expect.stringContaining("shutdown will continue"));
+    expect(d.slack.updateMessage).not.toHaveBeenCalled();
+    writeFileSync(d.options.path, "{}");
+    d.p.notify(route, "accepted");
+    await d.p.flush();
+    expect(d.slack.sendMessage).toHaveBeenCalledOnce();
+  });
   it("reclaims only a proven-dead writer lock, never a live writer", async () => {
     const d = fixture();
     writeFileSync(`${d.options.path}.lock`, JSON.stringify({ pid: process.pid }));
