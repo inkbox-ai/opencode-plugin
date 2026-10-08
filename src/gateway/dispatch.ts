@@ -2,6 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
+import { reportedInline } from "../tools/send-outcome.js";
 import type { BurstBuffer } from "./burst.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
@@ -684,6 +685,7 @@ async function handleDeliveryFailure(
     failure: reason,
     failedBody: str(r?.text) ?? str(r?.content) ?? str(r?.snippet) ?? str(r?.subject),
   });
+  if (await reportedInline(messageId ?? "")) return true;
   if (!recovery.prompt) return true;
   void deps.sessions
     .runCapture(chatKey, recovery.prompt)

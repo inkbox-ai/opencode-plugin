@@ -750,3 +750,41 @@ describe("dispatchEvent call completion", () => {
     expect(onHostedCallEnded).toHaveBeenCalledWith(ended.body);
   });
 });
+
+it("counts inline failure once while suppressing a duplicate capture", async () => {
+  const { pollSendOutcome } = await import("../../src/tools/send-outcome.js");
+  const { resetDeliveryPolicyForTest } = await import("../../src/gateway/delivery-policy.js");
+  resetDeliveryPolicyForTest();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "inline-failure-"));
+  vi.stubEnv("INKBOX_SEND_OUTCOME_HOME", home);
+  try {
+    const deps = makeDeps();
+    await pollSendOutcome(deps.inkbox, {}, "sms", {
+      id: "inline-first",
+      deliveryStatus: "delivery_failed",
+    });
+    const failed = (id: string) =>
+      event("text.delivery_failed", {
+        text_message: {
+          id,
+          conversation_id: "inline-conversation",
+          remote_phone_number: "+15551112222",
+          error_detail: "Unavailable",
+        },
+      });
+    await dispatchEvent(deps, failed("inline-first"));
+    await dispatchEvent(deps, failed("inline-first"));
+    expect(deps.sessions.runCapture).not.toHaveBeenCalled();
+    await dispatchEvent(deps, failed("inline-second"));
+    expect(deps.sessions.runCapture).toHaveBeenCalledTimes(1);
+    expect(deps.sessions.runCapture).toHaveBeenCalledWith(
+      "ck",
+      expect.stringContaining("attempt=2/3"),
+    );
+    await dispatchEvent(deps, failed("inline-third"));
+    expect(deps.sessions.runCapture).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

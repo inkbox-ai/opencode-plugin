@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.18 (unreleased)
+
+- Send tools wait briefly for delivery updates and report status, transport, finality, and a plain-English outcome without repeating a send.
+- Suppress duplicate delivery-failure wakeups after an inline result while preserving retry accounting and native reply ownership.
+
 ## 0.2.17 (unreleased)
 
 - Delivers actual local Slack attachments with exact native tool/source ownership and durable unknown-outcome protection.

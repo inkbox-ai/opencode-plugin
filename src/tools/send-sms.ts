@@ -9,6 +9,7 @@ import {
 import { uploadLocalMedia } from "../gateway/media.js";
 import { assertSmsTextWithinLimit, SMS_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound, checkOutboundRecipients } from "../permissions.js";
+import { outcomeText, pollSendOutcome } from "./send-outcome.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
 const sendSmsArgs = {
@@ -174,12 +175,12 @@ export function sendSmsTools(deps: ToolDeps): RegisteredTool[] {
                 settleHostedSmsAttempt(hostedGuard, "success", undefined, providerMessageId);
               }
               const target = formatTargetSummary(msg, args);
-              const status = msg.deliveryStatus ?? "unknown";
+              const outcome = await pollSendOutcome(runtime, identity, "sms", msg);
               return {
                 title: hasConversation
                   ? `Text sent to conversation ${conversationId}`
                   : `Text sent to ${recipients.join(", ")}`,
-                output: `Sent text id=${msg.id} ${target} status=${status} (${args.text.length} chars)`,
+                output: `Sent text id=${msg.id} ${target} ${outcomeText(outcome)} (${args.text.length} chars)`,
               };
             } catch (error) {
               if (hostedGuard && !providerAccepted) {

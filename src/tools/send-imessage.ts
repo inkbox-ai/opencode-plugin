@@ -9,6 +9,7 @@ import {
 } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, IMESSAGE_MAX_TEXT_CHARS } from "../limits.js";
 import { approveOutbound } from "../permissions.js";
+import { outcomeText, pollSendOutcome } from "./send-outcome.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
 const SEND_STYLES = [
@@ -211,6 +212,13 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
                   ...(allMediaUrls.length ? { mediaUrls: allMediaUrls } : {}),
                   ...(args.sendStyle ? { sendStyle: args.sendStyle } : {}),
                 });
+            const outcome = await pollSendOutcome(
+              runtime,
+              identity,
+              "imessage",
+              msg,
+              toList.length > 1,
+            );
             const target = conversationId
               ? `conversation=${conversationId}`
               : `to=${toList.join(",")}`;
@@ -218,7 +226,7 @@ export function sendIMessageTools(deps: ToolDeps): RegisteredTool[] {
               title: conversationId
                 ? `iMessage sent to conversation ${conversationId}`
                 : `iMessage sent to ${toList.join(", ")}`,
-              output: `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} status=${msg.status ?? "unknown"}`,
+              output: `Sent iMessage id=${msg.id} ${target} conversation_id=${msg.conversationId} ${outcomeText(outcome)}`,
             };
           });
         },
