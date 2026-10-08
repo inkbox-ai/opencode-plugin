@@ -135,26 +135,38 @@ describe("durable Slack task progress", () => {
   it("retains a definitive unknown without repeatedly reading or resending it", async () => {
     const d = fixture();
     d.slack.sendMessage.mockResolvedValue(d.result("unknown"));
-    d.p.notify(route, "accepted"); await d.p.flush();
-    d.p.notify(route, "completed"); await d.p.flush();
+    d.p.notify(route, "accepted");
+    await d.p.flush();
+    d.p.notify(route, "completed");
+    await d.p.flush();
     for (let i = 0; i < 8; i++) await createSlackProgress(d.options).recover();
     expect(d.slack.getAction).not.toHaveBeenCalled();
     expect(d.slack.sendMessage).toHaveBeenCalledOnce();
     expect(d.slack.updateMessage).not.toHaveBeenCalled();
-    expect(Object.values(JSON.parse(readFileSync(d.options.path, "utf8")))[0]).toMatchObject({ pending: { outcomeUnknown: true }, terminal: true });
+    expect(Object.values(JSON.parse(readFileSync(d.options.path, "utf8")))[0]).toMatchObject({
+      pending: { outcomeUnknown: true },
+      terminal: true,
+    });
   });
   it("does not resolve a provider resource for unchanged applied progress", async () => {
-    const d = fixture(), resource = vi.fn(d.options.resource);
+    const d = fixture(),
+      resource = vi.fn(d.options.resource);
     const p = createSlackProgress({ ...d.options, resource });
-    p.notify(route, "accepted"); await p.flush();
-    for (let i = 0; i < 8; i++) { p.notify(route, "accepted"); await p.flush(); await p.recover(); }
+    p.notify(route, "accepted");
+    await p.flush();
+    for (let i = 0; i < 8; i++) {
+      p.notify(route, "accepted");
+      await p.flush();
+      await p.recover();
+    }
     expect(resource).toHaveBeenCalledOnce();
   });
   it("bounds pending read-only reconciliation across repeated restarts", async () => {
     const d = fixture(true);
     d.slack.startStream.mockRejectedValue(new Error("response lost"));
     d.slack.getOperationByKey.mockRejectedValue(new Error("not visible"));
-    d.p.notify(route, "accepted"); await d.p.flush();
+    d.p.notify(route, "accepted");
+    await d.p.flush();
     for (let i = 0; i < 12; i++) await createSlackProgress(d.options).recover();
     expect(d.slack.getOperationByKey).toHaveBeenCalledTimes(5);
     expect(d.slack.startStream).toHaveBeenCalledOnce();

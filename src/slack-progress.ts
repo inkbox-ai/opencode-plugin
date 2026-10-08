@@ -259,10 +259,11 @@ export function createSlackProgress(options: {
       return;
     }
     if (options.authorize && !(await options.authorize(entry.route, entry.terminal))) return;
-    if (entry.pending) mutate((rows) => {
-      const pending = rows[id]?.pending;
-      if (pending?.key === entry.pending?.key) pending!.lookups = (pending!.lookups ?? 0) + 1;
-    });
+    if (entry.pending)
+      mutate((rows) => {
+        const pending = rows[id]?.pending;
+        if (pending?.key === entry.pending?.key) pending!.lookups = (pending!.lookups ?? 0) + 1;
+      });
     const slack = await options.resource(entry.route);
     if (!slack.sendMessage || !slack.updateMessage) return;
     // Reads may cross a Stop or ownership change; recheck immediately before dispatch below.
