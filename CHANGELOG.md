@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.17 (unreleased)
+
+- Delivers actual local Slack attachments with exact native tool/source ownership and durable unknown-outcome protection.
+- Adds Slack mrkdwn guidance and code-preserving common-format repairs only for Slack replies.
+- Coalesces safe tool progress into optional native task streams or one edited source-bound message; never duplicates uncertain creates.
+- Verifies Stop followed by a new message, including restart at the confirmed execution-fence boundary.
+- Uses the published SDK 0.7.15 baseline with a compatible range for optional streaming upgrades.
+
 ## 0.2.16 (unreleased)
 
 - Adds opt-in Slack setup, six identity-owned tools, signed inbound routing, and channel-wide Companion context with exact source-thread replies.

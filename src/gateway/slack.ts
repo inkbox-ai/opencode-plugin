@@ -33,6 +33,7 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
   const route = parseSlack(event.body, identity.id);
   if (!route) return true;
   const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+  route.connectionGeneration = connection.generation;
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack connection workspace mismatch.");
   const nativeText = slackControlText(route, connection.botUserId);

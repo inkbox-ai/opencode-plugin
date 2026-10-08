@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Inkbox, SlackConnection } from "@inkbox/sdk";
+import { slackMrkdwn } from "./slack-style.js";
 
 export const SLACK_EVENTS = [
   "slack.dm_received",
@@ -11,6 +12,8 @@ export const SLACK_EVENTS = [
 export const SLACK_STOP = "slack.session_stopped";
 export const SLACK_SUBSCRIPTION_EVENTS = [...SLACK_EVENTS, SLACK_STOP];
 export type SlackRoute = {
+  connectionGeneration?: number;
+  recipientTeamId?: string;
   identityId: string;
   connectionId: string;
   workspaceId: string;
@@ -88,6 +91,10 @@ export function parseSlack(event: Record<string, any>, identityId: string): Slac
   if (!text.trim()) return;
   return {
     identityId,
+    recipientTeamId:
+      d.actor_profile?.id === d.actor_id && /^T[A-Z0-9]{1,63}$/.test(d.actor_profile?.team_id ?? "")
+        ? d.actor_profile.team_id
+        : undefined,
     connectionId: d.connection_id,
     workspaceId: d.workspace_id,
     conversationId: d.conversation_id,
@@ -117,6 +124,7 @@ export async function resolveSlackAuthor(
   if (profile?.id !== route.actorId || !/^T[A-Z0-9]{1,63}$/.test(profile?.team_id ?? ""))
     throw new Error("Slack sender home workspace is unavailable.");
   route.author = `${profile.team_id}:${route.actorId}`;
+  route.recipientTeamId = profile.team_id;
   route.senderContext = senderContext(profile, route.actorId);
 }
 export function slackRouteKey(route: SlackRoute): string {
@@ -137,6 +145,7 @@ export async function ownSlackConnection(
   identityId: string,
   connectionId: string,
   workspaceId?: string,
+  generation?: number,
 ): Promise<SlackConnection> {
   const matches = (await client.slack.listConnections(identityId)).connections.filter(
     (c) => c.id === connectionId,
@@ -145,7 +154,8 @@ export async function ownSlackConnection(
     matches.length !== 1 ||
     matches[0]?.identityId !== identityId ||
     matches[0]?.status !== "connected" ||
-    (workspaceId !== undefined && matches[0]?.workspaceId !== workspaceId)
+    (workspaceId !== undefined && matches[0]?.workspaceId !== workspaceId) ||
+    (generation !== undefined && matches[0]?.generation !== generation)
   )
     throw new Error("Slack connection is not connected to this identity.");
   return matches[0]!;
@@ -190,8 +200,15 @@ export async function prepareSlackReply(
   route: SlackRoute,
   text: string,
 ): Promise<() => Promise<string>> {
+  text = slackMrkdwn(text);
   slackText(text);
-  await ownSlackConnection(client, route.identityId, route.connectionId, route.workspaceId);
+  await ownSlackConnection(
+    client,
+    route.identityId,
+    route.connectionId,
+    route.workspaceId,
+    route.connectionGeneration,
+  );
   return async () => {
     const key = createHash("sha256")
       .update(JSON.stringify([route.sourceEventId, slackRouteKey(route), text]))
@@ -242,6 +259,7 @@ export async function prepareSlackSource(
   )
     throw new Error("Invalid Slack Companion coordinates.");
   const connection = await ownSlackConnection(client, identityId, route.connectionId);
+  route.connectionGeneration = connection.generation;
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack workspace does not match its connection.");
   const ticks = timestampTicks(route.messageTs);

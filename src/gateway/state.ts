@@ -94,6 +94,7 @@ export interface StateStore {
   // Merge-and-write. Atomic (tmp file + rename) so a crash never leaves a
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
+  updateSlackSend(key: string, update: (entry: unknown) => unknown): void;
   updateIMessageSend(key: string, update: (entry: unknown) => unknown): void;
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
   setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
@@ -219,6 +220,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
       return mutate((state) => {
         const next = { ...state, ...patch };
         return [next, next];
+      });
+    },
+    updateSlackSend(key, update) {
+      mutate((state) => {
+        const entries = (state.slackSends ?? {}) as Record<string, unknown>;
+        const entry = update(entries[key]);
+        return entry === undefined
+          ? [state, undefined]
+          : [{ ...state, slackSends: { ...entries, [key]: entry } }, undefined];
       });
     },
     updateIMessageSend(key, update) {

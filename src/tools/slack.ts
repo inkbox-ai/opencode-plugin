@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { runTool } from "../errors.js";
 import { formatJson } from "../format.js";
 import { approveOutbound } from "../permissions.js";
 import { ownSlackConnection, slackText } from "../slack.js";
+import { slackMrkdwn } from "../slack-style.js";
+import { uploadSlackFile } from "../slack-upload.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 
 const text = z
@@ -46,13 +49,33 @@ const specs = [
     },
   },
   {
+    name: "upload_file",
+    description:
+      "Upload an actual local file to Slack. Supply filePath, never invented base64 or a delivery claim. Active-conversation uploads retain the original thread. Inspect unknown results with get_operation; never resend an uncertain upload.",
+    args: {
+      connectionId: text,
+      conversationId: text,
+      filePath: text,
+      filename: text.max(255).optional(),
+      title: text.max(255).optional(),
+      initialComment: text.max(12000).optional(),
+      threadTs: text.nullable().optional(),
+      idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    },
+  },
+  {
+    name: "get_operation",
+    description: "Inspect a Slack file/progress operation without repeating its effects.",
+    args: { connectionId: text, operationId: text },
+  },
+  {
     name: "get_action",
     description:
       "Inspect a Slack send action; an unknown outcome must not cause duplicate sending.",
     args: { connectionId: text, actionId: text },
   },
 ] as const;
-export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
+export function slackTools({ runtime, config, opencode }: ToolDeps): RegisteredTool[] {
   if (!config.gateway?.slackEnabled) return [];
   return specs.map((spec) => ({
     name: `inkbox_slack_${spec.name}`,
@@ -95,6 +118,7 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
               });
               break;
             case "send_message":
+              args.text = slackMrkdwn(args.text);
               slackText(args.text);
               await approveOutbound(ctx, config, {
                 tool: "inkbox_slack_send_message",
@@ -109,6 +133,38 @@ export function slackTools({ runtime, config }: ToolDeps): RegisteredTool[] {
                 threadTs: args.threadTs,
                 idempotencyKey: args.idempotencyKey,
               });
+              break;
+            case "upload_file":
+              result = await uploadSlackFile(
+                {
+                  runtime,
+                  opencode,
+                  enabled: () => config.gateway.slackEnabled,
+                  approve: (file) =>
+                    approveOutbound(ctx, config, {
+                      tool: "inkbox_slack_upload_file",
+                      recipients: [`slack:${args.connectionId}:${args.conversationId}`],
+                      summary: `Upload ${file.filename} to Slack`,
+                      patterns: [
+                        `slack-file:${createHash("sha256")
+                          .update(
+                            JSON.stringify([args.connectionId, args.conversationId, file.path]),
+                          )
+                          .digest("hex")}`,
+                      ],
+                      metadata: {
+                        filename: file.filename,
+                        filePath: file.path,
+                        conversationId: args.conversationId,
+                      },
+                    }),
+                },
+                args as any,
+                ctx,
+              );
+              break;
+            case "get_operation":
+              result = await client.slack.getOperation(args.connectionId, args.operationId);
               break;
             case "get_action":
               result = await client.slack.getAction(args.connectionId, args.actionId);

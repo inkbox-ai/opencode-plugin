@@ -13,6 +13,8 @@ import { createServer } from "node:http";
 
 const PORT = Number(process.argv[2] ?? 8088);
 const NONCE = /smoke-[0-9a-f]{6,}/g;
+let stopStreamsStarted = 0;
+let fixtureRequest = {};
 
 function replyText(req) {
   const nonce = JSON.stringify(req).match(NONCE)?.at(-1);
@@ -36,6 +38,8 @@ const completion = (id, model, text) => ({
 
 createServer((req, res) => {
   if (req.method === "GET") {
+    if (req.url === "/fixture-state")
+      return sendJson(res, 200, { stopStreamsStarted, fixtureRequest });
     if ((req.url ?? "").replace(/\/$/, "").endsWith("/models")) {
       return sendJson(res, 200, {
         object: "list",
@@ -60,6 +64,77 @@ createServer((req, res) => {
     const text = replyText(body);
     const id = `chatcmpl-${randomUUID()}`;
 
+    const lastUser = body.messages?.findLastIndex((message) => message.role === "user") ?? -1;
+    const input = JSON.stringify(body.messages?.[lastUser] ?? "");
+    fixtureRequest = {
+      stop: input.includes("SLACK_STOP_FIXTURE"),
+      followup: input.includes("smoke-aabbcc55"),
+      upload: input.includes("SLACK_UPLOAD_FIXTURE"),
+      roles: body.messages?.map((message) => message.role),
+    };
+    if (input.includes("SLACK_STOP_FIXTURE") && !input.includes("smoke-aabbcc55")) {
+      // Held synthetic generation proves actual host Stop releases a later source.
+      stopStreamsStarted += 1;
+      // Start a real SSE generation before holding it. Holding HTTP headers tests
+      // provider connection startup rather than cancellation of an accepted run.
+      if (body.stream) {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        const emit = (delta, finish_reason = null) =>
+          res.write(
+            `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
+          );
+        emit({ role: "assistant", content: "Working on the synthetic fixture." });
+        const timer = setTimeout(() => {
+          emit({}, "stop");
+          res.end("data: [DONE]\n\n");
+        }, 30000);
+        res.on("close", () => clearTimeout(timer));
+      } else {
+        const timer = setTimeout(() => sendJson(res, 200, completion(id, model, text)), 30000);
+        res.on("close", () => clearTimeout(timer));
+      }
+      return;
+    }
+    if (
+      input.includes("SLACK_UPLOAD_FIXTURE") &&
+      !input.includes("SLACK_STOP_FIXTURE") &&
+      !input.includes("smoke-aabbcc55") &&
+      !body.messages.slice(lastUser + 1).some((message) => message.role === "tool")
+    ) {
+      const call = {
+        id: "call_slack_fixture",
+        type: "function",
+        function: {
+          name: "inkbox_slack_upload_file",
+          arguments: JSON.stringify({
+            connectionId: "connection",
+            conversationId: "CROOM",
+            filePath: "chart.png",
+            idempotencyKey: "native-fixture",
+          }),
+        },
+      };
+      if (!body.stream)
+        return sendJson(res, 200, {
+          ...completion(id, model, ""),
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", tool_calls: [call] },
+              finish_reason: "tool_calls",
+            },
+          ],
+        });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const emit = (delta, finish_reason = null) =>
+        res.write(
+          `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
+        );
+      emit({ role: "assistant", tool_calls: [{ index: 0, ...call }] });
+      emit({}, "tool_calls");
+      res.end("data: [DONE]\n\n");
+      return;
+    }
     if (!body.stream) return sendJson(res, 200, completion(id, model, text));
 
     // SSE streaming: one content delta, then the stop chunk, then [DONE].

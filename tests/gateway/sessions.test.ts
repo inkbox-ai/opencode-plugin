@@ -2421,8 +2421,8 @@ describe("native iMessage durable source ownership", () => {
 });
 
 describe("Slack native host lifecycle", () => {
-  function setup() {
-    const d = makeManager();
+  function setup(existingDir?: string) {
+    const d = makeManager(existingDir);
     d.config.gateway.slackEnabled = true;
     const route: import("../../src/slack.js").SlackRoute = {
       identityId: "identity-1",
@@ -2694,6 +2694,75 @@ describe("Slack native host lifecycle", () => {
     );
     expect(d.slack.sendMessage).not.toHaveBeenCalled();
     expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    await d.mgr.close();
+  });
+  it.each([false, true])(
+    "runs the next Slack message after verified Stop (restart=%s)",
+    async (restart) => {
+      let d = setup();
+      d.setAutoComplete(false);
+      await inboundSlack(d);
+      await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+      const first = d.state.listTurns().find((turn) => turn.state === "submitted")!;
+      await d.mgr.stopSlack!({ ...d.route, sourceEventId: "stop-before-followup" });
+      expect(d.state.getTurn(first.id)).toMatchObject({
+        state: "interrupted",
+        executionFenced: true,
+      });
+      if (restart) {
+        await d.mgr.close();
+        const dir = d.dir;
+        d = setup(dir);
+        // Simulate a crash at the durable proof boundary, before terminal bookkeeping.
+        d.state.updateTurn(first.id, { state: "paused", executionFenced: true });
+        await d.mgr.catchUp();
+      }
+      d.setAutoComplete(true);
+      await inboundSlack(d, {
+        message_ts: "1770000001.000001",
+        thread_ts: d.route.threadTs,
+        event: { type: "message", text: "after stop" },
+      });
+      await vi.waitFor(() => expect(d.slack.sendMessage).toHaveBeenCalledOnce());
+      expect((d.slack.sendMessage.mock.calls as any[])[0]?.[1].threadTs).toBe(d.route.threadTs);
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(restart ? 1 : 2);
+      expect(d.opencode.session.promptAsync.mock.calls.at(-1)?.[0].body.system).toContain(
+        "This turn is on Slack",
+      );
+      await d.mgr.close();
+    },
+  );
+  it("gateway-owned progress closes the exact active card on verified Stop", async () => {
+    const d = setup();
+    d.setAutoComplete(false);
+    const update = vi.fn(async () => ({
+      id: "edit",
+      status: "succeeded",
+      connectionId: "connection",
+      conversationId: "CROOM",
+      messageTs: "2.0",
+    }));
+    Object.assign(d.slack, { updateMessage: update, getOperation: vi.fn() });
+    d.slack.sendMessage.mockResolvedValue({
+      id: "card",
+      status: "sent",
+      connectionId: "connection",
+      conversationId: "CROOM",
+      messageTs: "2.0",
+    } as any);
+    await inboundSlack(d);
+    await vi.waitFor(() => expect(d.slack.sendMessage).toHaveBeenCalledOnce());
+    await d.mgr.stopSlack!({ ...d.route, sourceEventId: "stop-with-card" });
+    await vi.waitFor(() =>
+      expect(update).toHaveBeenCalledWith(
+        "connection",
+        "CROOM",
+        "2.0",
+        "Stopped",
+        expect.anything(),
+      ),
+    );
+    expect(d.slack.sendMessage).toHaveBeenCalledOnce();
     await d.mgr.close();
   });
   it("keeps Slack Stop blocked until native execution is fenced and replays only its original targets", async () => {
