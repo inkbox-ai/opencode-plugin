@@ -74,6 +74,10 @@ afterEach(() => vi.unstubAllGlobals());
 describe("Slack signed source and published SDK contract", () => {
   it("keeps ordinary approval authors stable when optional home-workspace profiles appear or disappear", () => {
     expect(parseSlack(event(), identityId)?.author).toBe("TINSTALL:UPERSON");
+    expect(parseSlack(event(), identityId)?.recipientTeamId).toBe("THOME");
+    expect(
+      parseSlack(event({ actor_profile: undefined }), identityId)?.recipientTeamId,
+    ).toBeUndefined();
     expect(parseSlack(event({ actor_profile: undefined }), identityId)?.author).toBe(
       "TINSTALL:UPERSON",
     );
@@ -91,6 +95,7 @@ describe("Slack signed source and published SDK contract", () => {
     )!;
     expect(route.author).toBe("TINSTALL:UPERSON");
     expect(route.senderContext).toBeUndefined();
+    expect(route.recipientTeamId).toBeUndefined();
   });
   it.each(["UPERSON", "UOTHER"])(
     "keeps ordinary Stop independent of profile lookup for actor %s",
@@ -482,8 +487,8 @@ describe("guided Slack setup", () => {
     expect(installation).not.toHaveBeenCalled();
   });
 });
-describe("six opt-in Slack tools", () => {
-  it("keeps exactly six names, validates args before API, and no arbitrary status/reaction tools", async () => {
+describe("eight opt-in Slack tools", () => {
+  it("keeps exactly eight names, validates args before API, and no arbitrary status/reaction tools", async () => {
     const sdk = client();
     const tools = slackTools({
       runtime: { getClient: async () => sdk, getIdentity: async () => ({ id: identityId }) },
@@ -495,6 +500,8 @@ describe("six opt-in Slack tools", () => {
       "list_messages",
       "search",
       "send_message",
+      "upload_file",
+      "get_operation",
       "get_action",
     ]);
     const send = tools.find((tool) => tool.name === "inkbox_slack_send_message");

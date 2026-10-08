@@ -321,7 +321,7 @@ describe("buildChannelPrompt", () => {
   });
 
   it("states the plain-text rule for phone channels", () => {
-    expect(full).toContain("Plain text only.");
+    expect(full).toContain("Plain text on phone channels.");
     expect(full).toContain("No markdown on phone channels");
   });
 

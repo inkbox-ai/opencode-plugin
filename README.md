@@ -477,15 +477,21 @@ validated for a future release — see `docs/gateway-spike.md` for the current
 findings.
 
 
-### Slack and native iMessage replies (0.2.16)
+### Slack and native iMessage replies (0.2.17)
 
 Slack is off by default. Run `inkbox-opencode setup` to enable it, select the app's provisioning workspace, provide or renew App Configuration credentials through masked input, open the browser installation link, and wait for the matching workspace connection. Setup is bounded and can be resumed; an unknown app-creation outcome is never blindly repeated. For an already connected identity, set `INKBOX_SLACK_ENABLED=true` or `gateway.slackEnabled: true` and restart.
 
-The six Slack tools are `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Search covers retained message text, not all workspace history or files; follow `nextCursor` even when a page is empty. Reuse the same idempotency key for a send retry and inspect unknown actions before doing anything else.
+The eight Slack tools are `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, `inkbox_slack_upload_file`, `inkbox_slack_get_operation`, and `inkbox_slack_get_action`. Search covers retained message text, not all workspace history or files; follow `nextCursor` even when a page is empty. Reuse the same idempotency key for a send retry and inspect unknown actions before doing anything else.
 
 Ordinary Slack channel traffic starts a session only when addressed; later messages in that engaged thread can continue it. Unmentioned traffic in unrelated threads does not wake the agent or display activity. DMs and group DMs do not require a prior session.
 
 Slack Companion context spans the channel within one identity, installation, and activation. Replies and approvals remain bound to the current native thread; a null thread stays top-level. The existing Safe/Relaxed and Auto/Mention settings apply. Quiet context makes no model/tool/activity calls. Local Slack allowlists may use a bare actor ID or the installation-workspace `WORKSPACE_ID:ACTOR_ID`; Companion also recognizes the canonical home-workspace author. Matching sender-profile fields provide bounded context, never additional authority.
+
+Generated files can be delivered with `inkbox_slack_upload_file`: provide an actual local `filePath` (1 byte–10 MiB), connection/conversation, and idempotency key. The plugin reads the bytes itself and retains the active source thread. It checkpoints the native tool call before upload, never replays an unknown outcome, and returns the real operation status/file ID. Inspect uncertain outcomes with `inkbox_slack_get_operation`; text saying “attached” is not delivery.
+
+Slack turns receive Slack-specific mrkdwn guidance; simple Markdown links/bold are repaired outside code. Progress is coalesced into native task updates when optional SDK streaming methods and backend capability are available; otherwise a single source-bound message is edited in place. The published SDK 0.7.15 is the supported baseline (`^0.7.15` permits later compatible upgrades). Inline DMs stay inline. Unknown progress creations are not retried or replaced, and progress failure never blocks the final answer. Progress uses bounded generic tool labels, never arguments, file paths, raw results, or delegation IDs. The progress journal requires a local filesystem with hard-link support; do not share the same plugin state directory between containers with separate PID namespaces.
+
+Verified native Stop acknowledges abort and confirms idle before releasing the queue; a later source can run after Stop or restart without replaying the old turn. An unverified stop or unknown crossed send remains fenced/inspectable rather than being guessed safe.
 
 Top-level inline replies show eyes while working or awaiting approval; a failed reply clears eyes and adds an X. Native thread replies use Slack's working/awaiting-input/ready indicator, never eyes. Indicators are best-effort and cannot prove visible client behavior: verify the actual Slack UI during acceptance.
 

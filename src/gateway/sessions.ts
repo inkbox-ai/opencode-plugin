@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import {
@@ -13,6 +13,8 @@ import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js";
 import { createSlackActivity } from "../slack-activity.js";
+import { createSlackProgress } from "../slack-progress.js";
+import { SLACK_STYLE_PROMPT } from "../slack-style.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -159,19 +161,60 @@ export function createSessionManager(
       if (route) {
         if ((await deps.inkbox.getIdentity()).id !== route.identityId)
           throw new Error("Slack activity identity changed.");
-        await ownSlackConnection(client, route.identityId, route.connectionId, route.workspaceId);
+        await ownSlackConnection(
+          client,
+          route.identityId,
+          route.connectionId,
+          route.workspaceId,
+          route.connectionGeneration,
+        );
       }
       return client.slack;
     },
     join(gatewayHome(), "slack-activity.json"),
     (message) => deps.logger.warn(message),
   );
+  const progress = createSlackProgress({
+    path: join(dirname(deps.state.filePath), "slack-progress.json"),
+    warn: (message) => deps.logger.warn(message),
+    resource: async (route) => {
+      if (!deps.config.gateway.slackEnabled) throw new Error("Slack is disabled.");
+      const client = await deps.inkbox.getClient();
+      if ((await deps.inkbox.getIdentity()).id !== route.identityId)
+        throw new Error("Slack identity changed.");
+      await ownSlackConnection(
+        client,
+        route.identityId,
+        route.connectionId,
+        route.workspaceId,
+        route.connectionGeneration,
+      );
+      return client.slack;
+    },
+    authorize: (route, terminal) => {
+      if (!deps.config.gateway.slackEnabled) return false;
+      return deps.state
+        .listTurns()
+        .some(
+          (turn) =>
+            ((terminal && (TERMINAL.has(turn.state) || turn.executionFenced)) ||
+              (turn.ownerId === ownerId && (turn.leaseUntil ?? 0) > Date.now())) &&
+            turn.replyTarget?.slack?.sourceEventId === route.sourceEventId &&
+            slackRouteKey(turn.replyTarget.slack) === slackRouteKey(route as SlackRoute) &&
+            (terminal ||
+              (!turn.executionFenced &&
+                ["submitting", "submitted", "queued"].includes(turn.state))),
+        );
+    },
+  });
   function activityEvent(
     turn: DurableTurn,
     event: import("../slack-activity.js").SlackActivityEvent,
   ) {
-    if (turn.replyTarget?.slack && deps.config.gateway.slackEnabled)
+    if (turn.replyTarget?.slack && deps.config.gateway.slackEnabled) {
       activity.notify(turn.replyTarget.slack, event);
+      progress.notify(turn.replyTarget.slack, event);
+    }
   }
   async function authorizeSlack(turn: DurableTurn): Promise<void> {
     const route = turn.replyTarget?.slack ?? turn.companion?.slack;
@@ -180,7 +223,13 @@ export function createSessionManager(
     const identity = await deps.inkbox.getIdentity();
     if (identity.id !== route.identityId) throw new Error("Slack identity changed.");
     const client = await deps.inkbox.getClient();
-    await ownSlackConnection(client, identity.id, route.connectionId, route.workspaceId);
+    await ownSlackConnection(
+      client,
+      identity.id,
+      route.connectionId,
+      route.workspaceId,
+      route.connectionGeneration,
+    );
     const c = turn.companion;
     if (c?.metadata.activation_id) {
       const page = await client.companion.activationMessages(c.handle, c.metadata.activation_id, {
@@ -303,7 +352,10 @@ export function createSessionManager(
   async function promptBody(turn: DurableTurn): Promise<Record<string, unknown>> {
     const g = deps.config.gateway;
     const agent = turn.agent ?? g.agent;
-    const system = await identitySystem();
+    const identityPrompt = await identitySystem();
+    const system = turn.replyTarget?.slack
+      ? [identityPrompt, SLACK_STYLE_PROMPT].filter(Boolean).join("\n\n")
+      : identityPrompt;
     let tools: Record<string, boolean> | undefined;
     if (turn.hostedCapture) {
       // Hosted post-call turns expose only the tools required to complete
@@ -793,6 +845,25 @@ export function createSessionManager(
         .catch(() => deps.logger.warn("sessions.permission_inventory_failed", {}));
       if (closing) return undefined;
       const messages = await listMessages(turn.sessionID);
+      if (turn.replyTarget?.slack && deps.state.getTurn(turn.id)?.state === "submitted") {
+        for (const message of messages) {
+          if (message?.info?.role !== "assistant" || message.info.parentID !== turn.messageID)
+            continue;
+          for (const part of message.parts ?? []) {
+            if (
+              part.type === "tool" &&
+              typeof part.tool === "string" &&
+              typeof part.callID === "string" &&
+              ["running", "completed", "error"].includes(part.state?.status)
+            )
+              progress.observe(turn.replyTarget.slack, {
+                tool: part.tool,
+                id: part.callID,
+                status: part.state.status,
+              });
+          }
+        }
+      }
       const userIndex = messages.findIndex((message) => message?.info?.id === turn.messageID);
       if (userIndex < 0) {
         if (turn.state === "submitting") throw new Error("Prompt acceptance is ambiguous.");
@@ -1167,8 +1238,8 @@ export function createSessionManager(
   }
 
   function enqueue(turn: DurableTurn): void {
-    if (!turn.companion || (turn.companion.hydrated && turn.wake)) activityEvent(turn, "accepted");
     if (!deps.state.getTurn(turn.id)) deps.state.saveTurn(turn);
+    if (!turn.companion || (turn.companion.hydrated && turn.wake)) activityEvent(turn, "accepted");
     const entry = per(turn.chatKey);
     if (entry.runningId !== turn.id && !entry.queue.includes(turn.id)) entry.queue.push(turn.id);
     if (turn.companion)
@@ -1883,7 +1954,16 @@ export function createSessionManager(
     },
 
     async catchUp() {
-      if (deps.config.gateway.slackEnabled) await activity.recover();
+      if (deps.config.gateway.slackEnabled) {
+        await activity.recover();
+        for (const turn of deps.state.listTurns())
+          if (turn.replyTarget?.slack && (TERMINAL.has(turn.state) || turn.executionFenced))
+            progress.notify(
+              turn.replyTarget.slack,
+              turn.state === "delivered" ? "completed" : "cancelled",
+            );
+        await progress.recover();
+      }
       const recoverable = deps.state
         .listTurns()
         .filter((turn) => !TERMINAL.has(turn.state) && !turn.hostedCapture && !turn.a2aContext)
@@ -1903,6 +1983,7 @@ export function createSessionManager(
     async close() {
       closing = true;
       await activity.close();
+      await progress.close();
       for (const turn of deps.state.listTurns()) {
         if (turn.ownerId === ownerId && turn.state !== "delivery_started")
           deps.state.updateTurn(turn.id, { ownerId: undefined, leaseUntil: 0 });
