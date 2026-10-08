@@ -132,16 +132,33 @@ describe("durable Slack task progress", () => {
     expect(d.slack.sendMessage).toHaveBeenCalledOnce();
     expect(d.slack.updateMessage).not.toHaveBeenCalled();
   });
-  it("retains an unknown action and recovers it read-only", async () => {
+  it("retains a definitive unknown without repeatedly reading or resending it", async () => {
     const d = fixture();
     d.slack.sendMessage.mockResolvedValue(d.result("unknown"));
-    d.p.notify(route, "accepted");
-    await d.p.flush();
-    d.p.notify(route, "completed");
-    await d.p.flush();
-    expect(d.slack.getAction).toHaveBeenCalledWith(route.connectionId, "operation");
+    d.p.notify(route, "accepted"); await d.p.flush();
+    d.p.notify(route, "completed"); await d.p.flush();
+    for (let i = 0; i < 8; i++) await createSlackProgress(d.options).recover();
+    expect(d.slack.getAction).not.toHaveBeenCalled();
     expect(d.slack.sendMessage).toHaveBeenCalledOnce();
-    expect(d.slack.updateMessage).toHaveBeenCalledOnce();
+    expect(d.slack.updateMessage).not.toHaveBeenCalled();
+    expect(Object.values(JSON.parse(readFileSync(d.options.path, "utf8")))[0]).toMatchObject({ pending: { outcomeUnknown: true }, terminal: true });
+  });
+  it("does not resolve a provider resource for unchanged applied progress", async () => {
+    const d = fixture(), resource = vi.fn(d.options.resource);
+    const p = createSlackProgress({ ...d.options, resource });
+    p.notify(route, "accepted"); await p.flush();
+    for (let i = 0; i < 8; i++) { p.notify(route, "accepted"); await p.flush(); await p.recover(); }
+    expect(resource).toHaveBeenCalledOnce();
+  });
+  it("bounds pending read-only reconciliation across repeated restarts", async () => {
+    const d = fixture(true);
+    d.slack.startStream.mockRejectedValue(new Error("response lost"));
+    d.slack.getOperationByKey.mockRejectedValue(new Error("not visible"));
+    d.p.notify(route, "accepted"); await d.p.flush();
+    for (let i = 0; i < 12; i++) await createSlackProgress(d.options).recover();
+    expect(d.slack.getOperationByKey).toHaveBeenCalledTimes(5);
+    expect(d.slack.startStream).toHaveBeenCalledOnce();
+    expect(d.slack.sendMessage).not.toHaveBeenCalled();
   });
   it("checks ownership again after a delayed capability read", async () => {
     const d = fixture(true);

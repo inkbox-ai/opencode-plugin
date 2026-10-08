@@ -96,6 +96,8 @@ type Effect = {
   resultId?: string;
   terminal: boolean;
   polls?: number;
+  lookups?: number;
+  outcomeUnknown?: boolean;
 };
 type Entry = {
   route: ProgressRoute;
@@ -250,11 +252,17 @@ export function createSlackProgress(options: {
   async function apply(id: string) {
     let entry = read()[id];
     if (!entry || !valid(id, entry) || entry.done) return;
+    if (!entry.pending && entry.applied >= entry.revision) return;
+    if (entry.pending?.outcomeUnknown || (entry.pending?.lookups ?? 0) >= 5) return;
     if ((entry.retryAt ?? 0) > Date.now()) {
       schedule(id, entry.retryAt! - Date.now());
       return;
     }
     if (options.authorize && !(await options.authorize(entry.route, entry.terminal))) return;
+    if (entry.pending) mutate((rows) => {
+      const pending = rows[id]?.pending;
+      if (pending?.key === entry.pending?.key) pending!.lookups = (pending!.lookups ?? 0) + 1;
+    });
     const slack = await options.resource(entry.route);
     if (!slack.sendMessage || !slack.updateMessage) return;
     // Reads may cross a Stop or ownership change; recheck immediately before dispatch below.
@@ -420,6 +428,7 @@ export function createSlackProgress(options: {
         }
       } else {
         if (result.id) entry.pending.resultId = result.id;
+        if (result.status === "unknown") entry.pending.outcomeUnknown = true;
         if (["sending", "in_progress"].includes(result.status) && (entry.pending.polls ?? 0) < 5) {
           entry.pending.polls = (entry.pending.polls ?? 0) + 1;
           schedule(id, 1000);
