@@ -46,9 +46,20 @@ export function sendOutcome(
         status === "delivered" ||
         (kind === "sms" && status === "delivery_unconfirmed") ||
         (kind === "imessage" && status === "sent" && (group || service === "sms"));
-  const detail = message.errorDetail ?? message.error_detail ?? message.errorMessage ?? null;
+  const detail =
+    message.errorDetail ??
+    message.error_detail ??
+    message.errorMessage ??
+    message.error_message ??
+    null;
   let note = "Still in flight. Re-read the message for the outcome; do not resend.";
-  if (failures.has(status))
+  const code = message.errorCode ?? message.error_code ?? null;
+  if (
+    code === "send_outcome_ambiguous" ||
+    (message.errorReason ?? message.error_reason) === "delivery_unconfirmed"
+  )
+    note = "Delivery could not be confirmed. The outcome is unknown; do not resend.";
+  else if (failures.has(status))
     note = `Delivery failed: ${detail || "the message could not be delivered."}`;
   else if (status === "delivery_unconfirmed")
     note = "No delivery receipt was received; the outcome is unknown. Do not resend.";
@@ -61,7 +72,7 @@ export function sendOutcome(
     status,
     service,
     delivery_final: final,
-    error_code: message.errorCode ?? message.error_code ?? null,
+    error_code: code,
     error_detail: detail,
     note,
   };
