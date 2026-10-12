@@ -1,5 +1,5 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import type { GatewayLogger, SessionManager } from "./types.js";
 
 export interface CommandDeps {

@@ -4,10 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gatewayHome } from "../gateway/state.js";
 import { daemonPaths, pidAlive, readPidFile, stopDaemon } from "./daemon.js";
+import { resolveOpencodeBin } from "./serve.js";
+import { hostMajor } from "./wrappers.js";
 
 // Boot/login autostart for the gateway: a systemd user unit on Linux, a
-// launchd agent on macOS. The service runs `inkbox-opencode run`, which owns
-// its opencode server, so one service is the whole always-on stack.
+// launchd agent on macOS. The service runs `inkbox-opencode run`.
 
 export const SERVICE_NAME = "inkbox-opencode";
 export const LAUNCHD_LABEL = "ai.inkbox.opencode";
@@ -157,6 +158,7 @@ async function installSystemd(c: Ctx): Promise<boolean> {
       "",
       "[Service]",
       "Type=simple",
+      `KillMode=${hostMajor(resolveOpencodeBin(c.env.INKBOX_OPENCODE_BIN ?? "opencode", c.env, c.execPath)) === 2 ? "process" : "control-group"}`,
       `Environment=INKBOX_OPENCODE_ENV_FILE=${envFile}`,
       `WorkingDirectory=${c.projectDirectory}`,
       `ExecStart="${c.execPath}" "${c.entry}" run`,

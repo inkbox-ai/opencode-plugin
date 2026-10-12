@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import { type ActiveA2ATurn, clearActiveA2ATurn, setActiveA2ATurn } from "../a2a-context.js";
 import {
   a2aProgressSystemPrompt,
@@ -11,6 +10,7 @@ import {
 } from "../a2a-progress.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js";
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
@@ -439,14 +439,17 @@ export function createSessionManager(
     if (turn.companion) assertCompanionSize(JSON.stringify(body));
     // Native counters are process-local, so wall time alone is insufficient
     // when the preceding assistant and this submission share a millisecond.
-    const precedingMessageID = (await listMessages(sessionID))
-      .map((message) => message?.info?.id)
-      .filter(
-        (id): id is string =>
-          typeof id === "string" && /^msg_[a-f0-9]{12}[0-9A-Za-z]{14}$/.test(id),
-      )
-      .sort()
-      .at(-1);
+    const precedingMessageID =
+      deps.opencode.protocol === 2
+        ? undefined
+        : (await listMessages(sessionID))
+            .map((message) => message?.info?.id)
+            .filter(
+              (id): id is string =>
+                typeof id === "string" && /^msg_[a-f0-9]{12}[0-9A-Za-z]{14}$/.test(id),
+            )
+            .sort()
+            .at(-1);
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
     await authorizeSlack(turn);
@@ -459,7 +462,10 @@ export function createSessionManager(
         state: "submitting",
         sessionID,
         // Native history ordering follows the prompt ID, not queue admission.
-        messageID: createMessageID(precedingMessageID),
+        messageID:
+          deps.opencode.protocol === 2
+            ? `msg_${randomUUID()}`
+            : createMessageID(precedingMessageID),
       },
       turn.companion ? ownerId : undefined,
     );

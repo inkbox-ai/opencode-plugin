@@ -1,12 +1,14 @@
-import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
 import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
 import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
+import { hostMajor, incompatibleWrappers } from "./wrappers.js";
 
 export type Severity = "error" | "warning" | "info";
 
@@ -162,8 +164,35 @@ export async function runDoctor(
   // An explicitly configured server must answer; the default URL falling
   // through to a managed `opencode serve` only needs the binary to exist.
   const explicit = config.gateway.serverUrl;
-  const serverUrl = explicit ?? DEFAULT_OPENCODE_SERVER_URL;
-  const opencode = deps.opencode ?? createOpencodeClient({ baseUrl: serverUrl });
+  let serverUrl = explicit ?? DEFAULT_OPENCODE_SERVER_URL;
+  let opencode = deps.opencode;
+  if (!opencode) {
+    try {
+      const { connectV2Server } = await import("./v2-server.js");
+      const server = await connectV2Server(config, false);
+      if (server) {
+        serverUrl = server.url;
+        opencode = server.client;
+        await opencode?.tool.ids({
+          query: { directory: config.gateway.projectDirectory ?? deps.cwd ?? process.cwd() },
+        });
+        add("info", "OpenCode V2 adapter and plugin configuration verified.");
+      }
+    } catch (error) {
+      add("error", error instanceof Error ? error.message : "OpenCode V2 connection failed.");
+    }
+    const major = hostMajor(config.gateway.serve.bin);
+    if (major)
+      for (const file of incompatibleWrappers(
+        [deps.cwd ?? process.cwd(), config.gateway.projectDirectory ?? deps.cwd ?? process.cwd()],
+        major,
+      ))
+        add(
+          "error",
+          `Update the plugin wrapper at ${file} for OpenCode V${major}, preserving its options. See the README.`,
+        );
+  }
+  opencode ??= createOpencodeClient({ baseUrl: serverUrl });
   if (await opencodeReachable(opencode)) {
     add("info", `opencode server reachable at ${serverUrl}.`);
   } else if (explicit) {
@@ -177,7 +206,9 @@ export async function runDoctor(
     if (found) {
       add(
         "info",
-        `no opencode server at ${serverUrl}; the gateway will launch its own \`${bin} serve\` on port ${port}.`,
+        !deps.opencode && hostMajor(bin) === 2
+          ? "No shared OpenCode V2 service is running; the gateway will start one."
+          : `no opencode server at ${serverUrl}; the gateway will launch its own \`${bin} serve\` on port ${port}.`,
       );
     } else {
       add(

@@ -1,5 +1,6 @@
 import type { ResolvedConfig } from "../config.js";
 import { DEFAULT_OPENCODE_SERVER_URL } from "./serve.js";
+import { hostMajor, incompatibleWrappers, wrapperSource } from "./wrappers.js";
 
 export interface SetupOptions {
   print?: (line: string) => void;
@@ -33,7 +34,14 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("   The installer (install.sh) wires the global ~/.config/opencode for");
   print("   you. For a per-project setup, add .opencode/plugins/inkbox.ts:");
   print("");
-  for (const line of wrapperSnippet(serverUrl).split("\n")) print(`     ${line}`);
+  const major = hostMajor(config.gateway.serve.bin) ?? 1;
+  for (const line of (major === 2 ? wrapperSource(2) : wrapperSnippet(serverUrl)).split("\n"))
+    print(`     ${line}`);
+  for (const file of incompatibleWrappers(
+    [process.cwd(), config.gateway.projectDirectory ?? process.cwd()],
+    major,
+  ))
+    print(`   Update the V${major === 2 ? 1 : 2} wrapper at ${file}, preserving its options.`);
   print("");
   print("3. Provisioning (done in the Inkbox console / CLI)");
   print("   - Provision a phone number and enable iMessage for your identity.");
@@ -42,8 +50,14 @@ export function runSetup(config: ResolvedConfig, opts: SetupOptions = {}): numbe
   print("4. Start it");
   print("     inkbox-opencode start   # or 'run' to stay foreground");
   print("     inkbox-opencode status");
-  print("   The gateway attaches to an `opencode serve` on :4096 if one is running;");
-  print(`   otherwise it launches its own managed server (port ${config.gateway.serve.port}).`);
+  if (major === 2)
+    print(
+      "   V2 uses the authenticated shared OpenCode service. Configure Inkbox in that service's environment too.",
+    );
+  else {
+    print("   The gateway attaches to an `opencode serve` on :4096 if one is running;");
+    print(`   otherwise it launches its own managed server (port ${config.gateway.serve.port}).`);
+  }
   print("");
   print("5. Keep it running on boot (optional)");
   print("     inkbox-opencode autostart install");

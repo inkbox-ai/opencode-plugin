@@ -1,6 +1,7 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import { bindHostState } from "../host/state.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
 import { createA2AHandler } from "./a2a.js";
@@ -56,9 +57,11 @@ const consoleLogger: GatewayLogger = {
 // close() tears everything down (used by signal handlers in sidecar mode and
 // dispose in plugin mode).
 export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHandle> {
+  await opts.opencode.ready?.(opts.directory);
   const logger = opts.logger ?? consoleLogger;
   const g = opts.config.gateway;
   const state = createStateStore();
+  if (opts.opencode.protocol !== 2) bindHostState(state, 1);
   // A prior process's successful inventory is not evidence for this attachment.
   // Do this before opening any gateway resources or serving readiness requests.
   state.update({ permissionInventory: { ready: false } });

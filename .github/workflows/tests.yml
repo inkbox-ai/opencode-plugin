@@ -69,7 +69,27 @@ jobs:
         run: |
           test "$(opencode --version)" = "1.15.0"
           bash scripts/smoke-loader.sh
-      - name: Install latest native host
-        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
-      - name: Packed native loader on latest host
+      - name: Install recent V1 host
+        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.19.0
+      - name: Packed native loader on recent V1 host
         run: bash scripts/smoke-loader.sh
+
+  loader-v2:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["2.0.26", "latest"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: bash tests/ci/npm_with_retry.sh ci
+      - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@${{ matrix.version }}
+      - run: npm run build
+      - name: Packed V2 host contract
+        run: |
+          ARCHIVE=$(npm pack --silent | tail -1)
+          node scripts/smoke-v2.mjs "$ARCHIVE"

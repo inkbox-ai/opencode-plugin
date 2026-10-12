@@ -14,7 +14,8 @@ Start with `inkbox_doctor` (default-enabled). It reports config presence, API re
 | Error | Fix |
 |---|---|
 | `Inkbox plugin is not configured` | Set `INKBOX_API_KEY` + `INKBOX_IDENTITY` in the environment launching opencode, or pass `apiKey`/`identity` as plugin options in your .opencode/plugins/inkbox.ts wrapper (`~/.inkbox/config` is also read, at lowest precedence). Restart opencode after changes. |
-| Tool not found / not available | The tool is opt-in and not enabled. Add its exact name (or its group) to `tools.enable` in your `.opencode/plugins/inkbox.ts` wrapper, then restart: `InkboxPlugin(input, { tools: { enable: ["inkbox_..."] } })`. Check `inkbox_doctor` for the enabled/disabled list. |
+| Tool not found / not available | Add its exact name (or group) to the wrapper's `tools.enable` options. V1 uses the second argument to `InkboxPlugin(input, options)`; V2 imports `@inkbox/opencode-plugin/v2` and passes options through `setup(ctx)`. Preserve other options. Check `inkbox_doctor` for the enabled/disabled list. |
+| Plugin fails after a host upgrade | Rerun the installer to update generated wrappers, or migrate custom wrappers using the README. Run `inkbox-opencode doctor` to identify incompatible project wrappers. V2's shared service needs the same Inkbox configuration as the gateway. |
 | `whoami failed: 401 Unauthorized` | API key is wrong, revoked, or has a typo. Ask the user to mint or paste a fresh key. |
 | `API key is not agent-scoped` | Outbound may work, but access-scoped reads (contacts, notes, vault) can behave differently. Prefer an agent-scoped key bound to the configured identity. |
 | `404` on identity resolution | The configured `identity` handle does not exist under this key or does not match the key's bound identity. |

@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import type { VaultRuntime } from "../vault.js";
 
 export interface ToolDeps {

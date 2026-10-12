@@ -30,8 +30,8 @@ Opt-in — the user must enable these in your .opencode/plugins/inkbox.ts wrappe
 - `inkbox_mark_imessage_conversation_read` — send a read receipt and clear unread state
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_send_imessage_reaction", "inkbox_mark_imessage_conversation_read"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_send_imessage_reaction", "inkbox_mark_imessage_conversation_read"] } };
 ```
 
 (Enabling the `"imessage"` group turns all four on at once.) `inkbox_doctor` reports which tools are currently enabled or disabled.

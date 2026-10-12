@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.18 (unreleased)
+
+- Adds an OpenCode V2 entrypoint while retaining the existing V1 entrypoint and minimum supported version.
+- Adds V2 gateway sessions, shared-service connections, and native tool approvals.
+- Updates generated wrappers for the installed OpenCode version and preserves custom wrappers for manual migration.
+- Updates the development source-map dependency to its patched release.
+
 ## 0.2.17 (unreleased)
 
 - Delivers actual local Slack attachments with exact native tool/source ownership and durable unknown-outcome protection.

@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runSetup } from "../../src/cli/setup.js";
+import { hostMajor } from "../../src/cli/wrappers.js";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
+
+vi.mock("../../src/cli/wrappers.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/cli/wrappers.js")>()),
+  hostMajor: vi.fn(() => 1),
+  incompatibleWrappers: vi.fn(() => []),
+}));
 
 function makeConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   return {
@@ -22,6 +29,12 @@ function render(config: ResolvedConfig): { code: number; out: string } {
 }
 
 describe("runSetup", () => {
+  it("shows the V2 entrypoint and shared-service guidance", () => {
+    vi.mocked(hostMajor).mockReturnValueOnce(2);
+    const { out } = render(makeConfig());
+    expect(out).toContain("@inkbox/opencode-plugin/v2");
+    expect(out).toContain("shared OpenCode service");
+  });
   it("prints the required env var names and the wrapper snippet", () => {
     const { code, out } = render(makeConfig());
     expect(code).toBe(0);

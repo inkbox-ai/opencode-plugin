@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AgentIdentity } from "@inkbox/sdk";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createStateStore, type StateStore } from "./gateway/state.js";
 import type { ReplyTarget } from "./gateway/types.js";
+import type { HostClient as OpencodeClient } from "./host/types.js";
 
 export interface NativeSend {
   key: string;
