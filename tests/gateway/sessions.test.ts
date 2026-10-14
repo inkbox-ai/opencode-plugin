@@ -204,6 +204,63 @@ function prepareHostedCall(dir: string): void {
 }
 
 describe("durable async turns", () => {
+  it("does not resend a tool-delivered email after recovering the completed turn", async () => {
+    const d = makeManager();
+    const now = Date.now();
+    const turn: DurableTurn = {
+      id: "email-turn",
+      messageID: "msg_email",
+      chatKey: "email",
+      sessionID: "sess-email",
+      state: "submitted",
+      kind: "normal",
+      text: "hello",
+      deliver: true,
+      replyTarget: { channel: "email", to: "sender@example.com", messageId: "inbound-id" },
+      createdAt: now,
+      updatedAt: now,
+    };
+    d.state.saveTurn(turn);
+    d.messages.set("sess-email", [
+      { info: { id: turn.messageID, role: "user" }, parts: [] },
+      {
+        info: {
+          id: "assistant-send",
+          role: "assistant",
+          parentID: turn.messageID,
+          finish: "tool-calls",
+        },
+        parts: [
+          {
+            type: "tool",
+            tool: "inkbox_send_email",
+            state: {
+              status: "completed",
+              input: { to: ["sender@example.com"], inReplyToMessageId: "inbound-id" },
+              output: "Sent email id=sent-id",
+            },
+          },
+        ],
+      },
+      {
+        info: {
+          id: "assistant-summary",
+          role: "assistant",
+          parentID: turn.messageID,
+          finish: "stop",
+        },
+        parts: [{ type: "text", text: "Replied in-thread." }],
+      },
+    ]);
+    try {
+      await d.mgr.catchUp();
+      await vi.waitFor(() => expect(d.state.getTurn(turn.id)?.state).toBe("delivered"));
+      expect(d.identity.replyAllEmail).not.toHaveBeenCalled();
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    } finally {
+      await d.mgr.close();
+    }
+  });
   it("isolates an anomalous native history floor from unrelated prompt and receipt IDs", async () => {
     vi.resetModules();
     const { createSessionManager: isolated } = await import("../../src/gateway/sessions.js");

@@ -2,9 +2,43 @@
 // email subject threading, markdown stripping, and length caps.
 import { describe, expect, it, vi } from "vitest";
 import type { InkboxRuntime } from "../../src/client.js";
-import { deliverReply, prepareReply } from "../../src/gateway/reply.js";
+import { deliverReply, prepareReply, sentEmailReply } from "../../src/gateway/reply.js";
 import type { GatewayLogger, ReplyTarget } from "../../src/gateway/types.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/limits.js";
+
+describe("tool-delivered email replies", () => {
+  const target: ReplyTarget = {
+    channel: "email",
+    to: "sender@example.com",
+    messageId: "inbound-id",
+    rfcMessageId: "<inbound@example.com>",
+  };
+  const part = (input = {}, state = {}) => ({
+    type: "tool",
+    tool: "inkbox_send_email",
+    state: {
+      status: "completed",
+      output: "Sent email id=sent-id",
+      input: { to: ["sender@example.com"], inReplyToMessageId: "inbound-id", ...input },
+      ...state,
+    },
+  });
+  it("recognizes both supported parent identifiers", () => {
+    expect(sentEmailReply(target, [part()])).toBe(true);
+    expect(sentEmailReply(target, [part({ inReplyToMessageId: target.rfcMessageId })])).toBe(true);
+  });
+  it("does not suppress replies after failed, unrelated, or unfinished sends", () => {
+    for (const item of [
+      part({}, { status: "error" }),
+      part({}, { status: "running" }),
+      part({}, { output: "Error sending email" }),
+      part({ to: ["other@example.com"] }),
+      part({ inReplyToMessageId: "another-message" }),
+    ])
+      expect(sentEmailReply(target, [item])).toBe(false);
+    expect(sentEmailReply({ ...target, channel: "sms" }, [part()])).toBe(false);
+  });
+});
 
 it("completes Slack reads before the send checkpoint and never reclassifies a read as an uncertain send", async () => {
   const route = {

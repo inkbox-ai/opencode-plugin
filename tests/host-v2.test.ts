@@ -11,6 +11,7 @@ import { createV2Host } from "../src/host/v2-client.js";
 import type { V2Client } from "../src/host/v2-connection.js";
 import { normalizeHistory, projectHistory, readHistory } from "../src/host/v2-history.js";
 import { configurationKey } from "../src/host/v2-rpc.js";
+import plugin from "../src/v2.js";
 
 const dirs: string[] = [];
 const temporary = () => {
@@ -23,6 +24,54 @@ afterEach(() => {
 });
 
 describe("V2 history", () => {
+  it("returns JSON-safe hello output before the first gateway startup", async () => {
+    vi.stubEnv("INKBOX_OPENCODE_HOME", temporary());
+    let methods: any;
+    try {
+      await plugin.setup({
+        options: {},
+        location: { directory: "/fixture" },
+        storage: { get: async () => undefined, set: async () => {} },
+        tool: { transform: async () => {}, list: async () => [], hook: async () => {} },
+        session: { hook: async () => {} },
+        rpc: {
+          register: async (_contract: unknown, handlers: unknown) => {
+            methods = handlers;
+          },
+        },
+      } as any);
+      const result = await methods.hello();
+      expect(result).not.toHaveProperty("stateProbe");
+      expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it("preserves completed tool text for delivery detection", () => {
+    const messages = normalizeHistory(
+      [
+        {
+          id: "msg_answer",
+          type: "assistant",
+          time: { created: 2 },
+          content: [
+            {
+              type: "tool",
+              id: "call_send",
+              name: "inkbox_send_email",
+              state: {
+                status: "completed",
+                input: {},
+                content: [{ type: "text", text: "Sent email id=sent" }],
+              },
+            },
+          ],
+        },
+      ] as any,
+      "ses_test",
+    );
+    expect(messages[0].parts[0].state.output).toBe("Sent email id=sent");
+  });
   const user = (id: string) => ({ id, type: "user", text: id, time: { created: 1 } });
   const assistant = (id: string, finish: string) => ({
     id,

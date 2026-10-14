@@ -90,7 +90,13 @@ export function projectHistory(messages: SessionMessageInfo[], sessionID: string
           ...state,
           status: state.status === "streaming" ? "pending" : state.status,
           input: state.input,
-          output: state.result?.content ?? state.output,
+          output:
+            state.content
+              ?.filter((content: any) => content.type === "text")
+              .map((content: any) => content.text)
+              .join("\n") ??
+            state.result?.content ??
+            state.output,
         },
       };
     });

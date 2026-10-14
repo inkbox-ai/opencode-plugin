@@ -105,14 +105,17 @@ export default Plugin.define({
     });
     const key = (sessionID: string, messageID: string) => `turn/${sessionID}/${messageID}`;
     await ctx.rpc.register(InkboxHost, {
-      hello: async () => ({
-        version: 1 as const,
-        instance,
-        installation,
-        stateProbe: createStateStore().read().hostProbe as string | undefined,
-        configuration: configurationKey(config),
-        tools: (await ctx.tool.list()).map((t) => t.id),
-      }),
+      hello: async () => {
+        const stateProbe = createStateStore().read().hostProbe;
+        return {
+          version: 1 as const,
+          instance,
+          installation,
+          ...(typeof stateProbe === "string" ? { stateProbe } : {}),
+          configuration: configurationKey(config),
+          tools: (await ctx.tool.list()).map((t) => t.id),
+        };
+      },
       prepare: async (policy) => {
         const session = await ctx.session.get({ sessionID: policy.sessionID });
         if (session.location.directory !== ctx.location.directory)

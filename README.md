@@ -76,6 +76,9 @@ For an explicitly selected V2 server, set `OPENCODE_SERVER_URL` and
 apply to standalone V2 servers. Stopping the gateway leaves an attached shared
 service running.
 
+Set `INKBOX_GATEWAY_MODEL=provider/model` to pin the gateway model. An interactive
+session's model selection does not configure the default for new gateway sessions.
+
 The gateway and plugin must share the same accessible `INKBOX_OPENCODE_HOME`
 directory (default `~/.inkbox-opencode`), including when using an explicit server.
 

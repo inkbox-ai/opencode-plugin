@@ -32,8 +32,8 @@ import {
   clearHostedSmsCapture,
   getHostedCall,
 } from "./hosted-call-registry.js";
-import { buildIdentitySystem, frameCapture, frameInbound } from "./prompts.js";
-import { prepareReply, ReplyPreparationError } from "./reply.js";
+import { buildIdentitySystem, frameCapture, frameInbound, SILENT } from "./prompts.js";
+import { prepareReply, ReplyPreparationError, sentEmailReply } from "./reply.js";
 import { companionWakes, mentionsAgent, sameAuthor } from "./response-policy.js";
 import { slackSenderAllowed } from "./slack.js";
 import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
@@ -898,7 +898,16 @@ export function createSessionManager(
       // A completed assistant step can still be followed by tool work or a
       // model retry. Keep the turn's side-effect guards until the final answer.
       const finish = last?.info?.finish;
-      if (finish && finish !== "tool-calls" && finish !== "unknown") return extractText(last);
+      if (finish && finish !== "tool-calls" && finish !== "unknown") {
+        if (
+          sentEmailReply(
+            turn.replyTarget,
+            assistants.flatMap((message) => message.parts ?? []),
+          )
+        )
+          return SILENT;
+        return extractText(last);
+      }
       await delay(POLL_MS);
     }
     throw new HostedCaptureDeferredError();
