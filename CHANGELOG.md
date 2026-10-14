@@ -2,6 +2,7 @@
 
 ## 0.2.18 (unreleased)
 
+- Updates the SDK to 0.7.19.
 - Prevents duplicate automatic email replies after a successful threaded tool send, including recovered turns.
 - Fixes V2 diagnostics before the gateway's first startup and preserves completed tool output from V2 history.
 - Selects the channel agent during noninteractive setup while preserving custom agent choices.
