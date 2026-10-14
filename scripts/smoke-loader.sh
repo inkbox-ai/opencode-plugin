@@ -7,6 +7,7 @@
 #
 # Requires the `opencode` CLI on PATH. Exits non-zero on any failure.
 set -euo pipefail
+unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG OPENCODE_CONFIG_DIR
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${SMOKE_PORT:-14096}"
@@ -22,7 +23,11 @@ MARKER="$WORKDIR/loaded.json"
 cleanup() {
   kill "${MOCK_PID:-}" "${SERVE_PID:-}" 2>/dev/null || true
   wait "${MOCK_PID:-}" "${SERVE_PID:-}" 2>/dev/null || true
-  rm -rf "$WORKDIR" "$SMOKE_STATE_DIR"
+  if [ "${KEEP_SMOKE_FILES:-}" = "1" ]; then
+    echo "Fixture directories: $WORKDIR $SMOKE_STATE_DIR"
+  else
+    rm -rf "$WORKDIR" "$SMOKE_STATE_DIR"
+  fi
 }
 trap cleanup EXIT
 

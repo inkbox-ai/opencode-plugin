@@ -38,7 +38,7 @@ command -v node >/dev/null 2>&1 || die "Node.js 20+ is required."
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' ||
   die "Node.js 20+ is required (found $(node --version))."
 command -v opencode >/dev/null 2>&1 ||
-  warn "the opencode CLI is not on PATH — install it (npm install -g opencode-ai); the gateway launches \`opencode serve\` and the plugin loads into opencode sessions."
+  warn "the opencode CLI is not on PATH — install OpenCode from https://opencode.ai before configuring the plugin."
 
 # --- 2. source: local checkout, or clone/update the app dir -----------------
 SOURCE_DIR=""
@@ -82,22 +82,22 @@ if [ ! -f "$OPENCODE_CONFIG_DIR/agent/inkbox-channel.md" ]; then
 fi
 
 WRAPPER="$OPENCODE_CONFIG_DIR/plugins/inkbox.ts"
-if [ -f "$WRAPPER" ]; then
-  say "Keeping your existing plugin wrapper at $WRAPPER"
-else
-  cat > "$WRAPPER" <<'EOF'
-// Inkbox plugin wrapper — written by install.sh; edit freely (never overwritten).
-// Credentials resolve from env vars or ~/.inkbox/config; options: see README.
-// inkbox_place_call is enabled so the agent can dial out (calls stay gated
-// by outbound approval like every other send).
-import InkboxPlugin from "@inkbox/opencode-plugin";
-
-export default async (input: any) => InkboxPlugin(input, {
-  tools: { enable: ["inkbox_place_call"] },
-});
+node --input-type=module - "$SOURCE_DIR" "$WRAPPER" <<'EOF'
+import { pathToFileURL } from "node:url";
+import { dirname } from "node:path";
+const [source, file] = process.argv.slice(2);
+const { hostMajor, installWrapper, wrapperSource, configuredPackages } = await import(pathToFileURL(`${source}/dist/cli/wrappers.js`).href);
+const configured = configuredPackages(dirname(dirname(file)));
+if (configured.length) throw new Error(`Inkbox already has package entries in ${configured.join(", ")}. Migrate those entries or remove them before installing a wrapper; preserve their options.`);
+const major = hostMajor(process.env.INKBOX_OPENCODE_BIN ?? "opencode");
+if (!major) throw new Error("Install a supported OpenCode version before configuring the plugin.");
+const result = installWrapper(file, major);
+console.log(`OpenCode V${major} wrapper: ${result} (${file})`);
+if (result === "custom") {
+  console.log("Custom wrapper preserved. Adapt its options to this entrypoint before starting OpenCode:");
+  console.log(wrapperSource(major));
+}
 EOF
-  say "Wrote plugin wrapper $WRAPPER"
-fi
 
 # --- 5. launcher on PATH ------------------------------------------------------
 mkdir -p "$BIN_DIR"

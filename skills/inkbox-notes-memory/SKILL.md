@@ -21,8 +21,8 @@ The Inkbox plugin exposes persistent notes scoped by the configured Inkbox ident
 These are disabled by default. The user must enable them in your .opencode/plugins/inkbox.ts wrapper (by exact tool name, or the `notes` group) and restart opencode:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_update_note", "inkbox_delete_note"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_update_note", "inkbox_delete_note"] } };
 ```
 
 `inkbox_doctor` reports which tools are currently enabled or disabled.

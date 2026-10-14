@@ -48,3 +48,18 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
       - name: Packed native loader on latest host
         run: bash scripts/smoke-loader.sh
+
+  loader-v2:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: bash tests/ci/npm_with_retry.sh ci
+      - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@latest
+      - run: npm run build
+      - run: |
+          ARCHIVE=$(npm pack --silent | tail -1)
+          node scripts/smoke-v2.mjs "$ARCHIVE"

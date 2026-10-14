@@ -20,8 +20,8 @@ Enabled by default:
 Opt-in — `inkbox_mark_emails_read` (clear processed messages) and `inkbox_forward_email` (forward with original parts) must be enabled by the user in your .opencode/plugins/inkbox.ts wrapper, then opencode restarted:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_mark_emails_read", "inkbox_forward_email"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_mark_emails_read", "inkbox_forward_email"] } };
 ```
 
 (Enabling the `"email"` group turns both on at once.) `inkbox_doctor` reports which tools are currently enabled or disabled.

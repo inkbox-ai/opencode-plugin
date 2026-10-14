@@ -14,6 +14,9 @@ import {
   systemdUnitPath,
   uninstallAutostart,
 } from "../../src/cli/autostart.js";
+import { hostMajor } from "../../src/cli/wrappers.js";
+
+vi.mock("../../src/cli/wrappers.js", () => ({ hostMajor: vi.fn(() => 1) }));
 
 let home: string;
 let osHome: string;
@@ -57,6 +60,12 @@ function deps(overrides: Partial<AutostartDeps> = {}): AutostartDeps {
 }
 
 describe("installAutostart (systemd)", () => {
+  it("keeps the V2 shared service outside gateway stop handling", async () => {
+    vi.mocked(hostMajor).mockReturnValueOnce(2);
+    const { run } = fakeRunner();
+    await installAutostart(deps({ run }));
+    expect(fs.readFileSync(systemdUnitPath(osHome), "utf8")).toContain("KillMode=process");
+  });
   it("writes the unit + env snapshot, enables, restarts, and lingers", async () => {
     const { run, calls } = fakeRunner();
     const env = {
@@ -75,6 +84,7 @@ describe("installAutostart (systemd)", () => {
     expect(unitText).toContain(`Environment=INKBOX_OPENCODE_ENV_FILE=${autostartEnvPath(home)}`);
     expect(unitText).toContain("WorkingDirectory=/work/agent");
     expect(unitText).toContain("WantedBy=default.target");
+    expect(unitText).toContain("KillMode=control-group");
 
     const envFile = autostartEnvPath(home);
     const envText = fs.readFileSync(envFile, "utf-8");

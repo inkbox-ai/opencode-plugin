@@ -1,5 +1,5 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import { OpencodeClient as NativeClient } from "@opencode-ai/sdk/v2/client";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 
 export interface NativePermissionInventory {
   list(directory: string, signal: AbortSignal): Promise<unknown[]>;
@@ -12,6 +12,7 @@ export interface NativePermissionInventory {
 export function createNativePermissionInventory(client: OpencodeClient): NativePermissionInventory {
   return {
     async list(directory, signal) {
+      if (client.permissionInventory) return client.permissionInventory(directory, signal);
       const transport = (client as unknown as { _client?: unknown })._client as
         | { get?: unknown; getConfig?: unknown }
         | undefined;

@@ -44,9 +44,9 @@ Commands:
   bootstrap   Configure an existing identity without interactive prompts.
   uninstall   Stop the daemon, remove the boot service and local state.
 
-The gateway attaches to an opencode server at OPENCODE_SERVER_URL (or
-http://127.0.0.1:4096); when neither answers it launches its own managed
-\`opencode serve\`. Credentials resolve from plugin options, env vars, an env
+The gateway uses OPENCODE_SERVER_URL when set. V2 discovers or starts the
+authenticated shared service; V1 attaches at http://127.0.0.1:4096 or launches
+its own managed \`opencode serve\`. Credentials resolve from plugin options, env vars, an env
 file (INKBOX_OPENCODE_ENV_FILE, ./.env, ~/.inkbox-opencode/.env), then
 ~/.inkbox/config.
 `;

@@ -1,7 +1,7 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { ActiveA2ATurn } from "../a2a-context.js";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import type { SlackRoute } from "../slack.js";
 import type { CompanionTurn } from "./companion.js";
 import type { HostedSmsAttempt } from "./hosted-call-registry.js";

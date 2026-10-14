@@ -1,9 +1,10 @@
-import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import { createInkboxRuntime, type InkboxRuntime, NOT_CONFIGURED_MESSAGE } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
 import { startGateway } from "../gateway/index.js";
 import type { GatewayLogger } from "../gateway/types.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import {
   DEFAULT_OPENCODE_SERVER_URL,
   type EnsuredServer,
@@ -60,7 +61,7 @@ export async function runForeground(
     if (!ensured) return 1;
     server = ensured;
   }
-  const opencode = deps.opencode ?? createOpencodeClient({ baseUrl: server.url });
+  const opencode = deps.opencode ?? server.client ?? createOpencodeClient({ baseUrl: server.url });
 
   const runtime = deps.runtime ?? runtimeFor(config);
   const directory = config.gateway.projectDirectory ?? process.cwd();

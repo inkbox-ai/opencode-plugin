@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import type { DurablePermission, StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
 

@@ -1,9 +1,11 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import type { ResolvedConfig } from "../config.js";
 import type { GatewayLogger } from "../gateway/types.js";
+import type { HostClient as OpencodeClient } from "../host/types.js";
+import { hostMajor } from "./wrappers.js";
 
 // opencode's default server bind: where an interactive `opencode serve` (or a
 // CI harness) listens. The sidecar attaches here when nothing is configured,
@@ -14,8 +16,8 @@ export const DEFAULT_OPENCODE_SERVER_URL = "http://127.0.0.1:4096";
 // response counts as reachable; a rejected fetch (server down) does not.
 export async function opencodeReachable(opencode: OpencodeClient): Promise<boolean> {
   try {
-    await opencode.config.get();
-    return true;
+    const result = await opencode.config.get();
+    return !result.error && Boolean(result.data);
   } catch {
     return false;
   }
@@ -67,6 +69,7 @@ export type SpawnServe = (
 export interface EnsuredServer {
   url: string;
   owned: boolean;
+  client?: OpencodeClient;
   // Fires when an owned server dies out from under the gateway. Never fires
   // for an attached server, nor during a deliberate stop().
   onExit(cb: (code: number | null) => void): void;
@@ -105,6 +108,14 @@ export async function ensureOpencodeServer(
   });
 
   const explicit = config.gateway.serverUrl;
+  if (!deps.probe) {
+    const { connectV2Server } = await import("./v2-server.js");
+    const connected = await connectV2Server(
+      config,
+      !explicit && hostMajor(resolveOpencodeBin(config.gateway.serve.bin)) === 2,
+    );
+    if (connected) return connected;
+  }
   if (explicit) {
     if (await probe(explicit)) return attached(explicit);
     logger.error(

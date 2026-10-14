@@ -17,6 +17,7 @@
 
 ## Prerequisites
 
+- **Supported hosts:** OpenCode 1.15.0–1.x or 2.0.26–2.0.x. Verified on 1.15.0, 1.18.35, 1.19.0, and 2.0.26. V1 and V2 use separate plugin entrypoints; the installer selects the installed host version.
 - **opencode installed and logged in.** The plugin loads into real opencode
   sessions and the gateway drives an `opencode serve` — install it
   ([opencode.ai](https://opencode.ai)) and authenticate a model provider.
@@ -25,7 +26,7 @@
   ```bash
   curl -fsSL https://opencode.ai/install | bash
   ```
-- **Node.js 20+ and git.** The installer builds the plugin from source.
+- **Node.js 20+ for V1, Node.js 22+ for the V2 gateway, and git.** The installer builds the plugin from source.
 - **macOS or Linux.** Boot persistence uses a systemd user unit on Linux and
   a launchd agent on macOS.
 - **An Inkbox agent** — nothing to set up in advance; the setup wizard
@@ -54,6 +55,38 @@ Re-running is safe — it updates in place (`--no-setup` installs only;
 run `./install.sh` instead; it uses the checkout in place. Rerun the wizard
 anytime with `inkbox-opencode setup` (`setup --print` for the static
 checklist), and check the wiring with `inkbox-opencode doctor`.
+
+### Upgrading to OpenCode V2
+
+Rerun `./install.sh --no-setup` from the checkout after upgrading OpenCode.
+The installer backs up and updates its generated wrapper. Custom wrappers and
+their options are preserved; migrate them using the V2 example below. Check
+project-local wrappers too, then run `inkbox-opencode doctor`.
+
+V2 uses OpenCode's authenticated shared service. Configure the same Inkbox
+identity and channel settings for the service and gateway. Tool selection and
+outbound approval options remain in the plugin wrapper. Environment variables loaded
+by the gateway do not change an already-running service's environment. Update
+the service's launch environment or use the shared `~/.inkbox/config` credential
+file, and restart OpenCode when configuration changes require it.
+
+For an explicitly selected V2 server, set `OPENCODE_SERVER_URL` and
+`INKBOX_OPENCODE_SERVER_PASSWORD` in both the plugin and gateway environments.
+`INKBOX_OPENCODE_SERVER_USERNAME` defaults to `opencode`. These settings also
+apply to standalone V2 servers. Stopping the gateway leaves an attached shared
+service running.
+
+Set `INKBOX_GATEWAY_MODEL=provider/model` to pin the gateway model. An interactive
+session's model selection does not configure the default for new gateway sessions.
+
+The gateway and plugin must share the same accessible `INKBOX_OPENCODE_HOME`
+directory (default `~/.inkbox-opencode`), including when using an explicit server.
+
+Finish outstanding conversations and stop the gateway before switching host versions. If doctor or
+startup reports unfinished work from another host, reconnect that host and
+resolve the work first. Rerun the installer after switching back to V1 as well.
+If using boot autostart, rerun `inkbox-opencode autostart install` after changing
+host versions to update the service definition.
 
 ### Bootstrap an existing identity without prompts
 
@@ -123,20 +156,40 @@ local wrapper:
 ```bash
 git clone https://github.com/inkbox-ai/opencode-plugin.git ~/.inkbox-opencode/app
 cd ~/.inkbox-opencode/app
-npm install && npm run build && npm pack
+npm install && npm run build
 ```
 
-Then, from your opencode project (or your global `~/.config/opencode`
-directory), install the packed build and add a one-file plugin wrapper:
+Then, from your opencode project, install the packed build and add a one-file
+plugin wrapper:
 
 ```bash
-npm install ~/.inkbox-opencode/app/inkbox-opencode-plugin-*.tgz
+archive=$(cd ~/.inkbox-opencode/app && npm pack --silent | tail -1)
+npm install "$HOME/.inkbox-opencode/app/$archive"
 mkdir -p .opencode/plugins
 ```
 
-Create `.opencode/plugins/inkbox.ts` — opencode auto-loads every file under
-`.opencode/plugins/`. **Every option shown in this README goes inside the
-`InkboxPlugin(input, { ... })` call here**:
+Create `.opencode/plugins/inkbox.ts`; for global installation use
+`~/.config/opencode/plugins/inkbox.ts` and install the tarball from
+`~/.config/opencode` instead. Configure only one wrapper or package
+entry for each location.
+
+**OpenCode V2:** options go inside `options` in this wrapper:
+
+```ts
+import InkboxPlugin from "@inkbox/opencode-plugin/v2";
+
+export default {
+  ...InkboxPlugin,
+  setup: (ctx: Parameters<typeof InkboxPlugin.setup>[0]) => InkboxPlugin.setup({
+    ...ctx,
+    options: { ...ctx.options, tools: { enable: ["inkbox_place_call"] } },
+  }),
+};
+```
+
+**OpenCode V1:** options go inside the second argument below. Later examples
+using `InkboxPlugin(input, { ... })` show this V1 form; on V2 place the same
+option object in `options` above.
 
 ```ts
 import InkboxPlugin from "@inkbox/opencode-plugin";
@@ -221,7 +274,8 @@ Sends, calls, and A2A writes are gated before anything leaves:
   `inkbox_send_imessage`, `inkbox_forward_email`, `inkbox_place_call`,
   `inkbox_a2a_call`, and `inkbox_a2a_reply`
   request approval through opencode's native permission system. Approve once,
-  or persist an allow rule from the prompt.
+  or persist an allow rule from the prompt. OpenCode `allow` rules can approve
+  without a prompt; configure explicit `ask` rules when prompts are required.
 - **Recipient allowlist**: set `outbound.allowedRecipients` (exact email
   addresses / E.164 numbers) and anything else is rejected regardless of
   approval mode.
@@ -340,8 +394,9 @@ Two ways to run it:
   ```
 
   The sidecar needs an opencode server and finds one on its own: an explicit
-  `gateway.serverUrl` / `OPENCODE_SERVER_URL` must answer; otherwise it
-  attaches to a server already on `http://127.0.0.1:4096`, and failing that it
+  `gateway.serverUrl` / `OPENCODE_SERVER_URL` must answer. V2 discovers or starts
+  the shared authenticated service and leaves it running when the gateway stops.
+  V1 otherwise attaches to a server already on `http://127.0.0.1:4096`, and failing that it
   launches its own managed `opencode serve` (port `4097` by default; tune with
   `gateway.serve.{bin,port}` or `INKBOX_OPENCODE_BIN` /
   `INKBOX_GATEWAY_SERVE_PORT`). A managed server is stopped with the gateway,

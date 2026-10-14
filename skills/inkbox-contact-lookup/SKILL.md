@@ -21,8 +21,8 @@ All six are enabled by default:
 There is no vCard export/import tool. Contact rule tools, note access tools, and `inkbox_place_call` are opt-in — the user must enable them in your .opencode/plugins/inkbox.ts wrapper and restart opencode:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_place_call", "access", "contact-rules"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_place_call", "access", "contact-rules"] } };
 ```
 
 Use note access and contact rule tools only when the user explicitly asks to manage note sharing or allow/block rules. `inkbox_doctor` reports which tools are enabled or disabled.

@@ -8,6 +8,26 @@ import type { GatewayLogger, ReplyTarget } from "./types.js";
 
 export class ReplyPreparationError extends Error {}
 
+export function sentEmailReply(target: ReplyTarget | undefined, parts: any[]): boolean {
+  if (target?.channel !== "email") return false;
+  const parents = [target.messageId, target.rfcMessageId].filter(Boolean);
+  return parts.some((part) => {
+    const state = part.state;
+    return (
+      part.type === "tool" &&
+      part.tool === "inkbox_send_email" &&
+      state?.status === "completed" &&
+      typeof state.output === "string" &&
+      state.output.startsWith("Sent email id=") &&
+      parents.includes(state.input?.inReplyToMessageId) &&
+      Array.isArray(state.input?.to) &&
+      state.input.to.some((to: string) =>
+        [target.to, target.sender].some((address) => address?.toLowerCase() === to.toLowerCase()),
+      )
+    );
+  });
+}
+
 export interface ReplyResult {
   delivered: boolean;
   reason?: "silent" | "empty" | "sent";

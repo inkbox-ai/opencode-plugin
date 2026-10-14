@@ -12,8 +12,8 @@ Use this skill when explaining organization-wide contact visibility or managing 
 All identity-access tools are opt-in. Enable the `access` group in your .opencode/plugins/inkbox.ts wrapper, then restart opencode:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["access"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["access"] } };
 ```
 
 This enables `inkbox_list_note_access`, `inkbox_grant_note_access`, and `inkbox_revoke_note_access`. Run `inkbox_doctor` to confirm which tools are currently enabled.

@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { HostClient as OpencodeClient } from "../host/types.js";
 import type { createEscalationBridge, PendingPermission } from "./escalation.js";
 import type { GatewayLogger } from "./types.js";
 

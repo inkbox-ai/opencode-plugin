@@ -14,8 +14,8 @@ Use this skill when the user asks you to call someone.
 It is disabled by default. The user must enable it in your .opencode/plugins/inkbox.ts wrapper (by exact name, or via the `"calls"` group) and restart opencode:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_place_call"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_place_call"] } };
 ```
 
 `inkbox_doctor` reports whether it is currently enabled.

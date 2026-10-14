@@ -224,6 +224,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
     if (options.baseUrl) save("INKBOX_BASE_URL", options.baseUrl);
     if (options.projectDir) save("INKBOX_PROJECT_DIR", path.resolve(options.projectDir));
     save("INKBOX_ALLOW_ALL_USERS", "true");
+    save("INKBOX_GATEWAY_AGENT", process.env.INKBOX_GATEWAY_AGENT || "inkbox-channel");
     actions.push("saved_opencode_configuration");
     if (options.voiceAi) {
       await configureVoice(resolved.identity, resolved.client, options.voiceAiInstructions);

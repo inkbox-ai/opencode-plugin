@@ -21,8 +21,8 @@ Use this skill whenever the user asks for **multi-step outbound communication** 
 - `inkbox_forward_email` — escalate to a third party if no reply. Disabled by default; the user enables it in your .opencode/plugins/inkbox.ts wrapper and restarts opencode:
 
 ```ts
-// in your .opencode/plugins/inkbox.ts wrapper:
-InkboxPlugin(input, { "tools": { "enable": ["inkbox_forward_email"] } })
+// Merge into wrapper options: V1's second argument or V2's setup options.
+const options = { "tools": { "enable": ["inkbox_forward_email"] } };
 ```
 
 If unsure what is currently enabled, run `inkbox_doctor`.

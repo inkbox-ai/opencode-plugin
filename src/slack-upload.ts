@@ -3,9 +3,9 @@ import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { InkboxRuntime } from "./client.js";
 import { createStateStore, type StateStore } from "./gateway/state.js";
+import type { HostClient as OpencodeClient } from "./host/types.js";
 import { ownSlackConnection, type SlackRoute, slackRouteKey } from "./slack.js";
 
 const MAX_BYTES = 10 * 1024 * 1024;
