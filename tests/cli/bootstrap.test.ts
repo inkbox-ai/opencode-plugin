@@ -26,6 +26,7 @@ beforeEach(() => {
   process.env.INKBOX_OPENCODE_ENV_FILE = path.join(temp, ".env");
   delete process.env.INKBOX_IDENTITY;
   delete process.env.INKBOX_SIGNING_KEY;
+  delete process.env.INKBOX_GATEWAY_AGENT;
 });
 
 afterEach(() => {
@@ -34,6 +35,7 @@ afterEach(() => {
   delete process.env.INKBOX_API_KEY;
   delete process.env.INKBOX_IDENTITY;
   delete process.env.INKBOX_SIGNING_KEY;
+  delete process.env.INKBOX_GATEWAY_AGENT;
   vi.clearAllMocks();
 });
 
@@ -94,6 +96,19 @@ describe("bootstrap", () => {
     expect(saved).toContain("INKBOX_API_KEY=agent-secret");
     expect(saved).toContain("INKBOX_SIGNING_KEY=signing-secret");
     expect(saved).toContain(`INKBOX_PROJECT_DIR=${temp}`);
+    expect(saved).toContain("INKBOX_GATEWAY_AGENT=inkbox-channel");
+    expect(process.env.INKBOX_GATEWAY_AGENT).toBe("inkbox-channel");
+  });
+
+  it("preserves a configured gateway agent", async () => {
+    fakeWorld();
+    process.env.INKBOX_GATEWAY_AGENT = "custom-channel";
+    const result = await bootstrap({ identity: "helper", apiKey: "agent-secret" });
+    expect(result.status).toBe("configured");
+    expect(fs.readFileSync(path.join(temp, ".env"), "utf8")).toContain(
+      "INKBOX_GATEWAY_AGENT=custom-channel",
+    );
+    expect(process.env.INKBOX_GATEWAY_AGENT).toBe("custom-channel");
   });
 
   it("requires explicit rotation when the remote signing key is not local", async () => {
