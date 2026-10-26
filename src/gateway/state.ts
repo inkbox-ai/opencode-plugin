@@ -95,6 +95,7 @@ export interface StateStore {
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
   updateSlackSend(key: string, update: (entry: unknown) => unknown): void;
+  updateWhatsAppSend(key: string, update: (entry: unknown) => unknown): void;
   updateIMessageSend(key: string, update: (entry: unknown) => unknown): void;
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
   setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
@@ -231,6 +232,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           : [{ ...state, slackSends: { ...entries, [key]: entry } }, undefined];
       });
     },
+    updateWhatsAppSend(key, update) {
+      mutate((state) => {
+        const entries = (state.whatsappSends ?? {}) as Record<string, unknown>;
+        const entry = update(entries[key]);
+        return entry === undefined
+          ? [state, undefined]
+          : [{ ...state, whatsappSends: { ...entries, [key]: entry } }, undefined];
+      });
+    },
     updateIMessageSend(key, update) {
       mutate((state) => {
         const entries = (state.imessageSends ?? {}) as Record<string, unknown>;
@@ -286,6 +296,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               !candidate.hostedCapture &&
               !candidate.companion &&
               !candidate.replyTarget?.imessageSource &&
+              !candidate.replyTarget?.whatsappSource &&
               (["delivered", "failed", "interrupted"].includes(candidate.state) ||
                 (candidate.state === "completed" && !candidate.deliver) ||
                 (candidate.state === "context_only" && Boolean(candidate.consumedBy))),

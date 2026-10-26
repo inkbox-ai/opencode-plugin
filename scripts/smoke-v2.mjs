@@ -12,6 +12,7 @@ import { Service } from "@opencode/client/service";
 const root = mkdtempSync(join(tmpdir(), "inkbox-v2-"));
 const home = join(root, "home");
 const archive = resolve(process.argv[2]);
+const sdkArchive = process.env.INKBOX_SDK_PATH ? resolve(process.env.INKBOX_SDK_PATH) : undefined;
 const originalEnv = { ...process.env };
 const originalCwd = process.cwd();
 const binary = process.env.OPENCODE_V2_BIN ?? "opencode";
@@ -111,13 +112,37 @@ const until = async (predicate, label) => {
 };
 try {
   writeFileSync(join(root, "package.json"), '{"private":true,"type":"module"}');
-  execFileSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", archive], {
-    cwd: root,
-    env,
-    stdio: "pipe",
-  });
+  execFileSync(
+    "npm",
+    [
+      "install",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      ...(sdkArchive ? [sdkArchive] : []),
+      archive,
+    ],
+    {
+      cwd: root,
+      env,
+      stdio: "pipe",
+    },
+  );
   const packed = join(root, "node_modules/@inkbox/opencode-plugin/dist");
   const load = (file) => import(pathToFileURL(join(packed, file)).href);
+  if (sdkArchive) {
+    const probe = join(packed, "sdk-candidate-probe.mjs");
+    writeFileSync(
+      probe,
+      'import { AgentIdentity } from "@inkbox/sdk"; export const supported = typeof AgentIdentity.prototype.getWhatsAppLimits === "function";',
+      { flag: "wx" },
+    );
+    try {
+      assert.equal((await import(pathToFileURL(probe).href)).supported, true);
+    } finally {
+      rmSync(probe);
+    }
+  }
   const { resolveConfig } = await load("config.js");
   const { createV2Host } = await load("host/v2-client.js");
   const { createV2Connection } = await load("host/v2-connection.js");

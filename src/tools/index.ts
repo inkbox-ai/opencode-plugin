@@ -20,6 +20,7 @@ import { slackTools } from "./slack.js";
 import { smsReadTools } from "./sms-reads.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
 import { vaultTools } from "./vault.js";
+import { whatsappTools } from "./whatsapp.js";
 import { whoamiTools } from "./whoami.js";
 
 const EMPTY_GATING: GatingSummary = { enabled: [], disabledByDefault: [], groups: [] };
@@ -34,6 +35,7 @@ function buildGroups(deps: ToolDeps, getGating: () => GatingSummary): Registered
     ...sendSmsTools(deps),
     ...smsReadTools(deps),
     ...sendIMessageTools(deps),
+    ...whatsappTools(deps),
     ...imessageReadTools(deps),
     ...placeCallTools(deps),
     ...callReadTools(deps),

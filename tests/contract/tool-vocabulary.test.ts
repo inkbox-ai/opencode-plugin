@@ -32,6 +32,17 @@ function stubDeps(): ToolDeps {
 }
 
 const DEFAULT_ENABLED = [
+  "inkbox_send_whatsapp",
+  "inkbox_list_whatsapp_conversations",
+  "inkbox_get_whatsapp_conversation",
+  "inkbox_list_whatsapp_messages",
+  "inkbox_get_whatsapp_message",
+  "inkbox_upload_whatsapp_media",
+  "inkbox_get_whatsapp_media",
+  "inkbox_mark_whatsapp_read",
+  "inkbox_get_whatsapp_status",
+  "inkbox_lookup_whatsapp_send",
+
   "inkbox_a2a_call",
   "inkbox_a2a_check",
   "inkbox_a2a_reply",
@@ -103,6 +114,7 @@ const SENSITIVE = [
 ].sort();
 
 const GROUPS = [
+  "whatsapp",
   "a2a",
   "email",
   "sms",
@@ -119,10 +131,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 57 default-configuration tools", () => {
+  it("ships exactly the expected 67 default-configuration tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(57);
+    expect(names).toHaveLength(67);
   });
 
   it("has no duplicate tool names", () => {

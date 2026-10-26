@@ -69,7 +69,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
-  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
+  const resumeCandidates = new Map<
+    string,
+    { ids: string[]; sender: string; channel: string; route?: string }
+  >();
   let reconcilePermissions = async (_force?: boolean) => {};
 
   const deps: GatewayDeps = {
@@ -106,7 +109,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.cancelFor(chatKey, {
           sender: target.sender,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         });
     },
     companionSenderAllowed: async (from, requireReply) => {
@@ -124,7 +131,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.tryConsume(chatKey, raw, {
           sender: turn.from,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         })
       )
         return true;
@@ -132,7 +143,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.cancelFor(chatKey, {
           sender: turn.from,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         });
       if (!sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? ""))
         return false;
@@ -164,7 +179,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           pending.cancelFor(chatKey, {
             sender: turn.from,
             channel: target.channel,
-            route: target.slack ? slackRouteKey(target.slack) : undefined,
+            route: target.slack
+              ? slackRouteKey(target.slack)
+              : target.channel === "whatsapp"
+                ? target.conversationId
+                : undefined,
           });
           await sessions.stopSlack?.(target.slack, chatKey);
           await deliverReply(opts.inkbox, target, "Stopped your work in this thread.", logger);
@@ -183,7 +202,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       pending.cancelFor(chatKey, {
         sender: turn.from,
         channel: target.channel,
-        route: target.slack ? slackRouteKey(target.slack) : undefined,
+        route: target.slack
+          ? slackRouteKey(target.slack)
+          : target.channel === "whatsapp"
+            ? target.conversationId
+            : undefined,
       });
       resumeCandidates.delete(chatKey);
       const result = await handleCommand(
@@ -308,11 +331,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           return await pending.ask(
             chatKey,
             options?.timeoutMs ?? g.permissionTimeoutS * 1000,
-            target.group || target.companionMode || target.slack
+            target.group || target.companionMode || target.slack || target.channel === "whatsapp"
               ? {
                   sender: target.sender,
                   channel: target.channel,
-                  route: target.slack ? slackRouteKey(target.slack) : undefined,
+                  route: target.slack
+                    ? slackRouteKey(target.slack)
+                    : target.channel === "whatsapp"
+                      ? target.conversationId
+                      : undefined,
                 }
               : undefined,
             async () => {
@@ -410,6 +437,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           channel: msg.channel,
           slack: msg.slack,
           imessageSource: msg.imessageSource,
+          whatsappSource: msg.whatsappSource,
           to: msg.from,
           sender: msg.from,
           conversationId: msg.conversationId,
@@ -437,7 +465,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           pending.tryConsume(msg.chatKey, raw, {
             sender: msg.from,
             channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+            route: msg.slack
+              ? slackRouteKey(msg.slack)
+              : msg.channel === "whatsapp"
+                ? msg.conversationId
+                : undefined,
           })
         )
           return;
@@ -474,12 +506,44 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           pending.cancelFor(msg.chatKey, {
             sender: msg.from,
             channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+            route: msg.slack
+              ? slackRouteKey(msg.slack)
+              : msg.channel === "whatsapp"
+                ? msg.conversationId
+                : undefined,
           });
 
+        // A shared contact session cannot broaden WhatsApp control authority.
+        if (/^\/(?:stop|cancel|clear|new|resume)$/i.test(raw.trim())) {
+          const active = state
+            .listTurns()
+            .filter(
+              (turn) =>
+                turn.chatKey === msg.chatKey &&
+                ["submitting", "submitted", "completed", "delivery_started"].includes(turn.state),
+            );
+          if (
+            active.some(
+              (turn) =>
+                (turn.replyTarget?.channel === "whatsapp" || msg.channel === "whatsapp") &&
+                (turn.replyTarget?.channel !== msg.channel ||
+                  turn.replyTarget?.conversationId !== msg.conversationId ||
+                  turn.replyTarget?.sender !== msg.from),
+            )
+          ) {
+            return; // A control for another channel/author/conversation has no authority here.
+          }
+        }
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
-        if (candidates && !msg.reaction && sameAuthor(msg.channel, candidates.sender, msg.from)) {
+        if (
+          candidates &&
+          candidates.channel === msg.channel &&
+          (candidates.route ?? undefined) ===
+            (msg.channel === "whatsapp" ? msg.conversationId : undefined) &&
+          !msg.reaction &&
+          sameAuthor(msg.channel, candidates.sender, msg.from)
+        ) {
           resumeCandidates.delete(msg.chatKey);
           const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
@@ -498,9 +562,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               {
                 opencode: opts.opencode,
                 inkbox: opts.inkbox,
-                sessions: msg.imessageSource
-                  ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, "imessage") }
-                  : sessions,
+                sessions:
+                  msg.imessageSource || msg.whatsappSource
+                    ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, msg.channel) }
+                    : sessions,
                 logger,
                 directory: opts.directory,
                 health: () => health(opts, transport.publicUrl),
@@ -513,6 +578,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           if (result.resume && result.resume.length > 0) {
             resumeCandidates.set(msg.chatKey, {
               ids: result.resume,
+              route: msg.channel === "whatsapp" ? msg.conversationId : undefined,
               sender: msg.from,
               channel: msg.channel,
             });
@@ -524,7 +590,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           pending.cancelFor(msg.chatKey, {
             sender: msg.from,
             channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
+            route: msg.slack
+              ? slackRouteKey(msg.slack)
+              : msg.channel === "whatsapp"
+                ? msg.conversationId
+                : undefined,
           });
         await sessions.handleInbound(msg);
       },

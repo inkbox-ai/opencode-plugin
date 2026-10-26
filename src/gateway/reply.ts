@@ -2,6 +2,7 @@ import type { InkboxRuntime } from "../client.js";
 import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
 import { prepareSlackReply } from "../slack.js";
+import { prepareWhatsApp } from "../whatsapp-native.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
@@ -67,6 +68,10 @@ export async function prepareReply(
     throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
   }
   const identity = await runtime.getIdentity();
+  if (target.channel === "whatsapp") {
+    const send = await prepareWhatsApp(identity, target, { text: body }, store);
+    return async () => ({ delivered: true, reason: "sent", messageId: (await send()).id });
+  }
   const nativeSend =
     target.channel === "imessage" && target.imessageSource
       ? await prepareNativeIMessage(identity, target, { text: body }, store)

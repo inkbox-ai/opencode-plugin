@@ -224,7 +224,7 @@ groups are enabled.
 
 ## Tools
 
-35 tools are enabled by default; 21 more are opt-in (see
+45 tools are enabled by default; 21 more are opt-in (see
 [Enabling more tools](#enabling-more-tools)). Names are stable — treat renames
 as breaking.
 
@@ -241,6 +241,18 @@ as breaking.
 | `access` | — | `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access` |
 | `vault` | — | `inkbox_credentials_list`, and by exact name only: `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code` |
 | `diagnostics` | `inkbox_whoami`, `inkbox_doctor` | — |
+
+### Dedicated WhatsApp
+
+WhatsApp is available after approval for identities that already have a dedicated iMessage number. Use **Request Access** in the Inkbox console; plugin configuration cannot enable or provision the channel. `inkbox_get_whatsapp_status` reads current readiness and, when supported, effective independent limits/usage. No local product-availability flag is required.
+
+Signed one-to-one messages enter the native durable session queue. Final answers reply automatically on WhatsApp; do not also send that same answer with a tool. Contacts retain the existing shared contact session, while permission answers, Stop, and text bursts retain the exact channel, conversation, and author. Status callbacks never wake the model. Groups, quoted replies, reactions, remote read receipts, calls, and WhatsApp Companion activation are not exposed.
+
+Tools: `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get_whatsapp_conversation`, `inkbox_list_whatsapp_messages`, `inkbox_get_whatsapp_message`, `inkbox_upload_whatsapp_media`, `inkbox_get_whatsapp_media`, `inkbox_mark_whatsapp_read`, `inkbox_get_whatsapp_status`, and `inkbox_lookup_whatsapp_send`. Text has a 4,000-character protocol ceiling and each message supports one owned attachment within a 20 MiB ceiling; effective server limits may be lower. Upload a local file with host approval, retain its media ID, then send that ID. Incoming download access is renewed by ID, not copied from an expired webhook URL. Mark-read updates local inbox state only.
+
+Completed answers and stable logical-send keys are checkpointed before delivery. Explicit sends return their key and media ID. After an ambiguous result, retain both and inspect `inkbox_lookup_whatsapp_send`; do not upload again or send a new copy. A confirmed send with unknown delivery is not a failed send.
+
+This draft requires SDK 0.7.21. Candidate checks build the exact reviewed public SDK commit before preparing an archive-aware npm lock and use that same real candidate in packed V1/V2 host installs. The normal dependency remains `^0.7.21`; after SDK publication, regenerate the registry lock before releasing this plugin. Candidate-source CI does not claim that the package is already published.
 
 ### Enabling more tools
 

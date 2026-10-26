@@ -56,6 +56,7 @@ function makeIdentity() {
     getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
     getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
+    sendWhatsApp: vi.fn(async (_options: unknown) => ({ id: "wa-1" })),
   };
 }
 
@@ -3331,4 +3332,70 @@ it("reconciles native permissions after actual recovered ownership, not just cat
   await vi.waitFor(() => expect(observed).toEqual([true]));
   expect(second.opencode.session.promptAsync).not.toHaveBeenCalled();
   await second.mgr.close();
+});
+
+it("durably admits WhatsApp without an iMessage flag and checkpoints the answer and logical key before plain delivery", async () => {
+  const h = makeManager();
+  h.config.gateway.imessageThreadedReplies = false;
+  const input = sms("WhatsApp question", {
+    channel: "whatsapp",
+    messageId: "wa-source",
+    whatsappSource: { messageId: "wa-source", identityId: "identity-1" },
+  });
+  h.identity.sendWhatsApp.mockImplementation(async (options) => {
+    const turn = h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")!;
+    expect(turn.state).toBe("delivery_started");
+    expect(turn.output).toBe("reply");
+    const sends = Object.values(h.state.read().whatsappSends as Record<string, any>);
+    expect(sends[0].idempotencyKey).toBe((options as any).idempotencyKey);
+    expect(options).toEqual({
+      text: "reply",
+      conversationId: "conv-1",
+      idempotencyKey: expect.stringContaining("opencode:whatsapp:"),
+    });
+    return { id: "wa-1" };
+  });
+  try {
+    await h.mgr.handleInbound(input);
+    await h.mgr.handleInbound(input);
+    await vi.waitFor(() =>
+      expect(
+        h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")?.state,
+      ).toBe("delivered"),
+    );
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(h.identity.sendIMessage).not.toHaveBeenCalled();
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+it("keeps uncertain WhatsApp delivery out of model recovery and never sends the saved answer again", async () => {
+  const h = makeManager();
+  h.identity.sendWhatsApp.mockRejectedValue(new Error("lost send response"));
+  try {
+    await h.mgr.handleInbound(
+      sms("WhatsApp question", {
+        channel: "whatsapp",
+        messageId: "wa-source",
+        whatsappSource: { messageId: "wa-source", identityId: "identity-1" },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")
+          ?.uncertainStage,
+      ).toBe("delivery"),
+    );
+    await h.mgr.catchUp();
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    const turns = h.state.listTurns();
+    expect(turns).toHaveLength(1);
+    expect(turns[0].output).toBe("reply");
+    expect(turns[0].error).toContain("Do not upload or send a new copy");
+  } finally {
+    await h.mgr.close();
+  }
 });

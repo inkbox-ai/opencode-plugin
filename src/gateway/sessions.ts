@@ -15,6 +15,7 @@ import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js"
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
+import { hasExplicitWhatsAppReply } from "../whatsapp-native.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -269,6 +270,8 @@ export function createSessionManager(
         emailAddress: id.emailAddress,
         dedicatedNumber: id.phoneNumber?.number,
         imessageEnabled: (id as { imessageEnabled?: boolean }).imessageEnabled,
+        whatsappEnabled: id.whatsappEnabled,
+        whatsappNumber: id.whatsappNumber,
       });
     } catch (err) {
       identityResolved = false;
@@ -900,6 +903,7 @@ export function createSessionManager(
       const finish = last?.info?.finish;
       if (finish && finish !== "tool-calls" && finish !== "unknown") {
         if (
+          hasExplicitWhatsAppReply(turn.replyTarget, deps.state) ||
           sentEmailReply(
             turn.replyTarget,
             assistants.flatMap((message) => message.parts ?? []),
@@ -972,6 +976,7 @@ export function createSessionManager(
         });
         if (
           !current.companion &&
+          !current.replyTarget?.whatsappSource &&
           !current.replyTarget?.imessageSource &&
           !current.replyTarget?.slack
         )
@@ -1012,7 +1017,11 @@ export function createSessionManager(
           settle(current.id, output);
           return;
         }
-        if (!current.replyTarget?.imessageSource && !current.replyTarget?.slack)
+        if (
+          !current.replyTarget?.whatsappSource &&
+          !current.replyTarget?.imessageSource &&
+          !current.replyTarget?.slack
+        )
           recoverReply(current, err, output);
         settle(current.id, output);
         return;
@@ -1664,7 +1673,10 @@ export function createSessionManager(
     },
     async handleInbound(msg: InboundMessage) {
       if (closing) throw new Error("Gateway is closing; retry inbound delivery.");
-      const sourceId = msg.imessageSource?.messageId ?? (msg.slack ? msg.messageId : undefined);
+      const sourceId =
+        msg.whatsappSource?.messageId ??
+        msg.imessageSource?.messageId ??
+        (msg.slack ? msg.messageId : undefined);
       if (
         sourceId &&
         deps.state
@@ -1676,6 +1688,7 @@ export function createSessionManager(
         channel: msg.channel,
         slack: msg.slack,
         imessageSource: msg.imessageSource,
+        whatsappSource: msg.whatsappSource,
         to: msg.from,
         conversationId: msg.conversationId,
         subject: msg.subject,
@@ -1697,7 +1710,20 @@ export function createSessionManager(
         target,
         {
           agent: overrideFor(g.channelAgents),
-          ...(msg.slack && sourceId ? { sourceIds: [sourceId] } : {}),
+          ...((msg.slack || msg.whatsappSource) && sourceId ? { sourceIds: [sourceId] } : {}),
+          ...(msg.whatsappSource
+            ? {
+                burstKey:
+                  !msg.whatsappSource.mediaIds?.length && !msg.text.trim().startsWith("/")
+                    ? JSON.stringify(["whatsapp", msg.from, msg.conversationId])
+                    : undefined,
+                burstTextChars: [...msg.text].length,
+                retryAt:
+                  !msg.whatsappSource.mediaIds?.length && !msg.text.trim().startsWith("/")
+                    ? Date.now() + 750
+                    : undefined,
+              }
+            : {}),
           ...(msg.imessageSource
             ? {
                 sourceIds: [msg.imessageSource.messageId],
@@ -1762,7 +1788,7 @@ export function createSessionManager(
         ) {
           const merged = deps.state.updateTurn(previous.id, {
             text: previous.text + "\n" + msg.text,
-            sourceIds: [...(previous.sourceIds ?? []), msg.imessageSource!.messageId],
+            sourceIds: [...(previous.sourceIds ?? []), sourceId!],
             burstTextChars: (previous.burstTextChars ?? 0) + msg.text.length,
             retryAt: Math.min(previous.createdAt + 2000, Date.now() + 750),
           });
@@ -1775,7 +1801,12 @@ export function createSessionManager(
         .listTurns()
         .filter(
           (candidate) =>
-            !(msg.slack || (msg.channel === "imessage" && g.imessageThreadedReplies)) &&
+            !candidate.replyTarget?.whatsappSource &&
+            !(
+              msg.slack ||
+              msg.whatsappSource ||
+              (msg.channel === "imessage" && g.imessageThreadedReplies)
+            ) &&
             candidate.chatKey === msg.chatKey &&
             candidate.kind === "normal" &&
             Boolean(candidate.ownerId) &&
@@ -1798,7 +1829,7 @@ export function createSessionManager(
           .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
           .catch(() => {});
       }
-      if (msg.slack || msg.imessageSource) {
+      if (msg.slack || msg.imessageSource || msg.whatsappSource) {
         enqueue(turn);
         return;
       }

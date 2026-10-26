@@ -18,9 +18,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: npm run lint
       - run: npm run typecheck
@@ -39,13 +40,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run typecheck
       - run: npx vitest run tests/contract
@@ -59,9 +61,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - name: Install minimum native host
         run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.15.0
@@ -86,10 +89,28 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: bash tests/ci/npm_with_retry.sh ci
+      - run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
+          bash tests/ci/npm_with_retry.sh ci
       - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@${{ matrix.version }}
       - run: npm run build
       - name: Packed V2 host contract
         run: |
           ARCHIVE=$(npm pack --silent | tail -1)
           node scripts/smoke-v2.mjs "$ARCHIVE"
+
+  sdk-compatibility:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install candidate-aware dependency graph, then the historical SDK boundary
+        run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
+          bash tests/ci/npm_with_retry.sh ci
+          bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.15 @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
+      - name: Verify historical base behavior without claiming WhatsApp support
+        run: npx vitest run tests/unit/client.test.ts tests/unit/config.test.ts tests/unit/registry.test.ts tests/unit/send-email.test.ts tests/unit/send-sms.test.ts tests/unit/send-imessage.test.ts tests/unit/imessage-reads.test.ts tests/unit/vault.test.ts

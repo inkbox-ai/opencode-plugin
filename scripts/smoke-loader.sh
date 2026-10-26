@@ -50,6 +50,19 @@ else
   npm install --silent "$TARBALL"
 fi
 
+# Resolve the SDK through the actual installed plugin, not the test harness.
+if [ -n "${INKBOX_SDK_PATH:-}" ]; then
+  node --input-type=module - "$WORKDIR/node_modules/@inkbox/opencode-plugin/dist/client.js" <<'JS'
+import assert from 'node:assert/strict';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const probe = new URL('./sdk-candidate-probe.mjs', pathToFileURL(process.argv[2]));
+writeFileSync(probe, 'import { AgentIdentity } from "@inkbox/sdk"; export const supported = typeof AgentIdentity.prototype.getWhatsAppLimits === "function";', {flag:'wx'});
+try { assert.equal((await import(probe.href)).supported,true); }
+finally { unlinkSync(probe); }
+JS
+fi
+
 mkdir -p .opencode/plugins
 # The wrapper loads the packaged plugin exactly as opencode would, then drops
 # a marker recording the registered tool names so this script can assert on it.

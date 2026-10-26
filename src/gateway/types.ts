@@ -28,7 +28,7 @@ export interface GatewayDeps {
   directory: string;
 }
 
-export type Channel = "email" | "sms" | "imessage" | "slack" | "voice";
+export type Channel = "email" | "sms" | "imessage" | "whatsapp" | "slack" | "voice";
 
 // A peer agent identity the backend resolved for an inbound sender. Webhooks
 // carry these under `data.agent_identities`; a sender with no contact match
@@ -43,6 +43,7 @@ export interface SenderAgentIdentity {
 export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
+  whatsappSource?: { messageId: string; identityId: string; mediaIds?: string[] };
   imessageSource?: {
     messageId: string;
     conversationId: string;
@@ -90,6 +91,7 @@ export interface InboundMessage {
 export interface ReplyTarget {
   channel: Channel;
   slack?: SlackRoute;
+  whatsappSource?: { messageId: string; identityId: string; mediaIds?: string[] };
   imessageSource?: {
     messageId: string;
     conversationId: string;

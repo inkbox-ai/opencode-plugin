@@ -155,7 +155,11 @@ export async function downloadMedia(urls: string[], opts: DownloadMediaOptions):
   return saved;
 }
 
-async function readFileWithCap(filePath: string, maxBytes: number, use: string): Promise<Buffer> {
+export async function readFileWithCap(
+  filePath: string,
+  maxBytes: number,
+  use: string,
+): Promise<Buffer> {
   const { size } = await fsp.stat(filePath);
   if (size > maxBytes) {
     throw new Error(

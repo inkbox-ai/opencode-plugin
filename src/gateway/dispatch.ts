@@ -2,6 +2,11 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
+import {
+  recordWhatsAppStatus,
+  WHATSAPP_EVENTS,
+  WHATSAPP_MAX_MEDIA_BYTES,
+} from "../whatsapp-native.js";
 import type { BurstBuffer } from "./burst.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
@@ -67,6 +72,8 @@ function messageChatKey(deps: DispatchDeps, input: ChatKeyInput, participants: n
 // genuine processing failure (so the request id rolls back and the sender
 // may retry); filtered/ignored events return true (ack, no retry).
 export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
+  if ((event.eventType ?? inferType(event.body))?.startsWith("whatsapp."))
+    return event.provider === "inkbox" ? handleWhatsApp(deps, event) : false;
   if (event.provider !== "inkbox") {
     if (deps.onExternal) {
       void deps
@@ -729,4 +736,101 @@ async function conversationParticipants(
     deps.logger.warn("conversation.lookup_failed", { channel, error: String(error) });
   }
   return inline;
+}
+
+async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
+  if (!event.verified || event.body.companion != null) return false;
+  const message = resourceOf(event.body, "message");
+  if (!message) return true;
+  const identity = await deps.inkbox.getIdentity();
+  if (message.agent_identity_id !== identity.id) return true;
+  const type = event.eventType ?? inferType(event.body);
+  if (type !== "whatsapp.received") {
+    if (WHATSAPP_EVENTS.includes(type ?? ""))
+      recordWhatsAppStatus(message, identity.id, deps.state ?? createStateStore());
+    return true;
+  }
+  const from = str(message.sender_number),
+    conversationId = str(message.conversation_id),
+    messageId = str(message.id);
+  const participants = message.participants;
+  if (
+    !from ||
+    !conversationId ||
+    !messageId ||
+    message.direction !== "inbound" ||
+    message.is_group ||
+    !Array.isArray(participants) ||
+    participants.length !== 1 ||
+    participants[0] !== from ||
+    from !== message.remote_number ||
+    from === message.local_number
+  )
+    return true;
+  const resolved = await deps.contacts.resolve(from);
+  if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
+  const media = Array.isArray(message.media)
+    ? message.media.map(record).filter((item): item is Record<string, unknown> => Boolean(item))
+    : [];
+  if (media.length > 1) return true;
+  const paths: string[] = [];
+  let text = str(message.content) ?? "";
+  for (const item of media) {
+    try {
+      const current = await identity.getWhatsAppMedia(String(item.id));
+      if (current.status === "ready" && current.url)
+        paths.push(
+          ...(await downloadMedia([current.url], {
+            dir: mediaDir(deps.config),
+            maxBytes: WHATSAPP_MAX_MEDIA_BYTES,
+            logger: deps.logger,
+          })),
+        );
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "statusCode" in error &&
+        [401, 403].includes(Number(error.statusCode))
+      )
+        throw error;
+    }
+    if (!paths.length)
+      text += "\n[WhatsApp attachment unavailable; its owned media ID remains retained]";
+  }
+  if (!text.trim() && !paths.length) return true;
+  const contactMemories = deps.config.gateway.contactMemories
+    ? matchedContactMemories(event.body, {
+        channel: "whatsapp",
+        from,
+        contactId: resolved.contactId,
+        allowSoleContactFallback: true,
+      })
+    : [];
+  await deps.sessions.handleInbound({
+    channel: "whatsapp",
+    chatKey: deps.contacts.chatKeyFor({
+      channel: "whatsapp",
+      contactId: resolved.contactId,
+      conversationId,
+      from,
+    }),
+    from,
+    conversationId,
+    messageId,
+    ...resolved,
+    whatsappSource: {
+      messageId,
+      identityId: identity.id,
+      mediaIds: media.map((item) => String(item.id)),
+    },
+    ...(resolved.contactId
+      ? {}
+      : { senderAgent: senderAgentIdentity("whatsapp", event.body, from) }),
+    contactMemories,
+    text,
+    rawText: str(message.content) ?? "",
+    mediaPaths: paths,
+  });
+  return true;
 }
