@@ -125,7 +125,12 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const content = await readFileWithCap(args.mediaPath, WHATSAPP_MAX_MEDIA_BYTES, "upload");
         assertWhatsAppOwner(owner);
         if (ctx.abort?.aborted) throw new Error("The originating tool was cancelled.");
-        return (await deps.runtime.getIdentity()).uploadWhatsAppMedia({
+        const identity = await deps.runtime.getIdentity();
+        assertWhatsAppOwner(owner);
+        if (ctx.abort?.aborted) throw new Error("The originating tool was cancelled.");
+        if (owner?.whatsappSource && owner.whatsappSource.identityId !== identity.id)
+          throw new Error("The originating identity changed.");
+        return identity.uploadWhatsAppMedia({
           content,
           filename: basename(args.mediaPath),
         });

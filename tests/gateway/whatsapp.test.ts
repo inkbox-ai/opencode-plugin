@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
@@ -392,4 +392,55 @@ it("preserves only public quota fields and permits the original key after a know
       new InkboxAPIError(503, { error: "whatsapp_upstream", credentials: "private" }),
     ),
   ).toBeUndefined();
+});
+
+it("rechecks source authority after delayed identity resolution before uploading a local file", async () => {
+  const store = state();
+  process.env.INKBOX_OPENCODE_HOME = directories.at(-1)!;
+  const path = join(directories.at(-1)!, "attachment.txt");
+  writeFileSync(path, "attachment");
+  store.saveTurn({
+    id: "turn",
+    messageID: "input",
+    sessionID: "session",
+    chatKey: "contact",
+    state: "submitted",
+    kind: "normal",
+    text: "question",
+    deliver: true,
+    replyTarget: target,
+    ownerId: "owner",
+    leaseUntil: Date.now() + 10000,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const upload = vi.fn();
+  const deps: any = {
+    runtime: {
+      getIdentity: async () => {
+        store.updateTurn("turn", { state: "interrupted" });
+        return { id: owner, uploadWhatsAppMedia: upload };
+      },
+    },
+    opencode: {
+      session: {
+        message: async () => ({ data: { info: { role: "assistant", parentID: "input" } } }),
+      },
+    },
+  };
+  const tool = whatsappTools(deps).find((tool) => tool.name === "inkbox_upload_whatsapp_media")!;
+  try {
+    await expect(
+      tool.definition.execute({ mediaPath: path }, {
+        sessionID: "session",
+        messageID: "assistant",
+        directory: "/tmp",
+        ask: async () => {},
+        abort: new AbortController().signal,
+      } as any),
+    ).rejects.toThrow("no longer owns");
+    expect(upload).not.toHaveBeenCalled();
+  } finally {
+    delete process.env.INKBOX_OPENCODE_HOME;
+  }
 });
