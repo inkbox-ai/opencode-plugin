@@ -30,6 +30,7 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
     "whatsapp_reply_required_for_media",
     "whatsapp_reply_required_for_links",
     "whatsapp_reply_required_for_phone_numbers",
+    "whatsapp_reply_required_for_email_addresses",
   ],
   429: [
     "whatsapp_daily_limit_exceeded",

@@ -416,6 +416,36 @@ it.each([403, 422, 429])(
   },
 );
 
+it("curates email policy rejection and recovers only the original send key", async () => {
+  const store = state();
+  const policy = {
+    error: "whatsapp_reply_required_for_email_addresses",
+    quota: "whatsapp.pre_reply_email_addresses_allowed",
+    limit: 0,
+    retry_condition: "recipient_reply_or_configuration",
+  };
+  const error = new InkboxAPIError(422, { ...policy, message: "private-diagnostic" });
+  expect(publicWhatsAppPolicy(error)).toEqual({ ...policy, status_code: 422 });
+  expect(publicWhatsAppPolicy(new InkboxAPIError(429, policy))).toBeUndefined();
+  const sendWhatsApp = vi
+    .fn()
+    .mockRejectedValueOnce(error)
+    .mockResolvedValue({ id: "accepted-original" });
+  const identity: any = { id: owner, sendWhatsApp };
+  const send = () =>
+    prepareWhatsApp(
+      identity,
+      target,
+      { text: "Email sender@example.com" },
+      store,
+      "original-email-key",
+    );
+  await expect((await send())()).rejects.toThrow("request not accepted");
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(false);
+  await expect((await send())()).resolves.toMatchObject({ id: "accepted-original" });
+  expect(sendWhatsApp.mock.calls[0][0]).toEqual(sendWhatsApp.mock.calls[1][0]);
+});
+
 it("rechecks source authority after delayed identity resolution before uploading a local file", async () => {
   const store = state();
   process.env.INKBOX_OPENCODE_HOME = directories.at(-1)!;
