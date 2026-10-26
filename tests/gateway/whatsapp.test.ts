@@ -444,3 +444,27 @@ it("rechecks source authority after delayed identity resolution before uploading
     delete process.env.INKBOX_OPENCODE_HOME;
   }
 });
+
+it.each([
+  ["+15555550101", false], ["+15555550101", true],
+  [" +1 (555) 555-0101 ", false], [" +1 (555) 555-0101 ", true],
+  ["+15555550102", false],
+])("keeps explicit same-recipient delivery bound to the original final (%s, uncertain=%s)", async (to, uncertain) => {
+  const store = state();
+  vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+  store.saveTurn({ id: "turn", messageID: "input", sessionID: "session", chatKey: "contact",
+    state: "submitted", kind: "normal", text: "question", deliver: true, replyTarget: target,
+    ownerId: "owner", leaseUntil: Date.now() + 10000, createdAt: 1, updatedAt: 1 });
+  const send = vi.fn(async () => { if (uncertain) throw new TypeError("response lost"); return { id: source, conversationId: conversation }; });
+  const deps: any = { runtime: { getIdentity: async () => ({ id: owner, sendWhatsApp: send }) },
+    config: { outbound: { approval: "auto", allowedRecipients: [] } },
+    opencode: { session: { message: async () => ({ data: { info: { role: "assistant", parentID: "input" } } }) } } };
+  const tool = whatsappTools(deps).find((item) => item.name === "inkbox_send_whatsapp")!;
+  const operation = tool.definition.execute({ to, text: "Saved answer" }, {
+    sessionID: "session", messageID: "assistant", directory: "/tmp", abort: new AbortController().signal,
+  } as any);
+  if (uncertain) await expect(operation).rejects.toThrow("not confirmed");
+  else await operation;
+  expect(send).toHaveBeenCalledOnce();
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(to !== "+15555550102");
+});

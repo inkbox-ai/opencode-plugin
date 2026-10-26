@@ -181,9 +181,11 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           `opencode:whatsapp-tool:${createHash("sha256")
             .update(JSON.stringify([identity.id, source, args.to, args.conversationId, payload]))
             .digest("hex")}`;
+        const recipient = typeof args.to === "string" ? args.to.replace(/[\s().-]/g, "") : "";
         const sameConversation =
           owner?.channel === "whatsapp" &&
-          (args.conversationId === owner.conversationId || (args.to && args.to === owner.sender));
+          (args.conversationId === owner.conversationId ||
+            (/^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
         const target = {
           ...(owner ?? {}),
           channel: "whatsapp" as const,
