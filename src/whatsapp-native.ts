@@ -12,6 +12,34 @@ export const WHATSAPP_EVENTS = [
   "whatsapp.delivery_unconfirmed",
 ];
 export const WHATSAPP_MAX_MEDIA_BYTES = 20 * 1024 * 1024;
+const rejectedSendCodes: Record<number, readonly string[]> = {
+  402: ["whatsapp_cycle_limit_exceeded"],
+  403: [
+    "whatsapp_not_eligible",
+    "whatsapp_access_required",
+    "whatsapp_contact_not_allowed",
+    "whatsapp_media_source_not_allowed",
+  ],
+  413: ["whatsapp_media_too_large"],
+  422: [
+    "whatsapp_groups_not_supported",
+    "whatsapp_invalid_recipient",
+    "whatsapp_text_too_long",
+    "whatsapp_unanswered_followup_limit",
+    "whatsapp_opening_message_too_long",
+    "whatsapp_reply_required_for_media",
+    "whatsapp_reply_required_for_links",
+    "whatsapp_reply_required_for_phone_numbers",
+  ],
+  429: [
+    "whatsapp_daily_limit_exceeded",
+    "whatsapp_unanswered_message_limit",
+    "whatsapp_conversation_rate_limited",
+    "whatsapp_new_contact_rate_limited",
+    "whatsapp_new_contact_spacing",
+    "whatsapp_follow_up_rate_limited",
+  ],
+};
 export type WhatsAppOwner = ReplyTarget & { nativeOwner?: { turnId: string; ownerId: string } };
 
 export function assertWhatsAppOwner(
@@ -228,12 +256,20 @@ export function publicWhatsAppPolicy(error: unknown): Record<string, unknown> | 
     retryAfterSeconds?: unknown;
     statusCode?: unknown;
   };
-  if (original.whatsappPolicy) return original.whatsappPolicy;
-  if (![402, 403, 413, 422, 429].includes(Number(original.statusCode))) return;
+  if (original.whatsappPolicy)
+    return publicWhatsAppPolicy({
+      statusCode: original.whatsappPolicy.status_code,
+      detail: original.whatsappPolicy,
+      retryAfterSeconds: original.whatsappPolicy.retry_after_seconds,
+    });
   const detail = original.detail;
   if (!detail || typeof detail !== "object") return;
   const row = detail as Record<string, unknown>;
-  if (typeof row.error !== "string" || !/^whatsapp_[a-z0-9_]{1,120}$/.test(row.error)) return;
+  if (
+    typeof row.error !== "string" ||
+    !rejectedSendCodes[Number(original.statusCode)]?.includes(row.error)
+  )
+    return;
   const result: Record<string, unknown> = { error: row.error };
   if (typeof row.quota === "string" && /^whatsapp\.[a-z0-9_.]{1,120}$/.test(row.quota))
     result.quota = row.quota;

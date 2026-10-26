@@ -351,11 +351,11 @@ it("preserves only public quota fields and permits the original key after a know
   const error = new InkboxAPIError(
     429,
     {
-      error: "whatsapp_rate_limit",
+      error: "whatsapp_daily_limit_exceeded",
       quota: "whatsapp.texts_per_agent_identity_per_24h",
       limit: 20,
       used: 20,
-      retry_condition: "Wait until reset",
+      retry_condition: "window_reset",
       reset_at: "2026-10-27T00:00:00Z",
       message: "untrusted body",
       credentials: "private",
@@ -363,11 +363,11 @@ it("preserves only public quota fields and permits the original key after a know
     "60",
   );
   expect(publicWhatsAppPolicy(error)).toEqual({
-    error: "whatsapp_rate_limit",
+    error: "whatsapp_daily_limit_exceeded",
     quota: "whatsapp.texts_per_agent_identity_per_24h",
     limit: 20,
     used: 20,
-    retry_condition: "Wait until reset",
+    retry_condition: "window_reset",
     reset_at: "2026-10-27T00:00:00Z",
     retry_after_seconds: 60,
     status_code: 429,
@@ -393,6 +393,28 @@ it("preserves only public quota fields and permits the original key after a know
     ),
   ).toBeUndefined();
 });
+
+it.each([403, 422, 429])(
+  "does not free send fencing for an unrecognized public-looking error (%s)",
+  async (status) => {
+    const store = state();
+    const error = new InkboxAPIError(status, { error: "whatsapp_unrecognized_policy" });
+    const sendWhatsApp = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValue({ id: "must-not-repeat" });
+    const identity: any = { id: owner, sendWhatsApp };
+    await expect(
+      (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
+    ).rejects.toThrow("not confirmed");
+    expect(publicWhatsAppPolicy(error)).toBeUndefined();
+    expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
+    await expect(
+      (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
+    ).rejects.toThrow("unconfirmed");
+    expect(sendWhatsApp).toHaveBeenCalledOnce();
+  },
+);
 
 it("rechecks source authority after delayed identity resolution before uploading a local file", async () => {
   const store = state();
@@ -446,25 +468,54 @@ it("rechecks source authority after delayed identity resolution before uploading
 });
 
 it.each([
-  ["+15555550101", false], ["+15555550101", true],
-  [" +1 (555) 555-0101 ", false], [" +1 (555) 555-0101 ", true],
+  ["+15555550101", false],
+  ["+15555550101", true],
+  [" +1 (555) 555-0101 ", false],
+  [" +1 (555) 555-0101 ", true],
   ["+15555550102", false],
-])("keeps explicit same-recipient delivery bound to the original final (%s, uncertain=%s)", async (to, uncertain) => {
-  const store = state();
-  vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
-  store.saveTurn({ id: "turn", messageID: "input", sessionID: "session", chatKey: "contact",
-    state: "submitted", kind: "normal", text: "question", deliver: true, replyTarget: target,
-    ownerId: "owner", leaseUntil: Date.now() + 10000, createdAt: 1, updatedAt: 1 });
-  const send = vi.fn(async () => { if (uncertain) throw new TypeError("response lost"); return { id: source, conversationId: conversation }; });
-  const deps: any = { runtime: { getIdentity: async () => ({ id: owner, sendWhatsApp: send }) },
-    config: { outbound: { approval: "auto", allowedRecipients: [] } },
-    opencode: { session: { message: async () => ({ data: { info: { role: "assistant", parentID: "input" } } }) } } };
-  const tool = whatsappTools(deps).find((item) => item.name === "inkbox_send_whatsapp")!;
-  const operation = tool.definition.execute({ to, text: "Saved answer" }, {
-    sessionID: "session", messageID: "assistant", directory: "/tmp", abort: new AbortController().signal,
-  } as any);
-  if (uncertain) await expect(operation).rejects.toThrow("not confirmed");
-  else await operation;
-  expect(send).toHaveBeenCalledOnce();
-  expect(hasExplicitWhatsAppReply(target, store)).toBe(to !== "+15555550102");
-});
+])(
+  "keeps explicit same-recipient delivery bound to the original final (%s, uncertain=%s)",
+  async (to, uncertain) => {
+    const store = state();
+    vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+    store.saveTurn({
+      id: "turn",
+      messageID: "input",
+      sessionID: "session",
+      chatKey: "contact",
+      state: "submitted",
+      kind: "normal",
+      text: "question",
+      deliver: true,
+      replyTarget: target,
+      ownerId: "owner",
+      leaseUntil: Date.now() + 10000,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const send = vi.fn(async () => {
+      if (uncertain) throw new TypeError("response lost");
+      return { id: source, conversationId: conversation };
+    });
+    const deps: any = {
+      runtime: { getIdentity: async () => ({ id: owner, sendWhatsApp: send }) },
+      config: { outbound: { approval: "auto", allowedRecipients: [] } },
+      opencode: {
+        session: {
+          message: async () => ({ data: { info: { role: "assistant", parentID: "input" } } }),
+        },
+      },
+    };
+    const tool = whatsappTools(deps).find((item) => item.name === "inkbox_send_whatsapp")!;
+    const operation = tool.definition.execute({ to, text: "Saved answer" }, {
+      sessionID: "session",
+      messageID: "assistant",
+      directory: "/tmp",
+      abort: new AbortController().signal,
+    } as any);
+    if (uncertain) await expect(operation).rejects.toThrow("not confirmed");
+    else await operation;
+    expect(send).toHaveBeenCalledOnce();
+    expect(hasExplicitWhatsAppReply(target, store)).toBe(to !== "+15555550102");
+  },
+);
