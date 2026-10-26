@@ -394,11 +394,16 @@ it("preserves only public quota fields and permits the original key after a know
   ).toBeUndefined();
 });
 
-it.each([403, 422, 429])(
-  "does not free send fencing for an unrecognized public-looking error (%s)",
-  async (status) => {
+it.each([
+  [403, "whatsapp_unrecognized_policy"],
+  [422, "whatsapp_unrecognized_policy"],
+  [429, "whatsapp_unrecognized_policy"],
+  [402, "whatsapp_cycle_limit_exceeded"],
+] as const)(
+  "does not free send fencing for an unrecognized public-looking error (%s/%s)",
+  async (status, code) => {
     const store = state();
-    const error = new InkboxAPIError(status, { error: "whatsapp_unrecognized_policy" });
+    const error = new InkboxAPIError(status, { error: code });
     const sendWhatsApp = vi
       .fn()
       .mockRejectedValueOnce(error)

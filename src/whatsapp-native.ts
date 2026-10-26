@@ -13,7 +13,6 @@ export const WHATSAPP_EVENTS = [
 ];
 export const WHATSAPP_MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const rejectedSendCodes: Record<number, readonly string[]> = {
-  402: ["whatsapp_cycle_limit_exceeded"],
   403: [
     "whatsapp_not_eligible",
     "whatsapp_access_required",
