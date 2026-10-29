@@ -1288,6 +1288,44 @@ it.each(["/clear", "/new", "/resume", "/status", "/health", "/usage"])(
   },
 );
 
+it("does not send group command replies when a participant is outside the outbound allowlist", async () => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsApp(f);
+  f.config.gateway.groupReplyMode = "mention";
+  f.config.outbound.allowedRecipients = ["+15550000001"];
+  const send = () => (f.identity as any).sendWhatsApp;
+  for (const [command, id] of [
+    ["@agent /resume", "blocked-resume"],
+    ["@agent 1", "blocked-resume-pick"],
+    ["@agent /health", "blocked-health"],
+    ["@agent /usage", "blocked-usage"],
+  ]) {
+    await expect(waInput(command, "+15550000001", id, true)).rejects.toThrow(/allowlist/);
+    expect(send()).not.toHaveBeenCalled();
+  }
+  hooks.manager.state.saveTurn({
+    id: "foreign",
+    messageID: "foreign",
+    chatKey: "contact-1",
+    state: "submitted",
+    kind: "normal",
+    text: "private",
+    deliver: true,
+    replyTarget: { channel: "email", sender: "other@example.com", messageId: "foreign" },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await expect(waInput("@agent /clear", "+15550000001", "blocked-denial", true)).rejects.toThrow(
+    /allowlist/,
+  );
+  expect(send()).not.toHaveBeenCalled();
+  expect(hooks.manager.state.getTurn("foreign").state).toBe("submitted");
+  f.config.outbound.allowedRecipients = [];
+  await waInput("@agent /status", "+15550000001", "open-status", true);
+  expect(send()).toHaveBeenCalledOnce();
+});
+
 it.each(["/clear", "/new", "/resume"])(
   "explains rejected %s without exposing or stopping another source",
   async (command) => {

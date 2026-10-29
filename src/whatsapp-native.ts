@@ -114,6 +114,61 @@ export function assertWhatsAppText(text: string): void {
     );
 }
 
+// A caller-supplied quote or key that cannot be sent is not an unknown delivery.
+function assertSendableWhatsAppRequest(
+  input: {
+    to?: string | string[];
+    conversationId?: string;
+    replyToMessageId?: string;
+    groupName?: string;
+    text?: string;
+    mediaIds?: string[];
+    idempotencyKey: string;
+  },
+  explicitQuote: boolean,
+): void {
+  if ((input.to == null) === (input.conversationId == null))
+    throw new Error("Specify exactly one of to or conversationId");
+  const recipients = input.to == null ? [] : typeof input.to === "string" ? [input.to] : input.to;
+  if (
+    input.to != null &&
+    (recipients.length < 1 ||
+      recipients.length > 8 ||
+      recipients.some(
+        (value) => typeof value !== "string" || !/^\+[1-9][0-9]{6,14}$/.test(value),
+      ) ||
+      new Set(recipients).size !== recipients.length)
+  )
+    throw new Error("Provide 1–8 unique E.164 recipients");
+  if (
+    explicitQuote &&
+    input.replyToMessageId != null &&
+    (!input.conversationId ||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(input.replyToMessageId))
+  )
+    throw new Error("replyToMessageId requires conversationId and a valid message UUID");
+  if (
+    input.groupName != null &&
+    (!Array.isArray(input.to) ||
+      input.to.length < 2 ||
+      !input.groupName.trim() ||
+      Array.from(input.groupName).length > 100)
+  )
+    throw new Error("groupName requires a new recipient-list group and 1–100 characters");
+  if ((input.mediaIds?.length ?? 0) > 1)
+    throw new Error("WhatsApp supports at most one attachment");
+  if (!input.text?.trim() && !input.mediaIds?.length)
+    throw new Error("Provide text or one media ID");
+  if (input.text != null && Array.from(input.text).length > 4000)
+    throw new Error("WhatsApp text must be at most 4000 characters");
+  const key = input.idempotencyKey;
+  const length = Array.from(key).length;
+  if (length < 1 || length > 255)
+    throw new RangeError("idempotencyKey must contain between 1 and 255 characters");
+  if (!key.trim() || /[^\x20-\x7e]/.test(key))
+    throw new RangeError("Use a printable ASCII idempotency key");
+}
+
 export async function prepareWhatsApp(
   identity: AgentIdentity,
   target: WhatsAppOwner,
@@ -126,6 +181,7 @@ export async function prepareWhatsApp(
   if (typeof identity.sendWhatsApp !== "function")
     throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
   assertWhatsAppText(payload.text ?? "");
+  const suppliedQuote = payload.replyToMessageId;
   const source = target.whatsappSource;
   const destination =
     (target as WhatsAppOwner & { whatsappRecipients?: string[] }).whatsappRecipients ?? target.to;
@@ -182,6 +238,22 @@ export async function prepareWhatsApp(
       throw new Error(
         "The source has an unresolved quoted send; retain its original key and payload.",
       );
+    const existingSends = (store.read().whatsappSends ?? {}) as Record<string, unknown>;
+    if (!(idempotencyKey in existingSends)) {
+      assertSendableWhatsAppRequest(
+        {
+          ...(target.conversationId
+            ? { conversationId: target.conversationId }
+            : { to: destination }),
+          text: payload.text,
+          mediaIds: payload.mediaIds,
+          replyToMessageId: payload.replyToMessageId,
+          groupName: payload.groupName,
+          idempotencyKey,
+        },
+        Boolean(originalKey && suppliedQuote),
+      );
+    }
     let previous: any;
     const entry = {
       identityId: identity.id,

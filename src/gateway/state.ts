@@ -88,7 +88,29 @@ export interface GatewayState {
   replyTargets: Record<string, ReplyTarget>;
   permissions: Record<string, DurablePermission>;
   tunnelId?: string;
+  // Newest admitted revision for one identity, actor, and target message.
+  whatsappReactionWatermarks?: Record<string, number>;
   [key: string]: unknown;
+}
+
+export function whatsappReactionWatermarkKey(
+  identityId: string,
+  actor: string,
+  targetMessageId: string,
+): string {
+  return JSON.stringify([identityId, actor, targetMessageId]);
+}
+
+// A later lower revision is an old delivery, not new context.
+export function staleWhatsAppReactionRevision(
+  state: GatewayState,
+  reaction: { identityId: string; actor: string; targetMessageId: string; revision: number },
+): boolean {
+  const seen =
+    state.whatsappReactionWatermarks?.[
+      whatsappReactionWatermarkKey(reaction.identityId, reaction.actor, reaction.targetMessageId)
+    ] ?? 0;
+  return seen > 0 && reaction.revision <= seen;
 }
 
 export interface StateStore {
@@ -371,7 +393,37 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           )
         )
           return [state, false];
-        return [{ ...state, turns: { ...state.turns, [turn.id]: turn } }, true];
+        const revision = source.reactionRevision;
+        const actor = turn.replyTarget?.sender;
+        const targetId = source.targetMessageId;
+        let watermarks = state.whatsappReactionWatermarks;
+        if (
+          source.reactionId &&
+          actor &&
+          targetId &&
+          Number.isInteger(revision) &&
+          (revision as number) >= 1
+        ) {
+          const key = whatsappReactionWatermarkKey(source.identityId, actor, targetId);
+          if (
+            staleWhatsAppReactionRevision(state, {
+              identityId: source.identityId,
+              actor,
+              targetMessageId: targetId,
+              revision: revision as number,
+            })
+          )
+            return [state, false];
+          watermarks = { ...watermarks, [key]: revision as number };
+        }
+        return [
+          {
+            ...state,
+            turns: { ...state.turns, [turn.id]: turn },
+            ...(watermarks ? { whatsappReactionWatermarks: watermarks } : {}),
+          },
+          true,
+        ];
       });
     },
     updateTurn(id, patch) {

@@ -866,7 +866,11 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
         ? { rootMessageId: message.thread_root_message_id as string | null }
         : {}),
       ...(reaction
-        ? { reactionId: String(reaction.id), targetMessageId: String(reaction.target_message_id) }
+        ? {
+            reactionId: String(reaction.id),
+            targetMessageId: String(reaction.target_message_id),
+            reactionRevision: Number(reaction.revision),
+          }
         : {}),
     },
     ...(resolved.contactId || message.is_group

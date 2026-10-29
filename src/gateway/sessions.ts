@@ -38,7 +38,7 @@ import { prepareReply, ReplyPreparationError, sentEmailReply } from "./reply.js"
 import { companionWakes, mentionsAgent, sameAuthor } from "./response-policy.js";
 import { slackSenderAllowed } from "./slack.js";
 import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
-import { gatewayHome } from "./state.js";
+import { gatewayHome, staleWhatsAppReactionRevision } from "./state.js";
 import type {
   GatewayLogger,
   InboundMessage,
@@ -1701,6 +1701,21 @@ export function createSessionManager(
     },
     async handleInbound(msg: InboundMessage) {
       if (closing) throw new Error("Gateway is closing; retry inbound delivery.");
+      const reactionSource = msg.whatsappSource;
+      const reactionRevision = reactionSource?.reactionRevision;
+      if (
+        msg.reaction &&
+        reactionSource?.reactionId &&
+        reactionSource.targetMessageId &&
+        Number.isInteger(reactionRevision) &&
+        staleWhatsAppReactionRevision(deps.state.read(), {
+          identityId: reactionSource.identityId,
+          actor: msg.from,
+          targetMessageId: reactionSource.targetMessageId,
+          revision: reactionRevision as number,
+        })
+      )
+        return;
       const sourceId =
         msg.whatsappSource?.messageId ??
         msg.imessageSource?.messageId ??

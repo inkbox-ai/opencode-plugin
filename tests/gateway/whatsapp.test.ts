@@ -120,6 +120,161 @@ it("uses the real SDK for stable source-anchored replies without unsupported fal
   );
 });
 
+const quote = "40000000-0000-4000-8000-000000000004";
+const conversationWire = {
+  id: conversation,
+  agent_identity_id: owner,
+  local_number: "+15555550100",
+  remote_number: "+15555550101",
+  participants: ["+15555550101"],
+  is_group: false,
+  unresolved_participant_count: 0,
+  created_at: time,
+  updated_at: time,
+};
+function stubSdkFetch() {
+  const calls: { url: URL; init?: RequestInit }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: unknown, init?: RequestInit) => {
+      const parsed = new URL(String(url));
+      calls.push({ url: parsed, init });
+      if (parsed.pathname.includes("/identities/")) return ok(identityWire);
+      if (parsed.pathname.includes("/conversations/")) return ok(conversationWire);
+      return ok({ message: wire }, init?.method === "POST" ? 201 : 200);
+    }),
+  );
+  return calls;
+}
+function ownedSendTool(identity: Awaited<ReturnType<typeof realIdentity>>["identity"]) {
+  const store = state();
+  vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+  store.saveTurn({
+    id: "turn",
+    messageID: "input",
+    sessionID: "session",
+    chatKey: "contact",
+    state: "submitted",
+    kind: "normal",
+    text: "question",
+    deliver: true,
+    replyTarget: target,
+    ownerId: "owner",
+    leaseUntil: Date.now() + 60_000,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const tool = whatsappTools({
+    runtime: { getIdentity: async () => identity },
+    config: { outbound: { approval: "auto", allowedRecipients: [], askTimeoutMs: 100 } },
+    opencode: {
+      session: {
+        message: async () => ({ data: { info: { role: "assistant", parentID: "input" } } }),
+      },
+    },
+  } as any).find((item) => item.name === "inkbox_send_whatsapp")!;
+  const ctx = {
+    sessionID: "session",
+    messageID: "assistant",
+    directory: "/tmp",
+    abort: new AbortController().signal,
+  } as any;
+  return {
+    store,
+    execute: (args: Record<string, unknown>) => tool.definition.execute(args, ctx),
+  };
+}
+function posted(calls: { url: URL; init?: RequestInit }[]) {
+  return calls.filter((call) => call.init?.method === "POST");
+}
+
+it("rejects a malformed quote before recording a send, then accepts the same key once", async () => {
+  const calls = stubSdkFetch();
+  const { identity } = await realIdentity();
+  const quoteError = "replyToMessageId requires conversationId and a valid message UUID";
+  await expect(
+    identity.sendWhatsApp({
+      conversationId: conversation,
+      text: "Hello",
+      replyToMessageId: "not-a-uuid",
+      idempotencyKey: "quote-key",
+    }),
+  ).rejects.toThrow(quoteError);
+  expect(posted(calls)).toHaveLength(0);
+  const tool = ownedSendTool(identity);
+  await expect(
+    tool.execute({
+      conversationId: conversation,
+      text: "Hello",
+      replyToMessageId: "not-a-uuid",
+      idempotencyKey: "quote-key",
+    }),
+  ).rejects.toThrow(quoteError);
+  expect(posted(calls)).toHaveLength(0);
+  expect(tool.store.read().whatsappSends ?? {}).toEqual({});
+  expect(hasExplicitWhatsAppReply(target, tool.store)).toBe(false);
+  await tool.execute({
+    conversationId: conversation,
+    text: "Hello",
+    replyToMessageId: quote,
+    idempotencyKey: "quote-key",
+  });
+  expect(posted(calls)).toHaveLength(1);
+  expect(posted(calls)[0].url.pathname).toBe("/api/v1/whatsapp/messages");
+  expect(JSON.parse(String(posted(calls)[0].init?.body))).toMatchObject({
+    conversation_id: conversation,
+    reply_to_message_id: quote,
+    text: "Hello",
+  });
+  await tool.execute({
+    conversationId: conversation,
+    text: "Hello",
+    replyToMessageId: quote,
+    idempotencyKey: "quote-key",
+  });
+  expect(posted(calls)).toHaveLength(1);
+  expect(hasExplicitWhatsAppReply(target, tool.store)).toBe(true);
+});
+
+it.each([
+  ["", "idempotencyKey must contain between 1 and 255 characters"],
+  ["k".repeat(256), "idempotencyKey must contain between 1 and 255 characters"],
+  ["   ", "Use a printable ASCII idempotency key"],
+  ["bad\nkey", "Use a printable ASCII idempotency key"],
+  ["bad\u00e9key", "Use a printable ASCII idempotency key"],
+])("rejects local idempotency key %j before recording a send", async (idempotencyKey, message) => {
+  const calls = stubSdkFetch();
+  const { identity } = await realIdentity();
+  await expect(
+    identity.sendWhatsApp({
+      conversationId: conversation,
+      text: "Hello",
+      replyToMessageId: quote,
+      idempotencyKey,
+    }),
+  ).rejects.toThrow(message);
+  expect(posted(calls)).toHaveLength(0);
+  const tool = ownedSendTool(identity);
+  await expect(
+    tool.execute({
+      conversationId: conversation,
+      text: "Hello",
+      replyToMessageId: quote,
+      idempotencyKey,
+    }),
+  ).rejects.toThrow(message);
+  expect(posted(calls)).toHaveLength(0);
+  expect(tool.store.read().whatsappSends ?? {}).toEqual({});
+  expect(hasExplicitWhatsAppReply(target, tool.store)).toBe(false);
+  await tool.execute({
+    conversationId: conversation,
+    text: "Hello",
+    replyToMessageId: quote,
+    idempotencyKey: "corrected-key",
+  });
+  expect(posted(calls)).toHaveLength(1);
+});
+
 it("retains the original owned attachment and logical key after ambiguity; never uploads or sends twice", async () => {
   const store = state();
   const identity: any = {
@@ -1151,7 +1306,7 @@ it.each([false, true])(
         await prepareWhatsApp(
           identity,
           target,
-          { text: "Answer", replyToMessageId: "visible-parent" },
+          { text: "Answer", replyToMessageId: "44444444-4444-4444-8444-444444444444" },
           store,
           "quote-key",
         )
@@ -1268,7 +1423,7 @@ it("restores an exact saved explicit quote on key-only retry without replacing i
       await prepareWhatsApp(
         identity,
         target,
-        { text: "Answer", replyToMessageId: "chosen-visible-message" },
+        { text: "Answer", replyToMessageId: "55555555-5555-4555-8555-555555555555" },
         store,
         "chosen-key",
       )
@@ -1276,7 +1431,9 @@ it("restores an exact saved explicit quote on key-only retry without replacing i
   ).rejects.toThrow();
   await (await prepareWhatsApp(identity, target, { text: "Answer" }, store, "chosen-key", false))();
   expect(identity.sendWhatsApp.mock.calls[0][0]).toEqual(identity.sendWhatsApp.mock.calls[1][0]);
-  expect(identity.sendWhatsApp.mock.calls[1][0].replyToMessageId).toBe("chosen-visible-message");
+  expect(identity.sendWhatsApp.mock.calls[1][0].replyToMessageId).toBe(
+    "55555555-5555-4555-8555-555555555555",
+  );
 });
 
 it.each([false, true])(

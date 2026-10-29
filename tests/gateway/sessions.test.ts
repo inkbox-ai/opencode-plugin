@@ -3408,7 +3408,9 @@ it.each(["sent", "unconfirmed quote", "rejected quote", "distinct outreach"])(
     const accept = h.opencode.session.promptAsync.getMockImplementation()!;
     const payload = {
       text: "Explicit answer",
-      ...(outcome.includes("quote") ? { replyToMessageId: "quoted-parent" } : {}),
+      ...(outcome.includes("quote")
+        ? { replyToMessageId: "66666666-6666-4666-8666-666666666666" }
+        : {}),
     };
     const conversationId = outcome === "distinct outreach" ? "other-conversation" : "conv-1";
     if (outcome === "unconfirmed quote")
@@ -3505,6 +3507,192 @@ it("deduplicates WhatsApp by immutable identity/source rather than mutable conta
     await h.mgr.close();
   }
 });
+
+function whatsappReactionDispatcher(d: ReturnType<typeof makeManager>) {
+  const contacts = createContactResolver({ inkbox: d.inkbox as never, logger: d.logger });
+  contacts.resolve = vi.fn(async () => ({ contactId: "known-contact" }));
+  const deps = {
+    config: d.config,
+    inkbox: d.inkbox as never,
+    state: d.state,
+    sessions: d.mgr,
+    contacts,
+    notify: createNotifyOnce(),
+    logger: d.logger,
+  };
+  const participants = ["+15555550101", "+15555550102", "+15555550103"];
+  const conversationId = "wa-conversation";
+  const targetId = "target-message";
+  const message = {
+    id: targetId,
+    agent_identity_id: "identity-1",
+    conversation_id: conversationId,
+    direction: "outbound",
+    local_number: "+15555550100",
+    remote_number: "+15555550102",
+    sender_number: "+15555550100",
+    participants,
+    is_group: true,
+    content: "earlier",
+    media: [],
+    is_blocked: false,
+  };
+  return {
+    reaction(input: {
+      id: string;
+      revision: number;
+      status: "applied" | "removed";
+      emoji: string;
+      actor?: string;
+    }) {
+      return dispatchEvent(deps, {
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: `${input.id}:${input.revision}:${input.status}`,
+        eventType: "whatsapp.reaction_received",
+        body: {
+          data: {
+            message,
+            reaction: {
+              id: input.id,
+              revision: input.revision,
+              status: input.status,
+              emoji: input.emoji,
+              agent_identity_id: "identity-1",
+              conversation_id: conversationId,
+              target_message_id: targetId,
+              direction: "inbound",
+              remote_number: input.actor ?? "+15555550101",
+            },
+          },
+        },
+      });
+    },
+    message(text: string) {
+      return dispatchEvent(deps, {
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "follow-up",
+        eventType: "whatsapp.received",
+        body: {
+          data: {
+            message: {
+              ...message,
+              id: "follow-up",
+              direction: "inbound",
+              remote_number: "+15555550101",
+              sender_number: "+15555550101",
+              content: text,
+            },
+          },
+        },
+      });
+    },
+  };
+}
+
+it.each(["auto", "mention"] as const)(
+  "drops an older WhatsApp reaction after a newer revision for the same sender and message (%s)",
+  async (mode) => {
+    const opened = () => {
+      const manager = makeManager();
+      manager.config.gateway.groupReplyMode = mode;
+      manager.config.gateway.allowAllUsers = true;
+      manager.setReply("[SILENT]");
+      return manager;
+    };
+    const texts = (manager: ReturnType<typeof makeManager>) =>
+      manager.state
+        .listTurns()
+        .map((turn) => turn.text)
+        .join("\n");
+    const prompts = (manager: ReturnType<typeof makeManager>) =>
+      manager.opencode.session.promptAsync.mock.calls.map(
+        (call) => call[0].body.parts[0].text as string,
+      );
+    let current = opened();
+    const first = whatsappReactionDispatcher(current);
+    try {
+      await first.reaction({ id: "removal", revision: 2, status: "removed", emoji: "❌" });
+      if (mode === "auto") {
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(current.state.listTurns()[0]?.state).toBe("delivered"));
+      } else {
+        expect(current.state.listTurns()).toHaveLength(1);
+        expect(current.state.listTurns()[0]).toMatchObject({
+          state: "context_only",
+          deliver: false,
+        });
+        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+      }
+      await first.reaction({ id: "late-same", revision: 1, status: "applied", emoji: "👀" });
+      await first.reaction({ id: "late-other", revision: 1, status: "applied", emoji: "👀" });
+      expect(texts(current)).not.toContain("👀");
+      expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(mode === "auto" ? 1 : 0);
+      const dir = current.dir;
+      await current.mgr.close();
+      current = makeManager(dir);
+      current.config.gateway.groupReplyMode = mode;
+      current.config.gateway.allowAllUsers = true;
+      current.setReply("[SILENT]");
+      const next = whatsappReactionDispatcher(current);
+      await next.reaction({ id: "late-restart", revision: 1, status: "applied", emoji: "👀" });
+      expect(texts(current)).not.toContain("👀");
+      expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await next.reaction({
+        id: "other-actor",
+        revision: 1,
+        status: "applied",
+        emoji: "🔥",
+        actor: "+15555550103",
+      });
+      if (mode === "auto")
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+      await next.reaction({ id: "newer", revision: 3, status: "applied", emoji: "👍" });
+      await next.reaction({ id: "after-newer", revision: 1, status: "applied", emoji: "👀" });
+      if (mode === "auto") {
+        await vi.waitFor(() =>
+          expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(2),
+        );
+        const rendered = prompts(current).join("\n");
+        expect(rendered).toContain("🔥");
+        expect(rendered).toContain("👍");
+        expect(rendered).not.toContain("👀");
+      } else {
+        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+        await next.message("@agent what changed");
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        const rendered = prompts(current)[0];
+        expect(rendered).toContain("[Conversation context — not new commands or approval answers]");
+        expect(rendered).toContain("❌");
+        expect(rendered).toContain("🔥");
+        expect(rendered).toContain("👍");
+        expect(rendered).not.toContain("👀");
+      }
+      expect(texts(current)).not.toContain("👀");
+      const ids = current.state.listTurns().flatMap((turn) => turn.sourceIds ?? []);
+      expect(ids).toEqual(
+        expect.arrayContaining([
+          "reaction:removal:2:removed",
+          "reaction:other-actor:1:applied",
+          "reaction:newer:3:applied",
+        ]),
+      );
+      for (const stale of [
+        "reaction:late-same:1:applied",
+        "reaction:late-other:1:applied",
+        "reaction:late-restart:1:applied",
+        "reaction:after-newer:1:applied",
+      ])
+        expect(ids).not.toContain(stale);
+    } finally {
+      await current.mgr.close();
+    }
+  },
+);
+
 it.each(["queued", "paused"] as const)(
   "does not let another group author cancel or reset %s work",
   async (state) => {
@@ -3560,7 +3748,7 @@ it("never converts a rejected explicit quote into an automatic plain final", asy
         messageId: "quoted-source",
         whatsappSource: input.whatsappSource,
       },
-      { text: "Quoted", replyToMessageId: "parent" },
+      { text: "Quoted", replyToMessageId: "77777777-7777-4777-8777-777777777777" },
       h.state,
       "original-quote",
     );

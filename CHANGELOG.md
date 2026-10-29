@@ -2,6 +2,8 @@
 
 ## 0.2.19 (unreleased)
 
+- Keep an older WhatsApp reaction from becoming new context after a newer revision for the same sender and message, including after a restart.
+- Reject a quoted send with an invalid message id or idempotency key before recording it, so a corrected request can still be sent.
 - Keep permission prompts distinct by request while preserving retained delivery keys across restart.
 - Scope Stop and Cancel to the requesting conversation and sender; other group commands honor mention mode. Rejected session changes receive an explicit response.
 - Preserve incoming text when an attachment is unavailable, and reject oversized replies before delivery.

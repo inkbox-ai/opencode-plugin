@@ -50,6 +50,7 @@ export interface InboundMessage {
     mediaIds?: string[];
     reactionId?: string;
     targetMessageId?: string;
+    reactionRevision?: number;
     parentMessageId?: string | null;
     threadId?: string | null;
     rootMessageId?: string | null;
@@ -108,6 +109,7 @@ export interface ReplyTarget {
     mediaIds?: string[];
     reactionId?: string;
     targetMessageId?: string;
+    reactionRevision?: number;
     parentMessageId?: string | null;
     threadId?: string | null;
     rootMessageId?: string | null;
