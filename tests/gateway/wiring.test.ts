@@ -15,19 +15,24 @@ const hooks = vi.hoisted(() => ({
   inbound: vi.fn(async (_message: any) => {}),
   abort: vi.fn(async () => true),
   reset: vi.fn(async (_key: string) => {}),
+  realSessions: false,
 }));
-vi.mock("../../src/gateway/sessions.js", () => ({
-  createSessionManager: (deps: any) => {
-    hooks.manager = deps;
-    return {
-      handleInbound: hooks.inbound,
-      abortTurn: hooks.abort,
-      resetSession: hooks.reset,
-      catchUp: async () => {},
-      close: async () => {},
-    };
-  },
-}));
+vi.mock("../../src/gateway/sessions.js", async (load) => {
+  const actual = await load<typeof import("../../src/gateway/sessions.js")>();
+  return {
+    createSessionManager: (deps: any) => {
+      hooks.manager = deps;
+      if (hooks.realSessions) return actual.createSessionManager(deps);
+      return {
+        handleInbound: hooks.inbound,
+        abortTurn: hooks.abort,
+        resetSession: hooks.reset,
+        catchUp: async () => {},
+        close: async () => {},
+      };
+    },
+  };
+});
 vi.mock("../../src/gateway/escalation.js", () => ({
   createEscalationBridge: (deps: any) => {
     hooks.escalation = deps;
@@ -74,6 +79,7 @@ afterEach(async () => {
   hooks.inbound.mockClear();
   hooks.abort.mockClear();
   hooks.reset.mockClear();
+  hooks.realSessions = false;
 });
 async function start(previousInventoryReady?: boolean, existingDir?: string) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
@@ -94,9 +100,29 @@ async function start(previousInventoryReady?: boolean, existingDir?: string) {
     getIdentity: async () => identity,
     getClient: async () => ({ contacts: { lookup: async () => [] } }),
   };
+  const messages = new Map<string, any[]>();
+  const statuses: Record<string, { type: string }> = {};
   const opencode = {
     event: { subscribe: () => new Promise(() => {}) },
-    session: { list: vi.fn(async () => ({ data: [{ id: "session-a" }, { id: "session-b" }] })) },
+    session: {
+      list: vi.fn(async () => ({ data: [{ id: "session-a" }, { id: "session-b" }] })),
+      create: vi.fn(async () => ({ data: { id: "active-session" } })),
+      get: vi.fn(async ({ path: { id } }: any) => ({ data: { id, directory: "/project" } })),
+      promptAsync: vi.fn(async ({ path: { id }, body }: any) => {
+        messages.set(id, [
+          ...(messages.get(id) ?? []),
+          { info: { id: body.messageID, role: "user" }, parts: body.parts },
+        ]);
+        statuses[id] = { type: "busy" };
+        return { data: undefined };
+      }),
+      messages: vi.fn(async ({ path: { id } }: any) => ({ data: messages.get(id) ?? [] })),
+      status: vi.fn(async () => ({ data: { ...statuses } })),
+      abort: vi.fn(async ({ path: { id } }: any) => {
+        delete statuses[id];
+        return { data: true };
+      }),
+    },
   };
   gateways.push(
     await startGateway({
@@ -108,7 +134,7 @@ async function start(previousInventoryReady?: boolean, existingDir?: string) {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
-  return { config, identity, inkbox, dir, gateway: gateways.at(-1)! };
+  return { config, identity, inkbox, dir, opencode, statuses, gateway: gateways.at(-1)! };
 }
 function inbound(text: string, sender: string, channel = "sms", group = false) {
   return hooks.server.onEvent({
@@ -549,7 +575,12 @@ it("fences queued group controls by author and never repeats a consumed Stop", a
     updatedAt: 1,
   });
   await waInput("/stop", "+15550000002", "foreign-stop", true);
-  expect(hooks.abort).not.toHaveBeenCalled();
+  expect(hooks.abort).toHaveBeenCalledExactlyOnceWith(
+    "contact-1",
+    "whatsapp",
+    expect.objectContaining({ sender: "+15550000002", conversationId: "wa-conversation" }),
+  );
+  hooks.abort.mockClear();
   await waInput("@agent /stop", "+15550000001", "original-stop", true);
   expect(hooks.abort).toHaveBeenCalledOnce();
   expect(hooks.abort).toHaveBeenCalledWith(
@@ -560,3 +591,94 @@ it("fences queued group controls by author and never repeats a consumed Stop", a
   await waInput("@agent /stop", "+15550000001", "original-stop", true);
   expect(hooks.abort).toHaveBeenCalledOnce();
 });
+
+it("revalidates an SMS resume selection after WhatsApp work starts in the shared session", async () => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsApp(f);
+  const sender = "+15550000001";
+  await inbound("/resume", sender);
+  expect(f.identity.sendText).toHaveBeenCalledOnce();
+  await waInput("Keep working", sender, "active-wa");
+  const state = hooks.manager.state;
+  await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+  const before = state.listTurns()[0];
+  const sessionID = state.getSession("contact-1");
+  expect(f.statuses[sessionID]).toEqual({ type: "busy" });
+
+  await inbound("1", sender);
+
+  expect(state.getTurn(before.id)).toEqual(before);
+  expect(state.getSession("contact-1")).toBe(sessionID);
+  expect(f.statuses[sessionID]).toEqual({ type: "busy" });
+  expect(f.opencode.session.abort).not.toHaveBeenCalled();
+  expect(f.opencode.session.promptAsync).toHaveBeenCalledOnce();
+  expect(f.identity.sendText).toHaveBeenCalledOnce();
+  for (const command of ["/stop", "/cancel"]) await inbound(command, sender);
+  expect(state.getTurn(before.id)?.state).toBe("submitted");
+  expect(f.opencode.session.abort).not.toHaveBeenCalled();
+});
+
+it.each(["/stop", "/cancel"])(
+  "%s stops only the WhatsApp source's running and queued work while another author drains",
+  async (command) => {
+    hooks.realSessions = true;
+    const f = await start();
+    enableWhatsApp(f);
+    const author = "+15550000001";
+    const other = "+15550000002";
+    await waInput("First task", author, "running-source", true);
+    const state = hooks.manager.state;
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const running = state.listTurns()[0];
+    const sessionID = state.getSession("contact-1");
+    await waInput("Other task", other, "other-source", true);
+    await waInput("My queued task", author, "own-queued-source", true);
+    const otherTurn = state.listTurns().find((turn: any) => turn.replyTarget?.sender === other)!;
+    const ownQueued = state
+      .listTurns()
+      .find((turn: any) => turn.sourceIds?.includes("own-queued-source"))!;
+    expect(otherTurn.state).toBe("queued");
+    expect(ownQueued.state).toBe("queued");
+    for (const [id, target] of [
+      ["other-channel", { channel: "sms" }],
+      ["other-conversation", { conversationId: "another-wa-conversation" }],
+    ] as const)
+      state.saveTurn({
+        ...ownQueued,
+        id,
+        messageID: id,
+        replyTarget: { ...ownQueued.replyTarget, ...target },
+      });
+
+    for (const reset of ["/clear", "/new", "/resume"])
+      await waInput(reset, author, `reset-${reset}`, true);
+    expect(state.getTurn(running.id)?.state).toBe("submitted");
+    expect(state.getSession("contact-1")).toBe(sessionID);
+    expect(f.opencode.session.abort).not.toHaveBeenCalled();
+
+    await waInput(command, author, "stop-source", true);
+
+    expect(state.getTurn(running.id)).toMatchObject({
+      state: "interrupted",
+      executionFenced: true,
+    });
+    expect(state.getTurn(ownQueued.id)?.state).toBe("interrupted");
+    for (const id of ["other-channel", "other-conversation"])
+      expect(state.getTurn(id)?.state).toBe("queued");
+    expect(f.opencode.session.abort).toHaveBeenCalledExactlyOnceWith({
+      path: { id: sessionID },
+      query: { directory: "/project" },
+    });
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: "Stopped.", conversationId: "wa-conversation" }),
+    );
+    await vi.waitFor(() => expect(state.getTurn(otherTurn.id)?.state).toBe("submitted"));
+    expect(f.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    expect(state.getSession("contact-1")).toBe(sessionID);
+    expect(f.statuses[sessionID]).toEqual({ type: "busy" });
+    await waInput(command, author, "stop-source", true);
+    expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+    expect(state.getTurn(otherTurn.id)?.state).toBe("submitted");
+  },
+);

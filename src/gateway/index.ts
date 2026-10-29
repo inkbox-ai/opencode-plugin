@@ -542,10 +542,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           });
 
         // A shared contact session cannot broaden WhatsApp control authority.
-        if (/^\/(?:stop|cancel|clear|new|resume)$/i.test(raw.trim())) {
-          const active = state
+        const hasForeignWhatsAppWork = () =>
+          state
             .listTurns()
-            .filter(
+            .some(
               (turn) =>
                 turn.chatKey === msg.chatKey &&
                 [
@@ -556,20 +556,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                   "submitted",
                   "completed",
                   "delivery_started",
-                ].includes(turn.state),
-            );
-          if (
-            active.some(
-              (turn) =>
+                ].includes(turn.state) &&
                 (turn.replyTarget?.channel === "whatsapp" || msg.channel === "whatsapp") &&
                 (turn.replyTarget?.channel !== msg.channel ||
                   turn.replyTarget?.conversationId !== msg.conversationId ||
-                  turn.replyTarget?.sender !== msg.from),
-            )
-          ) {
-            return; // A control for another channel/author/conversation has no authority here.
-          }
-        }
+                  !sameAuthor(msg.channel, turn.replyTarget?.sender ?? "", msg.from)),
+            );
+        if (
+          (/^\/(?:clear|new|resume)$/i.test(raw.trim()) ||
+            (!msg.whatsappSource && /^\/(?:stop|cancel)$/i.test(raw.trim()))) &&
+          hasForeignWhatsAppWork()
+        )
+          return; // Session-wide controls cannot affect another source's work.
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
         if (
@@ -584,6 +582,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
+            if (hasForeignWhatsAppWork()) return;
             if (msg.whatsappSource) await sessions.resetSession(msg.chatKey, target);
             else await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);

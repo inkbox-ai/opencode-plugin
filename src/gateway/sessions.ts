@@ -903,7 +903,6 @@ export function createSessionManager(
       const finish = last?.info?.finish;
       if (finish && finish !== "tool-calls" && finish !== "unknown") {
         if (
-          hasExplicitWhatsAppReply(turn.replyTarget, deps.state) ||
           sentEmailReply(
             turn.replyTarget,
             assistants.flatMap((message) => message.parts ?? []),
@@ -956,6 +955,7 @@ export function createSessionManager(
       current = completed;
     }
     if (channelDisabled(current)) return;
+    if (hasExplicitWhatsAppReply(current.replyTarget, deps.state)) output = SILENT;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
       await authorizeSlack(current);

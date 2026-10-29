@@ -3401,6 +3401,83 @@ it("keeps uncertain WhatsApp delivery out of model recovery and never sends the 
   }
 });
 
+it.each(["sent", "unconfirmed quote", "rejected quote", "distinct outreach"])(
+  "recovers an unconfirmed submission without replacing its explicit WhatsApp send: %s",
+  async (outcome) => {
+    const h = makeManager();
+    const accept = h.opencode.session.promptAsync.getMockImplementation()!;
+    const payload = {
+      text: "Explicit answer",
+      ...(outcome.includes("quote") ? { replyToMessageId: "quoted-parent" } : {}),
+    };
+    const conversationId = outcome === "distinct outreach" ? "other-conversation" : "conv-1";
+    if (outcome === "unconfirmed quote")
+      h.identity.sendWhatsApp.mockRejectedValueOnce(new Error("response lost"));
+    if (outcome === "rejected quote")
+      h.identity.sendWhatsApp.mockRejectedValueOnce(
+        new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }),
+      );
+    let receipt: unknown;
+    h.opencode.session.promptAsync.mockImplementationOnce(async (request) => {
+      await accept(request);
+      const turn = h.state.listTurns()[0];
+      const send = await prepareWhatsApp(
+        h.identity as any,
+        { ...turn.replyTarget!, conversationId },
+        payload,
+        h.state,
+        "explicit-original-key",
+      );
+      await send().catch(() => {});
+      receipt = (h.state.read().whatsappSends as Record<string, unknown>)["explicit-original-key"];
+      // Acceptance reconciliation fails once; rescue then sees the finished answer.
+      h.opencode.session.messages.mockRejectedValueOnce(new Error("history unavailable"));
+      throw new Error("prompt response lost");
+    });
+    try {
+      await h.mgr.handleInbound(
+        sms("Question", {
+          channel: "whatsapp",
+          messageId: "recovered-source",
+          whatsappSource: { messageId: "recovered-source", identityId: "identity-1" },
+        }),
+      );
+      await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+      const turn = h.state.listTurns()[0];
+      expect(turn).toMatchObject({
+        uncertainStage: "submission",
+        executionFenced: true,
+        output: "reply",
+      });
+      expect(h.messages.get(turn.sessionID!)?.at(-1)?.info.parentID).toBe(turn.messageID);
+      expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+      expect(h.opencode.session.abort).not.toHaveBeenCalled();
+      expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(
+        outcome === "distinct outreach" ? 2 : 1,
+      );
+      expect(h.identity.sendWhatsApp.mock.calls[0][0]).toEqual({
+        ...payload,
+        conversationId,
+        idempotencyKey: "explicit-original-key",
+      });
+      expect(
+        (h.state.read().whatsappSends as Record<string, unknown>)["explicit-original-key"],
+      ).toEqual(receipt);
+      if (outcome === "distinct outreach")
+        expect(h.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({
+          text: "reply",
+          conversationId: "conv-1",
+        });
+      await h.mgr.catchUp();
+      expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(
+        outcome === "distinct outreach" ? 2 : 1,
+      );
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
+
 it("deduplicates WhatsApp by immutable identity/source rather than mutable contact session, including restart", async () => {
   const h = makeManager();
   const input = sms("WhatsApp question", {
