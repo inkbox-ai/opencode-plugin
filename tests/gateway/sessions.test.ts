@@ -3752,7 +3752,7 @@ it("never converts a rejected explicit quote into an automatic plain final", asy
       h.state,
       "original-quote",
     );
-    await expect(send()).rejects.toThrow("not accepted");
+    await expect(send()).rejects.toThrow("attempt returned a rejection");
     await h.mgr.handleInbound(input);
     await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
     expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();

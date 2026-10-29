@@ -242,7 +242,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const recipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
         const sameConversation =
           owner?.channel === "whatsapp" &&
-          (conversationId === owner.conversationId ||
+          (conversationId?.toLowerCase() === owner.conversationId?.toLowerCase() ||
             (!owner.group && /^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
         const target = {
           ...(owner ?? {}),
@@ -254,7 +254,10 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
               : undefined,
           whatsappRecipients:
             !sameConversation && Array.isArray(args.to) ? explicitRecipients : undefined,
-          conversationId: sameConversation ? owner.conversationId : conversationId,
+          // Source ownership does not rewrite a retained request selector.
+          conversationId: sameConversation
+            ? (conversationId ?? owner.conversationId)
+            : conversationId,
           messageId: owner?.messageId ?? ctx.messageID,
         };
         if (!sameConversation) delete target.whatsappSource;

@@ -132,7 +132,7 @@ const conversationWire = {
   created_at: time,
   updated_at: time,
 };
-function stubSdkFetch() {
+function stubSdkFetch(conversationData = conversationWire) {
   const calls: { url: URL; init?: RequestInit }[] = [];
   vi.stubGlobal(
     "fetch",
@@ -140,13 +140,16 @@ function stubSdkFetch() {
       const parsed = new URL(String(url));
       calls.push({ url: parsed, init });
       if (parsed.pathname.includes("/identities/")) return ok(identityWire);
-      if (parsed.pathname.includes("/conversations/")) return ok(conversationWire);
+      if (parsed.pathname.includes("/conversations/")) return ok(conversationData);
       return ok({ message: wire }, init?.method === "POST" ? 201 : 200);
     }),
   );
   return calls;
 }
-function ownedSendTool(identity: Awaited<ReturnType<typeof realIdentity>>["identity"]) {
+function ownedSendTool(
+  identity: Awaited<ReturnType<typeof realIdentity>>["identity"],
+  replyTarget = target,
+) {
   const store = state();
   vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
   store.saveTurn({
@@ -158,7 +161,7 @@ function ownedSendTool(identity: Awaited<ReturnType<typeof realIdentity>>["ident
     kind: "normal",
     text: "question",
     deliver: true,
-    replyTarget: target,
+    replyTarget,
     ownerId: "owner",
     leaseUntil: Date.now() + 60_000,
     createdAt: 1,
@@ -536,7 +539,7 @@ it("preserves only public quota fields and permits the original key after a know
   };
   await expect(
     (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
-  ).rejects.toThrow("request not accepted");
+  ).rejects.toThrow("attempt returned a rejection");
   expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   await expect(
     (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
@@ -603,7 +606,7 @@ it("curates email policy rejection and recovers only the original send key", asy
       store,
       "original-email-key",
     );
-  await expect((await send())()).rejects.toThrow("request not accepted");
+  await expect((await send())()).rejects.toThrow("attempt returned a rejection");
   expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   await expect((await send())()).resolves.toMatchObject({ id: "accepted-original" });
   expect(sendWhatsApp.mock.calls[0][0]).toEqual(sendWhatsApp.mock.calls[1][0]);
@@ -1583,3 +1586,176 @@ it.each([401, 403, 404, 410])(
     }
   },
 );
+
+const alphabeticConversation = "abcdefab-0000-4000-8000-000000000001";
+it.each([false, true])(
+  "keeps case-variant source tool replies quoted and source-owned (group=%s)",
+  async (group) => {
+    const calls = stubSdkFetch({
+        ...conversationWire,
+        id: alphabeticConversation,
+        is_group: group,
+        participants: group ? ["+15555550101", "+15555550102"] : ["+15555550101"],
+      }),
+      { identity } = await realIdentity();
+    const replyTarget = { ...target, conversationId: alphabeticConversation, group };
+    const tool = ownedSendTool(identity, replyTarget);
+    await tool.execute({
+      conversationId: alphabeticConversation.toUpperCase(),
+      text: "Source answer",
+    });
+    expect(posted(calls)).toHaveLength(1);
+    expect(JSON.parse(String(posted(calls)[0].init?.body))).toMatchObject({
+      conversation_id: alphabeticConversation.toUpperCase(),
+      reply_to_message_id: source,
+    });
+    expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(true);
+  },
+);
+
+it.each(
+  [false, true].flatMap((group) => ["rejected", "unknown"].map((outcome) => ({ group, outcome }))),
+)(
+  "fences alternate-case quote replacements and automatic finals (%j)",
+  async ({ group, outcome }) => {
+    const store = state(),
+      replyTarget = { ...target, conversationId: alphabeticConversation, group };
+    const sendWhatsApp = vi
+      .fn()
+      .mockRejectedValueOnce(
+        outcome === "rejected"
+          ? new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" })
+          : new Error("response lost"),
+      )
+      .mockResolvedValue({ id: "must-not-send" });
+    const identity: any = { id: owner, sendWhatsApp };
+    await expect(
+      (
+        await prepareWhatsApp(
+          identity,
+          { ...replyTarget, conversationId: alphabeticConversation.toUpperCase() },
+          { text: "Original quote", replyToMessageId: source },
+          store,
+          "original-quote",
+        )
+      )(),
+    ).rejects.toThrow();
+    await expect(
+      (
+        await prepareWhatsApp(
+          identity,
+          replyTarget,
+          { text: "Replacement", replyToMessageId: source },
+          store,
+          "different-key",
+        )
+      )(),
+    ).rejects.toThrow("unresolved quoted send");
+    expect(hasExplicitWhatsAppReply(replyTarget, store)).toBe(true);
+    await expect(
+      (await prepareWhatsApp(identity, replyTarget, { text: "Automatic replacement" }, store))(),
+    ).rejects.toThrow("unresolved quoted send");
+    expect(sendWhatsApp).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(
+  [false, true].flatMap((quoted) =>
+    ["rejected", "started"].map((savedState) => ({ quoted, savedState })),
+  ),
+)(
+  "preserves retained uppercase wire selectors and quote payloads (%j)",
+  async ({ quoted, savedState }) => {
+    const calls = stubSdkFetch(),
+      { identity } = await realIdentity();
+    const replyTarget = { ...target, conversationId: alphabeticConversation };
+    const tool = ownedSendTool(identity, replyTarget),
+      key = "retained-original-key";
+    const payload = { text: "Saved answer", ...(quoted ? { replyToMessageId: source } : {}) };
+    tool.store.updateWhatsAppSend(key, () => ({
+      identityId: owner,
+      sourceId: source,
+      conversationId: alphabeticConversation.toUpperCase(),
+      explicit: true,
+      ...(quoted ? { quoteAttempt: true } : {}),
+      payload: JSON.stringify(payload),
+      idempotencyKey: key,
+      state: savedState,
+    }));
+    const run = () =>
+      tool.execute({
+        ...payload,
+        conversationId: alphabeticConversation.toUpperCase(),
+        idempotencyKey: key,
+      });
+    if (savedState === "started") {
+      await expect(run()).rejects.toThrow("unconfirmed");
+      expect(posted(calls)).toHaveLength(0);
+    } else {
+      await run();
+      expect(posted(calls)).toHaveLength(1);
+      expect(JSON.parse(String(posted(calls)[0].init?.body))).toEqual({
+        text: "Saved answer",
+        conversation_id: alphabeticConversation.toUpperCase(),
+        ...(quoted ? { reply_to_message_id: source } : {}),
+      });
+      expect(new Headers(posted(calls)[0].init?.headers).get("Idempotency-Key")).toBe(key);
+    }
+    expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(true);
+  },
+);
+
+it("reports final SDK rejection without claiming an earlier timeout was never accepted", async () => {
+  let posts = 0;
+  const requests: { body: unknown; key: string | null }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url, init) => {
+      if (String(url).includes("/identities/")) return ok(identityWire);
+      requests.push({ body: init?.body, key: new Headers(init?.headers).get("Idempotency-Key") });
+      posts++;
+      if (posts === 1)
+        throw Object.assign(new Error("response timed out"), { name: "TimeoutError" });
+      return ok({ detail: { error: "whatsapp_reply_required_for_links" } }, 422);
+    }),
+  );
+  const { identity } = await realIdentity(),
+    store = state();
+  const run = await prepareWhatsApp(
+    identity,
+    target,
+    { text: "See https://example.com", replyToMessageId: source },
+    store,
+    "original-timeout-key",
+  );
+  let failure: any;
+  try {
+    await run();
+  } catch (error) {
+    failure = error;
+  }
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toEqual(requests[1]);
+  expect(failure.message).not.toContain("not accepted");
+  expect(failure.message).toContain("uncertain");
+  expect(failure.idempotencyKey).toBe("original-timeout-key");
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
+  await expect(
+    (await prepareWhatsApp(identity, target, { text: "Replacement" }, store))(),
+  ).rejects.toThrow("unresolved quoted send");
+  expect(posts).toBe(2);
+});
+
+it("does not classify an unrelated selector as source-owned from returned conversation metadata", async () => {
+  const calls = stubSdkFetch({ ...conversationWire, id: alphabeticConversation });
+  const { identity } = await realIdentity(),
+    replyTarget = { ...target, conversationId: alphabeticConversation };
+  const tool = ownedSendTool(identity, replyTarget),
+    other = "abcdefab-0000-4000-8000-000000000002";
+  await tool.execute({ conversationId: other, text: "Separate outreach" });
+  expect(posted(calls)).toHaveLength(1);
+  const request = JSON.parse(String(posted(calls)[0].init?.body));
+  expect(request.conversation_id).toBe(other);
+  expect(request).not.toHaveProperty("reply_to_message_id");
+  expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(false);
+});

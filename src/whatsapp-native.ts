@@ -229,7 +229,7 @@ export async function prepareWhatsApp(
         source &&
         send.sourceId === source.messageId &&
         send.identityId === identity.id &&
-        send.conversationId === target.conversationId &&
+        send.conversationId?.toLowerCase() === target.conversationId?.toLowerCase() &&
         send.quoteAttempt &&
         ["started", "rejected"].includes(send.state) &&
         send.idempotencyKey !== idempotencyKey,
@@ -315,7 +315,7 @@ export async function prepareWhatsApp(
       if (policy) {
         store.updateWhatsAppSend(idempotencyKey, () => ({ ...entry, state: "rejected", policy }));
         const rejected = new Error(
-          `WhatsApp request not accepted: ${JSON.stringify(policy)}. Follow retry_condition; retain the original key and owned media ID.`,
+          `A WhatsApp attempt returned a rejection; an earlier attempt may remain uncertain: ${JSON.stringify(policy)}. Inspect inkbox_lookup_whatsapp_send with the original key. Follow retry_condition; retain the original key and unchanged payload and owned media ID; do not create a new copy.`,
         );
         Object.assign(rejected, {
           whatsappPolicy: policy,
@@ -369,7 +369,7 @@ export function hasExplicitWhatsAppReply(
       send.explicit &&
       send.sourceId === target.whatsappSource!.messageId &&
       send.identityId === target.whatsappSource!.identityId &&
-      send.conversationId === target.conversationId &&
+      send.conversationId?.toLowerCase() === target.conversationId?.toLowerCase() &&
       (["started", "sent"].includes(send.state) || send.quoteAttempt === true),
   );
 }
