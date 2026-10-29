@@ -278,12 +278,41 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
             reaction: z
               .enum(["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"])
               .optional(),
-            customEmoji: z.string().min(1).max(32).optional(),
+            customEmoji: z
+              .string()
+              .min(1)
+              .refine((value) => Array.from(value).length <= 32)
+              .optional(),
             idempotencyKey: z.string().min(1),
           },
       async (args, ctx) => {
-        if (!remove && Boolean(args.reaction) === Boolean(args.customEmoji))
-          throw new Error("Specify reaction or customEmoji.");
+        // Mirror SDK preflight before recording intent; unknown SDK failures must stay fenced.
+        if (
+          typeof args.idempotencyKey !== "string" ||
+          !args.idempotencyKey.trim() ||
+          args.idempotencyKey.length > 255
+        )
+          throw new Error("A stable idempotencyKey is required");
+        if (!remove) {
+          if ((args.reaction == null) === (args.customEmoji == null))
+            throw new Error("Specify reaction or customEmoji.");
+          if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(args.messageId))
+            throw new Error("Provide a valid messageId UUID.");
+          if (
+            args.reaction != null &&
+            !["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"].includes(
+              args.reaction,
+            )
+          )
+            throw new Error("Unsupported WhatsApp reaction");
+          if (
+            args.customEmoji != null &&
+            (!args.customEmoji ||
+              Array.from(args.customEmoji).length > 32 ||
+              /[\s\p{Cc}\p{Cs}]/u.test(args.customEmoji))
+          )
+            throw new Error("customEmoji must contain 1–32 non-whitespace characters");
+        }
         const store = createStateStore();
         const owner = await whatsappToolOwner(ctx.sessionID, ctx, deps.opencode, store);
         const identity = await deps.runtime.getIdentity();

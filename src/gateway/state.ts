@@ -99,7 +99,12 @@ export interface StateStore {
   updateWhatsAppSend(key: string, update: (entry: unknown) => unknown): void;
   updateIMessageSend(key: string, update: (entry: unknown) => unknown): void;
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
-  setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
+  setSession(
+    chatKey: string,
+    sessionID: string,
+    owner?: { turnId: string; ownerId: string },
+    expected?: { sessionID: string; generation: number },
+  ): boolean;
   getSession(chatKey: string): string | undefined;
   clearSession(
     chatKey: string,
@@ -267,9 +272,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
         return [{ ...state, a2aTasks: { ...tasks, [key]: entry } }, undefined];
       });
     },
-    setSession(chatKey, sessionID, owner) {
-      mutate((state) => {
+    setSession(chatKey, sessionID, owner, expected) {
+      return mutate((state) => {
         checkSessionOwner(state, owner);
+        if (
+          expected &&
+          (state.sessions[chatKey] !== expected.sessionID ||
+            (state.sessionGenerations?.[chatKey] ?? 0) !== expected.generation)
+        )
+          return [state, false];
         return [
           {
             ...state,
@@ -279,7 +290,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               [chatKey]: (state.sessionGenerations?.[chatKey] ?? 0) + 1,
             },
           },
-          undefined,
+          true,
         ];
       });
     },

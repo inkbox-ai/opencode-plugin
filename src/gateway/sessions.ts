@@ -333,12 +333,39 @@ export function createSessionManager(
       )
         throw new HostedCaptureDeferredError();
     };
-    const existing = deps.state.getSession(chatKey);
+    const snapshot = deps.state.read();
+    const existing = snapshot.sessions[chatKey];
     if (existing) {
       const usable = await sessionUsable(existing);
       check();
-      if (usable) return existing;
-      deps.state.clearSession(chatKey);
+      const expectedGeneration = snapshot.sessionGenerations?.[chatKey] ?? 0;
+      if (usable) {
+        // Reuse acquires this generation too; a captured reset cannot detach it.
+        if (
+          deps.state.setSession(
+            chatKey,
+            existing,
+            { turnId: turn.id, ownerId },
+            {
+              sessionID: existing,
+              generation: expectedGeneration,
+            },
+          )
+        )
+          return existing;
+        return ensureSession(chatKey, turn);
+      }
+      if (
+        !deps.state.clearSession(
+          chatKey,
+          { turnId: turn.id, ownerId },
+          {
+            generation: expectedGeneration,
+            contextIds: [],
+          },
+        )
+      )
+        return ensureSession(chatKey, turn);
     }
     const res = await deps.opencode.session.create({
       body: { title: `inkbox:${chatKey}` },
@@ -1971,7 +1998,7 @@ export function createSessionManager(
                 !sameAuthor(source.channel, turn.replyTarget?.sender ?? "", source.sender ?? "")),
           );
       if (foreign()) throw new Error("Another source owns work in this conversation.");
-      generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
+      if (!targets) generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
       if (source) await this.abortTurn(chatKey, source.channel, source, targets?.turnIds);
       else await this.abortTurn(chatKey);
       if (foreign()) throw new Error("Another source owns work in this conversation.");

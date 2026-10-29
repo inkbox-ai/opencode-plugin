@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import { afterEach, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { formatJson } from "../../src/format.js";
 import { createNotifyOnce, createRequestDedup } from "../../src/gateway/dedup.js";
@@ -723,6 +724,144 @@ it("preserves reaction receipts and exact keys without claiming queued means app
   );
   expect(f.identity.sendWhatsAppReaction).toHaveBeenCalledTimes(2);
 });
+
+async function reactionSdkTools() {
+  const f = v2Tools();
+  const receipt = JSON.parse(
+    readFileSync(new URL("../fixtures/whatsapp-v2.json", import.meta.url), "utf8"),
+  ).uncertain_reaction;
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => ok({ reaction: receipt }, 201));
+  fetch.mockResolvedValueOnce(ok(identityWire));
+  vi.stubGlobal("fetch", fetch);
+  const { identity } = await realIdentity();
+  fetch.mockClear();
+  f.identity.sendWhatsAppReaction = vi.fn(identity.sendWhatsAppReaction.bind(identity));
+  f.identity.removeWhatsAppReaction = vi.fn(identity.removeWhatsAppReaction.bind(identity));
+  return { ...f, fetch };
+}
+
+it("rejects local emoji errors without intent and allows one corrected same-key SDK write", async () => {
+  const f = await reactionSdkTools();
+  const args = { messageId: source, customEmoji: "thumbs up", idempotencyKey: "correctable" };
+  await expect(f.execute("send_whatsapp_reaction", args)).rejects.toThrow("customEmoji");
+  expect(createStateStore().read().whatsappSends ?? {}).toEqual({});
+  expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
+  expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.identity.getWhatsAppMessage).not.toHaveBeenCalled();
+  expect(f.ctx.ask).not.toHaveBeenCalled();
+  const corrected = { ...args, customEmoji: "👍" };
+  expect(await f.execute("send_whatsapp_reaction", corrected)).toContain('"uncertain"');
+  await f.execute("send_whatsapp_reaction", corrected);
+  expect(f.identity.sendWhatsAppReaction).toHaveBeenCalledExactlyOnceWith(corrected);
+  expect(f.fetch).toHaveBeenCalledOnce();
+  const request = f.fetch.mock.calls[0][1];
+  expect(JSON.parse(String(request?.body))).toEqual({ message_id: source, custom_emoji: "👍" });
+  expect(new Headers(request?.headers).get("Idempotency-Key")).toBe(args.idempotencyKey);
+});
+
+it.each([false, true])(
+  "rejects invalid reaction keys before intent or I/O (remove: %s)",
+  async (remove) => {
+    const f = await reactionSdkTools();
+    for (const idempotencyKey of ["k".repeat(256), "", " \t", "😀".repeat(128)]) {
+      await expect(
+        f.execute(remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction", {
+          messageId: source,
+          reaction: "eyes",
+          reactionId: "revision-1",
+          idempotencyKey,
+        }),
+      ).rejects.toThrow("stable idempotencyKey");
+      expect(createStateStore().read().whatsappSends ?? {}).toEqual({});
+    }
+    expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
+    expect(f.identity.removeWhatsAppReaction).not.toHaveBeenCalled();
+    expect(f.identity.getWhatsAppReaction).not.toHaveBeenCalled();
+    expect(f.identity.getWhatsAppMessage).not.toHaveBeenCalled();
+    expect(f.identity.getWhatsAppConversation).not.toHaveBeenCalled();
+    expect(f.ctx.ask).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  { messageId: "not-a-uuid", reaction: "eyes" },
+  { messageId: `${source}x`, reaction: "eyes" },
+  { messageId: source, reaction: "unsupported" },
+  { messageId: source, customEmoji: "" },
+  { messageId: source, customEmoji: "👍".repeat(33) },
+  { messageId: source, customEmoji: "👍\u0000" },
+  { messageId: source, customEmoji: "👍\ud800" },
+  { messageId: source, customEmoji: "👍\u00a0" },
+])("rejects invalid reaction input before intent or I/O: %j", async (input) => {
+  const f = await reactionSdkTools();
+  await expect(
+    f.execute("send_whatsapp_reaction", { ...input, idempotencyKey: "invalid-input" }),
+  ).rejects.toThrow();
+  expect(createStateStore().read().whatsappSends ?? {}).toEqual({});
+  expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
+  expect(f.identity.getWhatsAppMessage).not.toHaveBeenCalled();
+  expect(f.identity.getWhatsAppConversation).not.toHaveBeenCalled();
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+
+it("accepts SDK reaction boundaries without trimming or enforcing UUID version bits", async () => {
+  const f = await reactionSdkTools();
+  const args = {
+    messageId: "ABCDEF12-3456-0000-0000-ABCDEF123456",
+    customEmoji: "👍".repeat(32),
+    idempotencyKey: ` ${"k".repeat(253)} `,
+  };
+  const schema = f.tools.find((tool) => tool.name === "inkbox_send_whatsapp_reaction")?.definition
+    .args.customEmoji;
+  if (!schema) throw new Error("Missing reaction schema");
+  expect(z.safeParse(schema, args.customEmoji).success).toBe(true);
+  await f.execute("send_whatsapp_reaction", args);
+  expect(f.identity.sendWhatsAppReaction).toHaveBeenCalledExactlyOnceWith(args);
+  const request = f.fetch.mock.calls[0][1];
+  expect(JSON.parse(String(request?.body))).toEqual({
+    message_id: args.messageId,
+    custom_emoji: args.customEmoji,
+  });
+  // The SDK receives the original key; HTTP Headers performs its own whitespace normalization.
+  expect(new Headers(request?.headers).get("Idempotency-Key")).toBe(args.idempotencyKey.trim());
+});
+
+it.each([false, true])(
+  "fences a post-accept SDK decode failure and replays exactly (remove: %s)",
+  async (remove) => {
+    const f = await reactionSdkTools();
+    const tool = remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction";
+    const args = remove
+      ? { reactionId: "revision-1", idempotencyKey: "decode-key" }
+      : { messageId: source, customEmoji: "👍", idempotencyKey: "decode-key" };
+    f.fetch.mockResolvedValueOnce(ok({}, 201));
+    await expect(f.execute(tool, args)).rejects.toThrow("not confirmed");
+    const started = createStateStore().read().whatsappSends;
+    expect(Object.values(started as object)).toEqual([
+      expect.objectContaining({ state: "started", idempotencyKey: args.idempotencyKey }),
+    ]);
+    await expect(
+      f.execute(
+        tool,
+        remove ? { ...args, reactionId: "revision-2" } : { ...args, customEmoji: "👀" },
+      ),
+    ).rejects.toThrow("different operation");
+    expect(createStateStore().read().whatsappSends).toEqual(started);
+    expect(f.fetch).toHaveBeenCalledOnce();
+    await f.execute(tool, args);
+    expect(f.fetch).toHaveBeenCalledTimes(2);
+    const requests = f.fetch.mock.calls.map(([url, init]) => ({
+      url,
+      method: init?.method,
+      body: init?.body,
+      headers: Object.fromEntries(new Headers(init?.headers)),
+    }));
+    expect(requests[1]).toEqual(requests[0]);
+    await f.execute(tool, args);
+    expect(f.fetch).toHaveBeenCalledTimes(2);
+  },
+);
 it("reads nullable unthreaded envelopes without inventing thread IDs", async () => {
   const f = v2Tools();
   expect(await f.execute("get_whatsapp_thread", { messageId: source, limit: 50 })).toContain(
@@ -1186,6 +1325,26 @@ it.each([false, true])(
     method.mockRejectedValueOnce(new TypeError("lost response"));
     await expect(f.execute(tool, args)).rejects.toThrow("uncertain-key");
     expect(method).toHaveBeenCalledOnce();
+    const started = createStateStore().read().whatsappSends;
+    expect(Object.values(started as object)).toEqual([
+      expect.objectContaining({
+        state: "started",
+        idempotencyKey: args.idempotencyKey,
+        operation: JSON.stringify(
+          remove ? { remove: args.reactionId } : { messageId: source, reaction: "eyes" },
+        ),
+      }),
+    ]);
+    if (!remove) {
+      await expect(
+        f.execute(tool, {
+          messageId: source,
+          customEmoji: "thumbs up",
+          idempotencyKey: args.idempotencyKey,
+        }),
+      ).rejects.toThrow("customEmoji");
+      expect(createStateStore().read().whatsappSends).toEqual(started);
+    }
     const tools = whatsappTools({
       runtime: { getIdentity: async () => f.identity },
       config: { outbound: { approval: "auto", allowedRecipients: [] } },
@@ -1195,6 +1354,7 @@ it.each([false, true])(
     await expect(
       execute(remove ? { ...args, reactionId: "revision-2" } : { ...args, reaction: "love" }),
     ).rejects.toThrow("different operation");
+    expect(createStateStore().read().whatsappSends).toEqual(started);
     expect(method).toHaveBeenCalledOnce();
     await execute(args);
     expect(method).toHaveBeenCalledTimes(2);

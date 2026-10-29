@@ -81,7 +81,11 @@ afterEach(async () => {
   hooks.reset.mockClear();
   hooks.realSessions = false;
 });
-async function start(previousInventoryReady?: boolean, existingDir?: string) {
+async function start(
+  previousInventoryReady?: boolean,
+  existingDir?: string,
+  native?: { messages: Map<string, any[]>; statuses: Record<string, { type: string }> },
+) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
@@ -100,8 +104,8 @@ async function start(previousInventoryReady?: boolean, existingDir?: string) {
     getIdentity: async () => identity,
     getClient: async () => ({ contacts: { lookup: async () => [] } }),
   };
-  const messages = new Map<string, any[]>();
-  const statuses: Record<string, { type: string }> = {};
+  const messages = native?.messages ?? new Map<string, any[]>();
+  const statuses: Record<string, { type: string }> = native?.statuses ?? {};
   const opencode = {
     event: { subscribe: () => new Promise(() => {}) },
     session: {
@@ -134,7 +138,7 @@ async function start(previousInventoryReady?: boolean, existingDir?: string) {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
-  return { config, identity, inkbox, dir, opencode, statuses, gateway: gateways.at(-1)! };
+  return { config, identity, inkbox, dir, opencode, messages, statuses, gateway: gateways.at(-1)! };
 }
 function inbound(text: string, sender: string, channel = "sms", group = false) {
   return hooks.server.onEvent({
@@ -1053,33 +1057,153 @@ it.each(
 );
 
 it.each(
-  ["/clear", "/new"].flatMap((command) => [false, true].map((after) => ({ command, after }))),
-)("recovers $command at session-reset publication (after=$after)", async ({ command, after }) => {
-  hooks.realSessions = true;
-  const f = await start();
-  enableWhatsApp(f);
-  const sender = "+15550000001";
-  await waInput("Original work", sender, "reset-publication-work");
-  const state = hooks.manager.state;
-  await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
-  const first = state.listTurns()[0];
-  state.saveTurn({ ...first, id: "old-context", state: "context_only", consumedBy: undefined });
-  const clear = state.clearSession.bind(state);
-  vi.spyOn(state, "clearSession").mockImplementationOnce((...args: any[]) => {
-    if (after) clear(...args);
-    throw new Error("session reset publication failed");
-  });
-  await expect(waInput(command, sender, "reset-publication-command")).rejects.toThrow(
-    "session reset publication failed",
-  );
-  expect(state.getTurn(first.id)?.state).toBe("interrupted");
-  expect(state.getTurn("old-context")?.consumedBy).toBe(after ? "session-reset" : undefined);
-  expect(Boolean(state.getSession("contact-1"))).toBe(!after);
-  state.saveTurn({ ...first, id: "later-context", state: "context_only", consumedBy: undefined });
-  await waInput(command, sender, "reset-publication-command");
-  expect(state.getSession("contact-1")).toBeUndefined();
-  expect(state.getTurn("old-context")?.consumedBy).toBe("session-reset");
-  expect(state.getTurn("later-context")?.consumedBy).toBeUndefined();
-  expect(f.opencode.session.abort).toHaveBeenCalledOnce();
-  expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
-});
+  ["/clear", "/new"].flatMap((command) =>
+    [false, true].flatMap((after) => [false, true].map((restart) => ({ command, after, restart }))),
+  ),
+)(
+  "recovers $command at session-reset publication (after=$after, restart=$restart)",
+  async ({ command, after, restart }) => {
+    hooks.realSessions = true;
+    let f = await start();
+    enableWhatsApp(f);
+    const sender = "+15550000001";
+    await waInput("Original work", sender, "reset-publication-work");
+    const state = hooks.manager.state;
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const first = state.listTurns()[0];
+    state.saveTurn({ ...first, id: "old-context", state: "context_only", consumedBy: undefined });
+    const clear = state.clearSession.bind(state);
+    vi.spyOn(state, "clearSession").mockImplementationOnce((...args: any[]) => {
+      if (after) clear(...args);
+      throw new Error("session reset publication failed");
+    });
+    await expect(waInput(command, sender, "reset-publication-command")).rejects.toThrow(
+      "session reset publication failed",
+    );
+    expect(state.getTurn(first.id)?.state).toBe("interrupted");
+    expect(state.getTurn("old-context")?.consumedBy).toBe(after ? "session-reset" : undefined);
+    expect(Boolean(state.getSession("contact-1"))).toBe(!after);
+    expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+    if (restart) {
+      await f.gateway.close();
+      f = await start(undefined, f.dir);
+      enableWhatsApp(f);
+    }
+    state.saveTurn({ ...first, id: "later-context", state: "context_only", consumedBy: undefined });
+    await waInput(command, sender, "reset-publication-command");
+    expect(state.getSession("contact-1")).toBeUndefined();
+    expect(state.getTurn("old-context")?.consumedBy).toBe("session-reset");
+    expect(state.getTurn("later-context")?.consumedBy).toBeUndefined();
+    expect(f.opencode.session.abort).toHaveBeenCalledTimes(restart ? 0 : 1);
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(
+  ["/clear", "/new"].flatMap((command) =>
+    ["none", "before-reuse", "after-reuse"].flatMap((restart) =>
+      (restart === "after-reuse" ? [false] : [false, true]).map((inFlight) => ({
+        command,
+        restart,
+        inFlight,
+      })),
+    ),
+  ),
+)(
+  "preserves newer session ownership after failed $command publication (restart=$restart, inFlight=$inFlight)",
+  async ({ command, restart, inFlight }) => {
+    hooks.realSessions = true;
+    let f = await start();
+    enableWhatsApp(f);
+    const sender = "+15550000001";
+    await waInput("First task", sender, "reuse-t1");
+    const state = hooks.manager.state;
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const first = state.listTurns()[0];
+    const retainedSession = state.getSession("contact-1");
+    vi.spyOn(state, "clearSession").mockImplementationOnce(() => {
+      throw new Error("reset publication failed before write");
+    });
+    await expect(waInput(command, sender, "reuse-control")).rejects.toThrow(
+      "reset publication failed before write",
+    );
+    expect(state.getTurn(first.id)?.state).toBe("interrupted");
+    expect(state.getSession("contact-1")).toBe(retainedSession);
+    if (restart === "before-reuse") {
+      await f.gateway.close();
+      f = await start(undefined, f.dir);
+      enableWhatsApp(f);
+    }
+    let current = hooks.manager.state;
+    let release!: () => void;
+    if (inFlight) {
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      f.opencode.session.get.mockImplementationOnce(async ({ path: { id } }: any) => {
+        await held;
+        return { data: { id, directory: "/project" } };
+      });
+      f.opencode.session.create.mockResolvedValueOnce({ data: { id: "fresh-session" } });
+    }
+    await waInput("Second task", sender, "reuse-t2");
+    const secondTurn = () =>
+      current.listTurns().find((t: any) => t.sourceIds?.includes("reuse-t2"));
+    let aborts = f.opencode.session.abort.mock.calls.length;
+    if (inFlight) {
+      await vi.waitFor(() => expect(f.opencode.session.get).toHaveBeenCalled());
+      await waInput(command, sender, "reuse-control");
+      expect(current.getSession("contact-1")).toBeUndefined();
+      release();
+    }
+    await vi.waitFor(() => expect(secondTurn()?.state).toBe("submitted"));
+    const second = secondTurn();
+    expect(second.retryCount).toBeUndefined();
+    const expectedSession = inFlight ? "fresh-session" : retainedSession;
+    expect(second.sessionID).toBe(expectedSession);
+    expect(current.getSession("contact-1")).toBe(expectedSession);
+    if (restart === "after-reuse") {
+      await f.gateway.close();
+      f = await start(undefined, f.dir, f);
+      enableWhatsApp(f);
+      current = hooks.manager.state;
+      aborts = f.opencode.session.abort.mock.calls.length;
+      await vi.waitFor(() => {
+        expect(secondTurn()?.ownerId).toBeTruthy();
+        expect(secondTurn()?.ownerId).not.toBe(second.ownerId);
+      });
+    }
+    (f.opencode.session as any).message = vi.fn(async () => ({
+      data: {
+        info: {
+          id: "reuse-assistant",
+          role: "assistant",
+          sessionID: second.sessionID,
+          parentID: second.messageID,
+        },
+      },
+    }));
+    const owner = await hooks.escalation.resolveOwner(
+      {
+        permissionID: "reuse-permission",
+        sessionID: second.sessionID,
+        toolMessageID: "reuse-assistant",
+        title: "Read directory",
+      },
+      new AbortController().signal,
+    );
+    expect(owner).toMatchObject({ turnId: second.id, messageID: second.messageID });
+    expect(hooks.escalation.ownerCurrent(owner)).toBe(true);
+    await waInput(command, sender, "reuse-control");
+    expect(current.getSession("contact-1")).toBe(expectedSession);
+    expect(current.getTurn(second.id)?.state).toBe("submitted");
+    expect(hooks.escalation.ownerCurrent(owner)).toBe(true);
+    expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts);
+    expect(f.statuses[expectedSession]).toEqual({ type: "busy" });
+    await waInput(command, sender, "reuse-fresh-control");
+    expect(current.getSession("contact-1")).toBeUndefined();
+    expect(current.getTurn(second.id)?.state).toBe("interrupted");
+    expect(hooks.escalation.ownerCurrent(owner)).toBe(false);
+    expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts + 1);
+  },
+);

@@ -246,3 +246,56 @@ it("bounds consumed ordinary quiet context while retaining Companion dedup and u
   expect(state.getTurn("pending-delivery")?.output).toBe("saved answer");
   expect(state.getTurn("companion-source")).toBeDefined();
 });
+
+it.each([false, true])(
+  "orders retained-session acquisition atomically with reset (resetFirst=%s)",
+  (resetFirst) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-state-"));
+    dirs.push(dir);
+    const state = createStateStore(dir);
+    // Older state files have mappings without generation counters.
+    state.update({ sessions: { chat: "retained-session" } });
+    state.saveTurn({
+      id: "new-turn",
+      messageID: "msg_new",
+      chatKey: "chat",
+      state: "queued",
+      kind: "normal",
+      text: "New work",
+      deliver: false,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    state.claimTurn("new-turn", "owner", 10000);
+    const restarted = createStateStore(dir);
+    const expected = { sessionID: "retained-session", generation: 0 };
+    if (resetFirst) {
+      expect(restarted.clearSession("chat", undefined, { generation: 0, contextIds: [] })).toBe(
+        true,
+      );
+      // Even re-selecting the same ID must not let a stale acquisition win.
+      restarted.setSession("chat", "retained-session");
+      expect(
+        state.setSession(
+          "chat",
+          "retained-session",
+          { turnId: "new-turn", ownerId: "owner" },
+          expected,
+        ),
+      ).toBe(false);
+    } else {
+      expect(
+        state.setSession(
+          "chat",
+          "retained-session",
+          { turnId: "new-turn", ownerId: "owner" },
+          expected,
+        ),
+      ).toBe(true);
+      expect(restarted.clearSession("chat", undefined, { generation: 0, contextIds: [] })).toBe(
+        false,
+      );
+    }
+    expect(restarted.getSession("chat")).toBe("retained-session");
+  },
+);
