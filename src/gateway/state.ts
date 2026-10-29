@@ -105,6 +105,7 @@ export interface StateStore {
   getReplyTarget(chatKey: string): ReplyTarget | undefined;
   saveTurn(turn: DurableTurn): void;
   reserveTurns(turns: DurableTurn[]): DurableTurn[];
+  reserveWhatsAppTurn(turn: DurableTurn): boolean;
   updateTurn(id: string, patch: Partial<DurableTurn>): DurableTurn | undefined;
   transitionTurn(
     id: string,
@@ -313,6 +314,21 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           if (!turns[candidate.id]) turns[candidate.id] = candidate;
         }
         return [{ ...state, turns }, candidates.map((candidate) => turns[candidate.id])];
+      });
+    },
+    reserveWhatsAppTurn(turn) {
+      const source = turn.replyTarget?.whatsappSource;
+      if (!source) throw new Error("WhatsApp source reservation requires an immutable owner.");
+      return mutate((state) => {
+        if (
+          Object.values(state.turns).some(
+            (old) =>
+              old.replyTarget?.whatsappSource?.identityId === source.identityId &&
+              old.sourceIds?.includes(source.messageId),
+          )
+        )
+          return [state, false];
+        return [{ ...state, turns: { ...state.turns, [turn.id]: turn } }, true];
       });
     },
     updateTurn(id, patch) {

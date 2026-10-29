@@ -93,6 +93,8 @@ export function createPendingReplies(): PendingReplies {
       const entry = waiters.get(chatKey);
       if (!entry) return false;
       const expected = entry.author;
+      // Preserve legacy cross-channel waiters without granting the new channel authority.
+      if (!expected && author?.channel === "whatsapp") return false;
       if (
         expected &&
         (!author ||
@@ -108,6 +110,7 @@ export function createPendingReplies(): PendingReplies {
     cancel,
     cancelFor(chatKey, author) {
       const expected = waiters.get(chatKey)?.author;
+      if (!expected && author.channel === "whatsapp") return false;
       if (
         !waiters.has(chatKey) ||
         (expected &&

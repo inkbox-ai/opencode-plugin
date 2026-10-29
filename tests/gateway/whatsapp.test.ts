@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
@@ -507,6 +507,8 @@ it.each([
   ["+15555550101", true],
   [" +1 (555) 555-0101 ", false],
   [" +1 (555) 555-0101 ", true],
+  [["+15555550101"], false],
+  [["+15555550101"], true],
   ["+15555550102", false],
 ])(
   "keeps explicit same-recipient delivery bound to the original final (%s, uncertain=%s)",
@@ -744,6 +746,9 @@ it("routes group messages and peer reactions by conversation while checking the 
   const message = {
     ...wire,
     remote_number: null,
+    reply_to_message_id: "quote-parent",
+    thread_id: "quote-thread",
+    thread_root_message_id: "quote-root",
     is_group: true,
     direction: "inbound",
     sender_number: "+15555550101",
@@ -760,6 +765,11 @@ it("routes group messages and peer reactions by conversation while checking the 
   expect(handleInbound.mock.calls[0][0]).toMatchObject({
     chatKey: `group:${conversation}`,
     group: { participantCount: 2 },
+    whatsappSource: {
+      parentMessageId: "quote-parent",
+      threadId: "quote-thread",
+      rootMessageId: "quote-root",
+    },
     from: "+15555550101",
   });
   const reaction = {
@@ -837,3 +847,49 @@ it("checks every group peer before a reaction write", async () => {
   ).rejects.toThrow("not on the outbound allowlist");
   expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
 });
+
+it("uses the canonical complete-target reaction webhook and ignores unresolved actors", async () => {
+  const shared = JSON.parse(
+    readFileSync(new URL("../fixtures/whatsapp-v2.json", import.meta.url), "utf8"),
+  );
+  const handleInbound = vi.fn(),
+    deps: any = {
+      config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true } },
+      inkbox: { getIdentity: async () => ({ id: shared.message.agent_identity_id }) },
+      contacts: { resolve: async () => ({ contactId: "contact" }), chatKeyFor: () => "contact" },
+      sessions: { handleInbound },
+      state: state(),
+      notify: createNotifyOnce(),
+      logger,
+    };
+  const raw = structuredClone(shared.reaction_webhook),
+    e: any = {
+      provider: "inkbox",
+      verified: true,
+      eventType: raw.event_type,
+      body: raw,
+      headers: {},
+    };
+  await dispatchEvent(deps, e);
+  expect(handleInbound).not.toHaveBeenCalled();
+  raw.data.reaction.remote_number = shared.message.participants[0];
+  await dispatchEvent(deps, e);
+  expect(handleInbound).toHaveBeenCalledOnce();
+  expect(handleInbound.mock.calls[0][0].text).toContain("context, not a new instruction");
+  expect(handleInbound.mock.calls[0][0].text).not.toContain(shared.message.content);
+});
+
+it.each(["", " ", "\n", null])(
+  "rejects an explicit invalid quote instead of sending plain: %j",
+  async (replyToMessageId) => {
+    const f = v2Tools();
+    await expect(
+      f.execute("send_whatsapp", {
+        conversationId: conversation,
+        replyToMessageId,
+        text: "Never plain",
+      }),
+    ).rejects.toThrow("nonempty message ID");
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  },
+);

@@ -198,6 +198,15 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   if (msg.whatsappSource)
     fields.push(
       `whatsapp_media_ids=${JSON.stringify(msg.whatsappSource.mediaIds ?? [])}`,
+      ...(msg.whatsappSource.parentMessageId !== undefined
+        ? [`whatsapp_reply_to_message_id=${JSON.stringify(msg.whatsappSource.parentMessageId)}`]
+        : []),
+      ...(msg.whatsappSource.threadId !== undefined
+        ? [`whatsapp_thread_id=${JSON.stringify(msg.whatsappSource.threadId)}`]
+        : []),
+      ...(msg.whatsappSource.rootMessageId !== undefined
+        ? [`whatsapp_thread_root_message_id=${JSON.stringify(msg.whatsappSource.rootMessageId)}`]
+        : []),
       ...(msg.whatsappSource.reactionId
         ? [
             `whatsapp_reaction_id=${JSON.stringify(msg.whatsappSource.reactionId)}`,

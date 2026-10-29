@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentIdentity } from "@inkbox/sdk";
 import { createStateStore, type StateStore } from "./gateway/state.js";
-import type { ReplyTarget } from "./gateway/types.js";
+import type { InboundMessage, ReplyTarget } from "./gateway/types.js";
 import type { HostClient } from "./host/types.js";
 
 export const WHATSAPP_EVENTS = [
@@ -150,6 +150,7 @@ export async function prepareWhatsApp(
       conversationId: target.conversationId,
       to: destination,
       explicit: Boolean(originalKey),
+      ...(originalKey && payload.replyToMessageId ? { quoteAttempt: true } : {}),
       payload: JSON.stringify(payload),
       idempotencyKey,
       state: "started",
@@ -258,7 +259,7 @@ export function hasExplicitWhatsAppReply(
       send.sourceId === target.whatsappSource!.messageId &&
       send.identityId === target.whatsappSource!.identityId &&
       send.conversationId === target.conversationId &&
-      ["started", "sent"].includes(send.state),
+      (["started", "sent"].includes(send.state) || send.quoteAttempt === true),
   );
 }
 
@@ -316,4 +317,52 @@ export function whatsappRecipients(value: unknown): string[] {
   )
     throw new Error("Use one to eight unique E.164 recipients.");
   return numbers;
+}
+
+/** Reserve control consumption before side effects; retain the first session route. */
+export function reserveWhatsAppIngress(
+  message: InboundMessage,
+  control: boolean,
+  store: StateStore,
+): { first: boolean; chatKey: string; control: boolean } {
+  const source = message.whatsappSource;
+  if (!source || !message.conversationId || !source.identityId || !source.messageId)
+    throw new Error("WhatsApp ingress ownership is unavailable.");
+  const key = `ingress:${createHash("sha256")
+    .update(JSON.stringify([source.identityId, source.messageId]))
+    .digest("hex")}`;
+  const textHash = createHash("sha256")
+    .update(message.rawText ?? message.text)
+    .digest("hex");
+  const candidate = {
+    ingress: true,
+    identityId: source.identityId,
+    sourceId: source.messageId,
+    conversationId: message.conversationId,
+    author: message.from,
+    textHash,
+    chatKey: message.chatKey,
+    control,
+  };
+  let first = false,
+    result = candidate;
+  store.updateWhatsAppSend(key, (existing) => {
+    if (!existing) {
+      first = true;
+      return candidate;
+    }
+    const old = existing as typeof candidate;
+    if (
+      old.ingress !== true ||
+      old.identityId !== candidate.identityId ||
+      old.sourceId !== candidate.sourceId ||
+      old.conversationId !== candidate.conversationId ||
+      old.author !== candidate.author ||
+      old.textHash !== textHash
+    )
+      throw new Error("Conflicting WhatsApp source ownership.");
+    result = old;
+    return old;
+  });
+  return { first, chatKey: result.chatKey, control: result.control };
 }

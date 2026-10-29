@@ -179,7 +179,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       "Send WhatsApp text/media to one recipient, 2–8 recipients for a group, or an existing direct/group conversation. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
       {
         to: z.union([z.string(), z.array(z.string()).min(1).max(8)]).optional(),
-        replyToMessageId: z.string().optional(),
+        replyToMessageId: z.string().min(1).optional(),
         groupName: z.string().min(1).max(100).optional(),
         conversationId: z.string().optional(),
         text: z.string().optional(),
@@ -199,6 +199,11 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const conversation = args.conversationId
           ? await identity.getWhatsAppConversation(args.conversationId)
           : undefined;
+        if (
+          args.replyToMessageId !== undefined &&
+          (typeof args.replyToMessageId !== "string" || !args.replyToMessageId.trim())
+        )
+          throw new Error("replyToMessageId must be a nonempty message ID.");
         const explicitRecipients = args.to === undefined ? undefined : whatsappRecipients(args.to);
         if (args.replyToMessageId && !args.conversationId)
           throw new Error("replyToMessageId requires conversationId.");
@@ -234,7 +239,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           `opencode:whatsapp-tool:${createHash("sha256")
             .update(JSON.stringify([identity.id, source, args.to, args.conversationId, payload]))
             .digest("hex")}`;
-        const recipient = typeof args.to === "string" ? args.to.replace(/[\s().-]/g, "") : "";
+        const recipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
         const sameConversation =
           owner?.channel === "whatsapp" &&
           (args.conversationId === owner.conversationId ||

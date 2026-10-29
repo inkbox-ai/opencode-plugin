@@ -1,6 +1,7 @@
 import type { InkboxRuntime } from "../client.js";
 import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
+import { checkOutboundRecipients } from "../permissions.js";
 import { prepareSlackReply } from "../slack.js";
 import { prepareWhatsApp } from "../whatsapp-native.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
@@ -43,6 +44,7 @@ export async function prepareReply(
   raw: string,
   logger: GatewayLogger,
   store?: StateStore,
+  allowedRecipients?: string[],
 ): Promise<() => Promise<ReplyResult>> {
   const trimmed = (raw ?? "").trim();
   if (!trimmed || trimmed === SILENT)
@@ -69,6 +71,21 @@ export async function prepareReply(
   }
   const identity = await runtime.getIdentity();
   if (target.channel === "whatsapp") {
+    if (target.group) {
+      if (!target.conversationId)
+        throw new ReplyPreparationError("WhatsApp group replies require their conversation.");
+      const conversation = await identity.getWhatsAppConversation(target.conversationId);
+      if (
+        conversation.agentIdentityId !== identity.id ||
+        !conversation.isGroup ||
+        !conversation.participants.length ||
+        (conversation.unresolvedParticipantCount ?? 0) > 0 ||
+        conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number))
+      )
+        throw new ReplyPreparationError("An owned resolved WhatsApp group is required.");
+      const blocked = checkOutboundRecipients(conversation.participants, allowedRecipients);
+      if (blocked) throw new ReplyPreparationError(blocked);
+    }
     const send = await prepareWhatsApp(identity, target, { text: body }, store);
     return async () => ({ delivered: true, reason: "sent", messageId: (await send()).id });
   }
@@ -105,6 +122,7 @@ export async function deliverReply(
   target: ReplyTarget,
   raw: string,
   logger: GatewayLogger,
+  allowedRecipients?: string[],
 ): Promise<ReplyResult> {
-  return (await prepareReply(runtime, target, raw, logger))();
+  return (await prepareReply(runtime, target, raw, logger, undefined, allowedRecipients))();
 }

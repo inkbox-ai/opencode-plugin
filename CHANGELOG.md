@@ -2,9 +2,9 @@
 
 ## 0.2.19 (unreleased)
 
-- Add approved dedicated one-to-one WhatsApp with signed ingress, durable native final replies, original-source permissions, owned media, and stable send recovery.
-- Add ten WhatsApp tools, fresh effective-limit reporting, local mark-read, and status-only callbacks without model wakeups.
-- Require SDK 0.7.21 and test the real public candidate in current-feature and packed native V1/V2 host checks, retaining a historical compatibility lane.
+- Add approved dedicated direct/group WhatsApp with signed ingress, durable native final replies, original-source permissions, owned media, and stable send recovery.
+- Add fifteen WhatsApp tools for direct/group sends, explicit quoted replies, paginated threads, named/custom reactions and exact reaction receipts; retain, fresh effective-limit reporting, local mark-read, and status-only callbacks without model wakeups.
+- Require SDK 0.7.24 and test the real public candidate in current-feature and packed native V1/V2 host checks, retaining a historical compatibility lane.
 
 ## 0.2.18 (unreleased)
 

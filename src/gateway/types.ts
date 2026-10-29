@@ -49,6 +49,9 @@ export interface InboundMessage {
     mediaIds?: string[];
     reactionId?: string;
     targetMessageId?: string;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
   };
   imessageSource?: {
     messageId: string;
@@ -103,6 +106,9 @@ export interface ReplyTarget {
     mediaIds?: string[];
     reactionId?: string;
     targetMessageId?: string;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
   };
   imessageSource?: {
     messageId: string;
@@ -184,8 +190,15 @@ export interface SessionManager {
   summarizeA2AProgress?(chatKey: string, taskId: string, previousUpdate: string): Promise<string>;
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
-  resetSession(chatKey: string): Promise<void>;
-  abortTurn(chatKey: string, channel?: Channel): Promise<boolean>;
+  resetSession(
+    chatKey: string,
+    source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+  ): Promise<void>;
+  abortTurn(
+    chatKey: string,
+    channel?: Channel,
+    source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+  ): Promise<boolean>;
   status(chatKey: string): { busy: boolean; sessionID?: string };
   // Resume durable accepted work after a gateway restart.
   catchUp(): Promise<void>;

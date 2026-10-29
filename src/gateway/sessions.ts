@@ -967,6 +967,7 @@ export function createSessionManager(
           output,
           deps.logger,
           deps.state,
+          deps.config.outbound?.allowedRecipients,
         );
       } catch (error) {
         if (!(error instanceof ReplyPreparationError)) throw error;
@@ -1681,7 +1682,12 @@ export function createSessionManager(
         sourceId &&
         deps.state
           .listTurns()
-          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+          .some(
+            (turn) =>
+              (msg.whatsappSource
+                ? turn.replyTarget?.whatsappSource?.identityId === msg.whatsappSource.identityId
+                : turn.chatKey === msg.chatKey) && turn.sourceIds?.includes(sourceId),
+          )
       )
         return;
       const target: ReplyTarget = {
@@ -1717,7 +1723,22 @@ export function createSessionManager(
                   !msg.reaction &&
                   !msg.whatsappSource.mediaIds?.length &&
                   !msg.text.trim().startsWith("/")
-                    ? JSON.stringify(["whatsapp", msg.from, msg.conversationId])
+                    ? JSON.stringify([
+                        "whatsapp",
+                        msg.from,
+                        msg.conversationId,
+                        ...(msg.whatsappSource.parentMessageId ||
+                        msg.whatsappSource.threadId ||
+                        msg.whatsappSource.rootMessageId
+                          ? [
+                              {
+                                parent: msg.whatsappSource.parentMessageId ?? null,
+                                thread: msg.whatsappSource.threadId ?? null,
+                                root: msg.whatsappSource.rootMessageId ?? null,
+                              },
+                            ]
+                          : []),
+                      ])
                     : undefined,
                 burstTextChars: [...msg.text].length,
                 retryAt:
@@ -1762,7 +1783,9 @@ export function createSessionManager(
             ? msg.slack.mentioned || msg.slack.direct
             : mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle))
         ) {
-          deps.state.saveTurn({ ...turn, state: "context_only", deliver: false });
+          if (msg.whatsappSource)
+            deps.state.reserveWhatsAppTurn({ ...turn, state: "context_only", deliver: false });
+          else deps.state.saveTurn({ ...turn, state: "context_only", deliver: false });
           return;
         }
       }
@@ -1770,7 +1793,12 @@ export function createSessionManager(
         sourceId &&
         deps.state
           .listTurns()
-          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+          .some(
+            (turn) =>
+              (msg.whatsappSource
+                ? turn.replyTarget?.whatsappSource?.identityId === msg.whatsappSource.identityId
+                : turn.chatKey === msg.chatKey) && turn.sourceIds?.includes(sourceId),
+          )
       )
         return;
       if (turn.burstKey) {
@@ -1822,7 +1850,9 @@ export function createSessionManager(
           });
           return updated ? [updated] : [];
         });
-      deps.state.saveTurn(turn);
+      if (msg.whatsappSource) {
+        if (!deps.state.reserveWhatsAppTurn(turn)) return;
+      } else deps.state.saveTurn(turn);
       const sessionIDs = new Set(
         interrupted
           .map((candidate) => candidate.sessionID ?? deps.state.getSession(candidate.chatKey))
@@ -1925,24 +1955,53 @@ export function createSessionManager(
       return turns.length > 0;
     },
 
-    async resetSession(chatKey) {
+    async resetSession(chatKey, source) {
+      const foreign = () =>
+        deps.state
+          .listTurns()
+          .some(
+            (turn) =>
+              turn.chatKey === chatKey &&
+              ACTIVE.has(turn.state) &&
+              source &&
+              (turn.replyTarget?.channel !== source.channel ||
+                turn.replyTarget?.conversationId !== source.conversationId ||
+                !sameAuthor(source.channel, turn.replyTarget?.sender ?? "", source.sender ?? "")),
+          );
+      if (foreign()) throw new Error("Another source owns work in this conversation.");
       generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
-      await this.abortTurn(chatKey);
+      if (source) await this.abortTurn(chatKey, source.channel, source);
+      else await this.abortTurn(chatKey);
+      if (foreign()) throw new Error("Another source owns work in this conversation.");
       deps.state.clearSession(chatKey);
       for (const context of deps.state.listTurns()) {
-        if (context.chatKey === chatKey && context.state === "context_only" && !context.consumedBy)
+        if (
+          context.chatKey === chatKey &&
+          context.state === "context_only" &&
+          !context.consumedBy &&
+          (!source ||
+            (context.replyTarget?.channel === source.channel &&
+              context.replyTarget?.conversationId === source.conversationId &&
+              sameAuthor(source.channel, context.replyTarget?.sender ?? "", source.sender ?? "")))
+        )
           deps.state.updateTurn(context.id, { consumedBy: "session-reset" });
       }
       deps.logger.info("session.reset", { chatKey });
     },
 
-    async abortTurn(chatKey, channel) {
+    async abortTurn(chatKey, channel, source) {
+      const selected = (turn: DurableTurn) =>
+        !source ||
+        (turn.replyTarget?.channel === source.channel &&
+          turn.replyTarget?.conversationId === source.conversationId &&
+          sameAuthor(source.channel, turn.replyTarget?.sender ?? "", source.sender ?? ""));
       const turns = deps.state
         .listTurns()
         .filter(
           (turn) =>
             turn.chatKey === chatKey &&
             ACTIVE.has(turn.state) &&
+            selected(turn) &&
             (!channel ||
               (turn.replyTarget?.channel === channel &&
                 (turn.kind === "normal" || Boolean(turn.companion)))),
@@ -1950,7 +2009,7 @@ export function createSessionManager(
       let uncertain = false;
       for (const captured of turns) {
         const turn = deps.state.getTurn(captured.id);
-        if (!turn || !ACTIVE.has(turn.state)) continue;
+        if (!turn || !ACTIVE.has(turn.state) || !selected(turn)) continue;
         if (turn.state === "delivery_started" || turn.uncertainStage === "delivery") continue;
         const executing =
           ["submitting", "submitted"].includes(turn.state) ||
@@ -1970,6 +2029,7 @@ export function createSessionManager(
         if (
           !latest ||
           !ACTIVE.has(latest.state) ||
+          !selected(latest) ||
           latest.state === "delivery_started" ||
           latest.uncertainStage === "delivery"
         )

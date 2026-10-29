@@ -4,6 +4,7 @@ import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
+import { reserveWhatsAppIngress } from "../whatsapp-native.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
@@ -19,7 +20,7 @@ import {
   type NativePermissionInventory,
 } from "./permission-inventory.js";
 import { queueReadiness } from "./readiness.js";
-import { deliverReply, prepareReply } from "./reply.js";
+import { deliverReply as deliverChannelReply, prepareReply } from "./reply.js";
 import {
   companionWakes,
   controlText,
@@ -60,6 +61,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   await opts.opencode.ready?.(opts.directory);
   const logger = opts.logger ?? consoleLogger;
   const g = opts.config.gateway;
+  const deliverReply: typeof deliverChannelReply = (runtime, target, raw, log) =>
+    deliverChannelReply(runtime, target, raw, log, opts.config.outbound.allowedRecipients);
   const state = createStateStore();
   if (opts.opencode.protocol !== 2) bindHostState(state, 1);
   // A prior process's successful inventory is not evidence for this attachment.
@@ -344,7 +347,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               : undefined,
             async () => {
               await sessions.authorizeReply?.(replyTarget);
-              const send = await prepareReply(opts.inkbox, replyTarget, prompt + hint, logger);
+              const send = await prepareReply(
+                opts.inkbox,
+                replyTarget,
+                prompt + hint,
+                logger,
+                undefined,
+                opts.config.outbound.allowedRecipients,
+              );
               if (options?.signal.aborted || options?.current?.() === false)
                 throw new Error("Native permission owner is no longer current.");
               sessions.permissionActivity?.(replyTarget, true);
@@ -433,6 +443,21 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     return {
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage) => {
+        const originalRaw = msg.rawText ?? msg.text;
+        let raw = originalRaw;
+        if (msg.whatsappSource) {
+          raw = controlText(originalRaw, (await opts.inkbox.getIdentity()).agentHandle);
+          const receipt = reserveWhatsAppIngress(
+            msg,
+            !msg.reaction && (isPermissionReply(raw) || raw.trim().startsWith("/")),
+            state,
+          );
+          msg = { ...msg, chatKey: receipt.chatKey };
+          if (!receipt.first) {
+            if (!receipt.control) await sessions.handleInbound(msg);
+            return;
+          }
+        }
         const target = {
           channel: msg.channel,
           slack: msg.slack,
@@ -446,22 +471,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           messageId: msg.messageId,
           group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
         };
-        const raw = msg.rawText ?? msg.text;
         const admitted =
           !msg.reaction &&
           (!msg.group ||
+            (Boolean(msg.whatsappSource) &&
+              /^\/(?:stop|cancel|clear|new|resume|status|health|usage)$/i.test(raw.trim())) ||
             msg.channel === "email" ||
             g.groupReplyMode !== "mention" ||
             (msg.slack
               ? msg.slack.direct || msg.slack.mentioned
-              : mentionsAgent(raw, (await opts.inkbox.getIdentity()).agentHandle)));
-        if (!admitted) {
-          await sessions.handleInbound(msg);
-          return;
-        }
+              : mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle)));
         if (
           !msg.reaction &&
           isPermissionReply(raw) &&
+          (admitted || Boolean(msg.whatsappSource)) &&
           pending.tryConsume(msg.chatKey, raw, {
             sender: msg.from,
             channel: msg.channel,
@@ -473,6 +496,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           })
         )
           return;
+
+        if (!admitted) {
+          await sessions.handleInbound(msg);
+          return;
+        }
 
         if (
           msg.slack &&
@@ -520,7 +548,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             .filter(
               (turn) =>
                 turn.chatKey === msg.chatKey &&
-                ["submitting", "submitted", "completed", "delivery_started"].includes(turn.state),
+                [
+                  "hydrating",
+                  "queued",
+                  "paused",
+                  "submitting",
+                  "submitted",
+                  "completed",
+                  "delivery_started",
+                ].includes(turn.state),
             );
           if (
             active.some(
@@ -548,7 +584,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
-            await sessions.resetSession(msg.chatKey);
+            if (msg.whatsappSource) await sessions.resetSession(msg.chatKey, target);
+            else await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);
             await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
@@ -562,8 +599,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               {
                 opencode: opts.opencode,
                 inkbox: opts.inkbox,
-                sessions:
-                  msg.imessageSource || msg.whatsappSource
+                sessions: msg.whatsappSource
+                  ? {
+                      ...sessions,
+                      abortTurn: (key) => sessions.abortTurn(key, msg.channel, target),
+                      resetSession: (key) => sessions.resetSession(key, target),
+                    }
+                  : msg.imessageSource
                     ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, msg.channel) }
                     : sessions,
                 logger,

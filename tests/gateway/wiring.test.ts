@@ -75,9 +75,9 @@ afterEach(async () => {
   hooks.abort.mockClear();
   hooks.reset.mockClear();
 });
-async function start(previousInventoryReady?: boolean) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
-  dirs.push(dir);
+async function start(previousInventoryReady?: boolean, existingDir?: string) {
+  const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
+  if (!existingDir) dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
   if (previousInventoryReady !== undefined)
     createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
@@ -108,7 +108,7 @@ async function start(previousInventoryReady?: boolean) {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
-  return { config, identity, inkbox };
+  return { config, identity, inkbox, dir, gateway: gateways.at(-1)! };
 }
 function inbound(text: string, sender: string, channel = "sms", group = false) {
   return hooks.server.onEvent({
@@ -430,4 +430,133 @@ it("does not route an owned permission without a source target to a newer stored
 it("starts native inventory readiness unconfirmed instead of inheriting a prior attachment's result", async () => {
   await start(true);
   expect(hooks.manager.state.read().permissionInventory).toEqual({ ready: false });
+});
+
+function waInput(text: string, sender: string, messageId: string, group = false) {
+  return hooks.server.onEvent({
+    body: {
+      message: {
+        chatKey: "contact-1",
+        from: sender,
+        channel: "whatsapp",
+        text,
+        rawText: text,
+        mediaPaths: [],
+        conversationId: "wa-conversation",
+        messageId,
+        whatsappSource: { messageId, identityId: "wa-identity" },
+        ...(group ? { group: { participantCount: 2 } } : {}),
+      },
+    },
+  });
+}
+function enableWhatsApp(fixture: Awaited<ReturnType<typeof start>>) {
+  Object.assign(fixture.identity, {
+    id: "wa-identity",
+    agentHandle: "test-agent",
+    sendWhatsApp: vi.fn(async () => ({ id: "wa-sent" })),
+    getWhatsAppConversation: vi.fn(async () => ({
+      agentIdentityId: "wa-identity",
+      isGroup: true,
+      participants: ["+15550000001", "+15550000002"],
+      unresolvedParticipantCount: 0,
+    })),
+  });
+}
+it("never lets a replayed WhatsApp approval approve a later permission, even across restart", async () => {
+  const first = await start();
+  enableWhatsApp(first);
+  const target: ReplyTarget = {
+    channel: "whatsapp",
+    sender: "+15550000001",
+    conversationId: "wa-conversation",
+  };
+  const answer = hooks.escalation.relay.ask("contact-1", "First approval", target);
+  await waInput("allow", target.sender!, "approval-original");
+  expect(await answer).toBe("allow");
+  await first.gateway.close();
+  const next = await start(undefined, first.dir);
+  enableWhatsApp(next);
+  let settled = false;
+  const second = hooks.escalation.relay
+    .ask("contact-1", "Second approval", target)
+    .then((value: string) => {
+      settled = true;
+      return value;
+    });
+  await waInput("allow", target.sender!, "approval-original");
+  expect(settled).toBe(false);
+  await waInput("allow", target.sender!, "approval-new");
+  expect(await second).toBe("allow");
+});
+it("does not consume or cancel a legacy SMS/email permission from WhatsApp", async () => {
+  const f = await start();
+  enableWhatsApp(f);
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Email approval", {
+      channel: "email",
+      sender: "person@example.com",
+      messageId: "parent",
+    })
+    .then((value: string) => {
+      settled = true;
+      return value;
+    });
+  await waInput("allow", "+15550000001", "wrong-channel");
+  expect(settled).toBe(false);
+  await inbound("allow", "+15550000001", "sms");
+  expect(await answer).toBe("allow");
+});
+it.each(["allow", "@agent allow"])(
+  "accepts source-matched WhatsApp group permission answers before mention gating: %s",
+  async (text) => {
+    const f = await start();
+    enableWhatsApp(f);
+    f.config.gateway.groupReplyMode = "mention";
+    let settled = false;
+    const target: ReplyTarget = {
+      channel: "whatsapp",
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+      group: true,
+    };
+    const answer = hooks.escalation.relay
+      .ask("contact-1", "Group approval", target)
+      .then((value: string) => {
+        settled = true;
+        return value;
+      });
+    await waInput(text, "+15550000002", "foreign-author", true);
+    expect(settled).toBe(false);
+    await waInput(text, target.sender!, "asked-author", true);
+    expect(await answer).toBe("allow");
+  },
+);
+it("fences queued group controls by author and never repeats a consumed Stop", async () => {
+  const f = await start();
+  enableWhatsApp(f);
+  hooks.manager.state.saveTurn({
+    id: "queued-wa",
+    messageID: "input",
+    chatKey: "contact-1",
+    state: "queued",
+    kind: "normal",
+    text: "Work",
+    deliver: true,
+    replyTarget: { channel: "whatsapp", sender: "+15550000001", conversationId: "wa-conversation" },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await waInput("/stop", "+15550000002", "foreign-stop", true);
+  expect(hooks.abort).not.toHaveBeenCalled();
+  await waInput("@agent /stop", "+15550000001", "original-stop", true);
+  expect(hooks.abort).toHaveBeenCalledOnce();
+  expect(hooks.abort).toHaveBeenCalledWith(
+    "contact-1",
+    "whatsapp",
+    expect.objectContaining({ sender: "+15550000001", conversationId: "wa-conversation" }),
+  );
+  await waInput("@agent /stop", "+15550000001", "original-stop", true);
+  expect(hooks.abort).toHaveBeenCalledOnce();
 });

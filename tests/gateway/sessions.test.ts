@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Inkbox, InkboxConnectionError } from "@inkbox/sdk";
+import { Inkbox, InkboxAPIError, InkboxConnectionError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
@@ -24,6 +24,7 @@ import { createSessionManager, extractText } from "../../src/gateway/sessions.js
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 import * as slackActivity from "../../src/slack-activity.js";
+import { prepareWhatsApp } from "../../src/whatsapp-native.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
@@ -3395,6 +3396,129 @@ it("keeps uncertain WhatsApp delivery out of model recovery and never sends the 
     expect(turns).toHaveLength(1);
     expect(turns[0].output).toBe("reply");
     expect(turns[0].error).toContain("Do not upload or send a new copy");
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+it("deduplicates WhatsApp by immutable identity/source rather than mutable contact session, including restart", async () => {
+  const h = makeManager();
+  const input = sms("WhatsApp question", {
+    channel: "whatsapp",
+    chatKey: "whatsapp:conv-1",
+    messageId: "stable-wa",
+    whatsappSource: { messageId: "stable-wa", identityId: "identity-1" },
+  });
+  try {
+    await h.mgr.handleInbound(input);
+    await h.mgr.handleInbound({ ...input, chatKey: "resolved-contact" });
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    await h.mgr.close();
+    const next = makeManager(path.dirname(h.state.filePath));
+    try {
+      await next.mgr.handleInbound({ ...input, chatKey: "resolved-contact" });
+      expect(next.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(next.state.listTurns()).toHaveLength(1);
+    } finally {
+      await next.mgr.close();
+    }
+  } finally {
+    await h.mgr.close();
+  }
+});
+it.each(["queued", "paused"] as const)(
+  "does not let another group author cancel or reset %s work",
+  async (state) => {
+    const h = makeManager();
+    const target = {
+      channel: "whatsapp" as const,
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+    };
+    h.state.saveTurn({
+      id: "owned-wa",
+      messageID: "input",
+      chatKey: "wa-group",
+      state,
+      kind: "normal",
+      text: "Work",
+      deliver: true,
+      replyTarget: target,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    try {
+      expect(
+        await h.mgr.abortTurn("wa-group", "whatsapp", { ...target, sender: "+15550000002" }),
+      ).toBe(false);
+      expect(h.state.getTurn("owned-wa")?.state).toBe(state);
+      await expect(
+        h.mgr.resetSession("wa-group", { ...target, sender: "+15550000002" }),
+      ).rejects.toThrow("Another source owns work");
+      expect(await h.mgr.abortTurn("wa-group", "whatsapp", target)).toBe(true);
+      expect(h.state.getTurn("owned-wa")?.state).toBe("interrupted");
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
+it("never converts a rejected explicit quote into an automatic plain final", async () => {
+  const h = makeManager(),
+    input = sms("Question", {
+      channel: "whatsapp",
+      messageId: "quoted-source",
+      whatsappSource: { messageId: "quoted-source", identityId: "identity-1" },
+    });
+  h.identity.sendWhatsApp.mockRejectedValueOnce(
+    new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }),
+  );
+  try {
+    const send = await prepareWhatsApp(
+      h.identity as any,
+      {
+        channel: "whatsapp",
+        conversationId: "conv-1",
+        messageId: "quoted-source",
+        whatsappSource: input.whatsappSource,
+      },
+      { text: "Quoted", replyToMessageId: "parent" },
+      h.state,
+      "original-quote",
+    );
+    await expect(send()).rejects.toThrow("not accepted");
+    await h.mgr.handleInbound(input);
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  } finally {
+    await h.mgr.close();
+  }
+});
+it("does not send automatic group answers to a locally disallowed peer", async () => {
+  const h = makeManager();
+  h.config.outbound = { approval: "auto", allowedRecipients: ["+15550000001"], askTimeoutMs: 1000 };
+  Object.assign(h.identity, {
+    getWhatsAppConversation: async () => ({
+      agentIdentityId: "identity-1",
+      isGroup: true,
+      participants: ["+15550000001", "+15550000002"],
+      unresolvedParticipantCount: 0,
+    }),
+  });
+  try {
+    await h.mgr.handleInbound(
+      sms("Group question", {
+        channel: "whatsapp",
+        from: "+15550000001",
+        messageId: "group-source",
+        group: { participantCount: 2 },
+        whatsappSource: { messageId: "group-source", identityId: "identity-1" },
+      }),
+    );
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.output).toBe("reply"));
+    await h.mgr.catchUp();
+    expect(h.identity.sendWhatsApp).not.toHaveBeenCalled();
   } finally {
     await h.mgr.close();
   }

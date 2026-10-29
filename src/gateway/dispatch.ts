@@ -857,6 +857,13 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),
+      ...(message.reply_to_message_id !== undefined
+        ? { parentMessageId: message.reply_to_message_id as string | null }
+        : {}),
+      ...(message.thread_id !== undefined ? { threadId: message.thread_id as string | null } : {}),
+      ...(message.thread_root_message_id !== undefined
+        ? { rootMessageId: message.thread_root_message_id as string | null }
+        : {}),
       ...(reaction
         ? { reactionId: String(reaction.id), targetMessageId: String(reaction.target_message_id) }
         : {}),
