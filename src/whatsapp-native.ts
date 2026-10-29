@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentIdentity } from "@inkbox/sdk";
 import { createStateStore, type StateStore } from "./gateway/state.js";
-import type { InboundMessage, ReplyTarget } from "./gateway/types.js";
+import type { CommandTargets, InboundMessage, ReplyTarget } from "./gateway/types.js";
 import type { HostClient } from "./host/types.js";
 
 export const WHATSAPP_EVENTS = [
@@ -356,12 +356,25 @@ export function whatsappRecipients(value: unknown): string[] {
   return numbers;
 }
 
+export type WhatsAppIngressDisposition =
+  | { kind: "permission"; waiterId: string }
+  | { kind: "normal"; waiterId: string | null }
+  | { kind: "command"; waiterId: string | null; targets: CommandTargets };
+
 /** Retain the first route, but distinguish reservation from completed control handling. */
 export function reserveWhatsAppIngress(
   message: InboundMessage,
   control: boolean,
   store: StateStore,
-): { first: boolean; chatKey: string; control: boolean; completed: boolean; complete(): void } {
+  disposition: () => WhatsAppIngressDisposition,
+): {
+  first: boolean;
+  chatKey: string;
+  control: boolean;
+  completed: boolean;
+  disposition?: WhatsAppIngressDisposition;
+  complete(): void;
+} {
   const source = message.whatsappSource;
   if (!source || !message.conversationId || !source.identityId || !source.messageId)
     throw new Error("WhatsApp ingress ownership is unavailable.");
@@ -372,6 +385,7 @@ export function reserveWhatsAppIngress(
     .update(message.rawText ?? message.text)
     .digest("hex");
   const candidate = {
+    disposition: undefined as WhatsAppIngressDisposition | undefined,
     ingress: true,
     completed: false,
     identityId: source.identityId,
@@ -387,6 +401,7 @@ export function reserveWhatsAppIngress(
   store.updateWhatsAppSend(key, (existing) => {
     if (!existing) {
       first = true;
+      candidate.disposition = disposition();
       return candidate;
     }
     const old = existing as typeof candidate;
@@ -406,8 +421,9 @@ export function reserveWhatsAppIngress(
     first,
     chatKey: result.chatKey,
     control: result.control,
-    // Older control receipts were consumed at reservation; never replay those effects.
-    completed: result.completed ?? result.control,
+    // Legacy controls have no immutable targets; never retarget their uncertain effects.
+    completed: (result.completed ?? result.control) || (result.control && !result.disposition),
+    disposition: result.disposition,
     complete() {
       store.updateWhatsAppSend(key, (entry) => ({
         ...(entry as typeof candidate),

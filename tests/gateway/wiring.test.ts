@@ -579,6 +579,7 @@ it("fences queued group controls by author and never repeats a consumed Stop", a
     "contact-1",
     "whatsapp",
     expect.objectContaining({ sender: "+15550000002", conversationId: "wa-conversation" }),
+    [],
   );
   hooks.abort.mockClear();
   await waInput("@agent /stop", "+15550000001", "original-stop", true);
@@ -587,6 +588,7 @@ it("fences queued group controls by author and never repeats a consumed Stop", a
     "contact-1",
     "whatsapp",
     expect.objectContaining({ sender: "+15550000001", conversationId: "wa-conversation" }),
+    ["queued-wa"],
   );
   await waInput("@agent /stop", "+15550000001", "original-stop", true);
   expect(hooks.abort).toHaveBeenCalledOnce();
@@ -905,3 +907,179 @@ it.each(["/clear", "/new"])(
     expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
   },
 );
+
+function failNextControlCompletion() {
+  const state = hooks.manager.state;
+  const update = state.updateWhatsAppSend.bind(state);
+  let fail = true;
+  vi.spyOn(state, "updateWhatsAppSend").mockImplementation((key: any, fn: any) =>
+    update(key, (old: any) => {
+      const next = fn(old);
+      if (key.startsWith("ingress:") && next.completed && fail) {
+        fail = false;
+        throw new Error("completion checkpoint failed");
+      }
+      return next;
+    }),
+  );
+}
+
+it.each([false, true])(
+  "binds a failed approval checkpoint to the expired waiter (restart=%s)",
+  async (restart) => {
+    let f = await start();
+    enableWhatsApp(f);
+    const target: ReplyTarget = {
+      channel: "whatsapp",
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+    };
+    const first = hooks.escalation.relay.ask("contact-1", "Approval A", target, {
+      timeoutMs: 150,
+      signal: new AbortController().signal,
+    });
+    failNextControlCompletion();
+    await expect(waInput("allow", target.sender!, "expired-approval")).rejects.toThrow(
+      "completion checkpoint failed",
+    );
+    await vi.waitFor(async () => expect(await first).toBeUndefined());
+    if (restart) {
+      await f.gateway.close();
+      f = await start(undefined, f.dir);
+      enableWhatsApp(f);
+    }
+    let settled = false;
+    const second = hooks.escalation.relay
+      .ask("contact-1", "Approval B", target)
+      .then((v: string) => {
+        settled = true;
+        return v;
+      });
+    await waInput("allow", target.sender!, "expired-approval");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    await waInput("allow", target.sender!, "fresh-approval-after-expiry");
+    expect(await second).toBe("allow");
+  },
+);
+
+it("retains normal disposition when admission fails before a later permission opens", async () => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsApp(f);
+  const state = hooks.manager.state;
+  vi.spyOn(state, "reserveWhatsAppTurn").mockImplementationOnce(() => {
+    throw new Error("admission write failed");
+  });
+  await expect(waInput("allow", "+15550000001", "normal-before-permission")).rejects.toThrow(
+    "admission write failed",
+  );
+  let settled = false;
+  const second = hooks.escalation.relay
+    .ask("contact-1", "Later approval", {
+      channel: "whatsapp",
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+    })
+    .then((v: string) => {
+      settled = true;
+      return v;
+    });
+  await waInput("allow", "+15550000001", "normal-before-permission");
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(settled).toBe(false);
+  expect(state.listTurns()).toHaveLength(1);
+  await waInput("allow", "+15550000001", "new-answer");
+  expect(await second).toBe("allow");
+});
+
+it.each(
+  ["/stop", "/cancel", "/clear", "/new"].flatMap((command) =>
+    [false, true].map((restart) => ({ command, restart })),
+  ),
+)(
+  "does not retarget $command after completion checkpoint failure (restart=$restart)",
+  async ({ command, restart }) => {
+    hooks.realSessions = true;
+    let f = await start();
+    enableWhatsApp(f);
+    const sender = "+15550000001";
+    await waInput("First task", sender, "checkpoint-t1");
+    const state = hooks.manager.state;
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const first = state.listTurns()[0];
+    failNextControlCompletion();
+    await expect(waInput(command, sender, "checkpoint-control")).rejects.toThrow(
+      "completion checkpoint failed",
+    );
+    expect(state.getTurn(first.id)?.state).toBe("interrupted");
+    expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+    if (restart) {
+      await f.gateway.close();
+      f = await start(undefined, f.dir);
+      enableWhatsApp(f);
+    }
+    await waInput("Second task", sender, "checkpoint-t2");
+    const current = hooks.manager.state;
+    await vi.waitFor(() =>
+      expect(
+        current.listTurns().find((t: any) => t.sourceIds?.includes("checkpoint-t2"))?.state,
+      ).toBe("submitted"),
+    );
+    const second = current.listTurns().find((t: any) => t.sourceIds?.includes("checkpoint-t2"));
+    const sessionID = current.getSession("contact-1");
+    const aborts = f.opencode.session.abort.mock.calls.length;
+    let settled = false;
+    const permission = hooks.escalation.relay
+      .ask("contact-1", "Second task approval", {
+        channel: "whatsapp",
+        sender,
+        conversationId: "wa-conversation",
+      })
+      .then((v: string) => {
+        settled = true;
+        return v;
+      });
+    await waInput(command, sender, "checkpoint-control");
+    expect(current.getTurn(second.id)?.state).toBe("submitted");
+    expect(current.getSession("contact-1")).toBe(sessionID);
+    expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts);
+    expect(f.statuses[sessionID]).toEqual({ type: "busy" });
+    expect(settled).toBe(false);
+    await waInput("allow", sender, "second-task-answer");
+    expect(await permission).toBe("allow");
+  },
+);
+
+it.each(
+  ["/clear", "/new"].flatMap((command) => [false, true].map((after) => ({ command, after }))),
+)("recovers $command at session-reset publication (after=$after)", async ({ command, after }) => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsApp(f);
+  const sender = "+15550000001";
+  await waInput("Original work", sender, "reset-publication-work");
+  const state = hooks.manager.state;
+  await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+  const first = state.listTurns()[0];
+  state.saveTurn({ ...first, id: "old-context", state: "context_only", consumedBy: undefined });
+  const clear = state.clearSession.bind(state);
+  vi.spyOn(state, "clearSession").mockImplementationOnce((...args: any[]) => {
+    if (after) clear(...args);
+    throw new Error("session reset publication failed");
+  });
+  await expect(waInput(command, sender, "reset-publication-command")).rejects.toThrow(
+    "session reset publication failed",
+  );
+  expect(state.getTurn(first.id)?.state).toBe("interrupted");
+  expect(state.getTurn("old-context")?.consumedBy).toBe(after ? "session-reset" : undefined);
+  expect(Boolean(state.getSession("contact-1"))).toBe(!after);
+  state.saveTurn({ ...first, id: "later-context", state: "context_only", consumedBy: undefined });
+  await waInput(command, sender, "reset-publication-command");
+  expect(state.getSession("contact-1")).toBeUndefined();
+  expect(state.getTurn("old-context")?.consumedBy).toBe("session-reset");
+  expect(state.getTurn("later-context")?.consumedBy).toBeUndefined();
+  expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+  expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
+});

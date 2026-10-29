@@ -82,6 +82,7 @@ export interface DurablePermission {
 export interface GatewayState {
   // chatKey -> opencode session id
   sessions: Record<string, string>;
+  sessionGenerations?: Record<string, number>;
   turns: Record<string, DurableTurn>;
   replyTargets: Record<string, ReplyTarget>;
   permissions: Record<string, DurablePermission>;
@@ -100,7 +101,11 @@ export interface StateStore {
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
   setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
   getSession(chatKey: string): string | undefined;
-  clearSession(chatKey: string, owner?: { turnId: string; ownerId: string }): void;
+  clearSession(
+    chatKey: string,
+    owner?: { turnId: string; ownerId: string },
+    expected?: { generation: number; contextIds: string[] },
+  ): boolean;
   setReplyTarget(chatKey: string, target: ReplyTarget): void;
   getReplyTarget(chatKey: string): ReplyTarget | undefined;
   saveTurn(turn: DurableTurn): void;
@@ -265,18 +270,44 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
     setSession(chatKey, sessionID, owner) {
       mutate((state) => {
         checkSessionOwner(state, owner);
-        return [{ ...state, sessions: { ...state.sessions, [chatKey]: sessionID } }, undefined];
+        return [
+          {
+            ...state,
+            sessions: { ...state.sessions, [chatKey]: sessionID },
+            sessionGenerations: {
+              ...state.sessionGenerations,
+              [chatKey]: (state.sessionGenerations?.[chatKey] ?? 0) + 1,
+            },
+          },
+          undefined,
+        ];
       });
     },
     getSession(chatKey) {
       return read().sessions[chatKey];
     },
-    clearSession(chatKey, owner) {
-      mutate((state) => {
+    clearSession(chatKey, owner, expected) {
+      return mutate((state) => {
         checkSessionOwner(state, owner);
+        const generation = state.sessionGenerations?.[chatKey] ?? 0;
+        if (expected && expected.generation !== generation) return [state, false];
         const sessions = { ...state.sessions };
         delete sessions[chatKey];
-        return [{ ...state, sessions }, undefined];
+        const turns = { ...state.turns };
+        for (const id of expected?.contextIds ?? []) {
+          const turn = turns[id];
+          if (turn?.chatKey === chatKey && turn.state === "context_only" && !turn.consumedBy)
+            turns[id] = { ...turn, consumedBy: "session-reset" };
+        }
+        return [
+          {
+            ...state,
+            sessions,
+            turns,
+            sessionGenerations: { ...state.sessionGenerations, [chatKey]: generation + 1 },
+          },
+          true,
+        ];
       });
     },
     setReplyTarget(chatKey, target) {

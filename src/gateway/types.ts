@@ -153,6 +153,12 @@ export interface TurnRequest {
   replyTarget?: ReplyTarget;
 }
 
+export interface CommandTargets {
+  turnIds: string[];
+  contextIds: string[];
+  sessionGeneration: number;
+}
+
 export interface SessionManager {
   freezeAdmission?(): void;
   resolvePermissionOwner?(
@@ -195,11 +201,13 @@ export interface SessionManager {
   resetSession(
     chatKey: string,
     source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+    targets?: CommandTargets,
   ): Promise<void>;
   abortTurn(
     chatKey: string,
     channel?: Channel,
     source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+    turnIds?: string[],
   ): Promise<boolean>;
   status(chatKey: string): { busy: boolean; sessionID?: string };
   // Resume durable accepted work after a gateway restart.

@@ -1955,7 +1955,9 @@ export function createSessionManager(
       return turns.length > 0;
     },
 
-    async resetSession(chatKey, source) {
+    async resetSession(chatKey, source, targets) {
+      const currentGeneration = () => deps.state.read().sessionGenerations?.[chatKey] ?? 0;
+      if (targets && currentGeneration() !== targets.sessionGeneration) return;
       const foreign = () =>
         deps.state
           .listTurns()
@@ -1970,9 +1972,16 @@ export function createSessionManager(
           );
       if (foreign()) throw new Error("Another source owns work in this conversation.");
       generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
-      if (source) await this.abortTurn(chatKey, source.channel, source);
+      if (source) await this.abortTurn(chatKey, source.channel, source, targets?.turnIds);
       else await this.abortTurn(chatKey);
       if (foreign()) throw new Error("Another source owns work in this conversation.");
+      if (targets) {
+        deps.state.clearSession(chatKey, undefined, {
+          generation: targets.sessionGeneration,
+          contextIds: targets.contextIds,
+        });
+        return;
+      }
       deps.state.clearSession(chatKey);
       for (const context of deps.state.listTurns()) {
         if (
@@ -1989,7 +1998,7 @@ export function createSessionManager(
       deps.logger.info("session.reset", { chatKey });
     },
 
-    async abortTurn(chatKey, channel, source) {
+    async abortTurn(chatKey, channel, source, turnIds) {
       const selected = (turn: DurableTurn) =>
         !source ||
         (turn.replyTarget?.channel === source.channel &&
@@ -2000,6 +2009,7 @@ export function createSessionManager(
         .filter(
           (turn) =>
             turn.chatKey === chatKey &&
+            (!turnIds || turnIds.includes(turn.id)) &&
             ACTIVE.has(turn.state) &&
             selected(turn) &&
             (!channel ||
