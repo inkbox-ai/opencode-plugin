@@ -1984,7 +1984,7 @@ export function createSessionManager(
 
     async resetSession(chatKey, source, targets) {
       const currentGeneration = () => deps.state.read().sessionGenerations?.[chatKey] ?? 0;
-      if (targets && currentGeneration() !== targets.sessionGeneration) return;
+      if (targets && currentGeneration() !== targets.sessionGeneration) return false;
       const foreign = () =>
         deps.state
           .listTurns()
@@ -2003,11 +2003,10 @@ export function createSessionManager(
       else await this.abortTurn(chatKey);
       if (foreign()) throw new Error("Another source owns work in this conversation.");
       if (targets) {
-        deps.state.clearSession(chatKey, undefined, {
+        return deps.state.clearSession(chatKey, undefined, {
           generation: targets.sessionGeneration,
           contextIds: targets.contextIds,
         });
-        return;
       }
       deps.state.clearSession(chatKey);
       for (const context of deps.state.listTurns()) {
@@ -2023,6 +2022,7 @@ export function createSessionManager(
           deps.state.updateTurn(context.id, { consumedBy: "session-reset" });
       }
       deps.logger.info("session.reset", { chatKey });
+      return true;
     },
 
     async abortTurn(chatKey, channel, source, turnIds) {

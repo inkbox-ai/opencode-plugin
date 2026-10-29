@@ -34,13 +34,17 @@ export async function handleCommand(
   switch (word) {
     case "/clear":
     case "/new":
-      await deps.sessions.resetSession(chatKey);
+      if ((await deps.sessions.resetSession(chatKey)) === false)
+        return "Newer work kept this conversation active. Send /clear again to start fresh.";
       return "Started a fresh conversation. What's next?";
     case "/stop":
     case "/cancel": {
       try {
         const aborted = await deps.sessions.abortTurn(chatKey);
-        return aborted ? "Stopped." : "Nothing was running.";
+        if (aborted) return "Stopped.";
+        return deps.sessions.status(chatKey).busy
+          ? "No matching earlier work was stopped; newer work is still active."
+          : "Nothing was running.";
       } catch {
         return "Stop requested, but the host has not confirmed execution ended. This conversation remains blocked; check /health.";
       }

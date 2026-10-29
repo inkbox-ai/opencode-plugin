@@ -202,7 +202,7 @@ export interface SessionManager {
     chatKey: string,
     source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
     targets?: CommandTargets,
-  ): Promise<void>;
+  ): Promise<boolean | void>;
   abortTurn(
     chatKey: string,
     channel?: Channel,

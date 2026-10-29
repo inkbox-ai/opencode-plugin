@@ -1046,6 +1046,12 @@ it.each(
         return v;
       });
     await waInput(command, sender, "checkpoint-control");
+    if (["/stop", "/cancel"].includes(command))
+      expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          text: "No matching earlier work was stopped; newer work is still active.",
+        }),
+      );
     expect(current.getTurn(second.id)?.state).toBe("submitted");
     expect(current.getSession("contact-1")).toBe(sessionID);
     expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts);
@@ -1200,6 +1206,12 @@ it.each(
     expect(hooks.escalation.ownerCurrent(owner)).toBe(true);
     expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts);
     expect(f.statuses[expectedSession]).toEqual({ type: "busy" });
+    if (!inFlight)
+      expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          text: "Newer work kept this conversation active. Send /clear again to start fresh.",
+        }),
+      );
     await waInput(command, sender, "reuse-fresh-control");
     expect(current.getSession("contact-1")).toBeUndefined();
     expect(current.getTurn(second.id)?.state).toBe("interrupted");
