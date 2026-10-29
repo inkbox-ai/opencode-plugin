@@ -854,6 +854,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     messageId,
     ...resolved,
     whatsappSource: {
+      ...(!reaction ? { autoReplyTarget: messageId } : {}),
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),

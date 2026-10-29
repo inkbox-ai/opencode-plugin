@@ -176,7 +176,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "send_whatsapp",
-      "Send WhatsApp text/media to one recipient, 2–8 recipients for a group, or an existing direct/group conversation. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
+      "Send WhatsApp text/media to one recipient, 2–8 recipients for a group, or an existing direct/group conversation. Active-source replies inherit their conversation and quote target; explicit destinations remain authoritative. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
       {
         to: z.union([z.string(), z.array(z.string()).min(1).max(8)]).optional(),
         replyToMessageId: z.string().min(1).optional(),
@@ -188,16 +188,16 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       },
       async (args, ctx) => {
         assertWhatsAppText(args.text ?? "");
-        if (
-          Boolean(args.to) === Boolean(args.conversationId) ||
-          !(args.text?.trim() || args.mediaId)
-        )
-          throw new Error("Use one recipient or conversation and text or one owned media ID.");
         const store = createStateStore();
         const owner = await whatsappToolOwner(ctx.sessionID, ctx, deps.opencode, store);
+        const conversationId =
+          args.conversationId ??
+          (!args.to && owner?.channel === "whatsapp" ? owner.conversationId : undefined);
+        if (Boolean(args.to) === Boolean(conversationId) || !(args.text?.trim() || args.mediaId))
+          throw new Error("Use one recipient or conversation and text or one owned media ID.");
         const identity = await deps.runtime.getIdentity();
-        const conversation = args.conversationId
-          ? await identity.getWhatsAppConversation(args.conversationId)
+        const conversation = conversationId
+          ? await identity.getWhatsAppConversation(conversationId)
           : undefined;
         if (
           args.replyToMessageId !== undefined &&
@@ -205,7 +205,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         )
           throw new Error("replyToMessageId must be a nonempty message ID.");
         const explicitRecipients = args.to === undefined ? undefined : whatsappRecipients(args.to);
-        if (args.replyToMessageId && !args.conversationId)
+        if (args.replyToMessageId && !conversationId)
           throw new Error("replyToMessageId requires conversationId.");
         if (args.groupName && (!explicitRecipients || explicitRecipients.length < 2))
           throw new Error("groupName is only a group creation hint.");
@@ -242,7 +242,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const recipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
         const sameConversation =
           owner?.channel === "whatsapp" &&
-          (args.conversationId === owner.conversationId ||
+          (conversationId === owner.conversationId ||
             (!owner.group && /^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
         const target = {
           ...(owner ?? {}),
@@ -254,11 +254,13 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
               : undefined,
           whatsappRecipients:
             !sameConversation && Array.isArray(args.to) ? explicitRecipients : undefined,
-          conversationId: sameConversation ? owner.conversationId : args.conversationId,
+          conversationId: sameConversation ? owner.conversationId : conversationId,
           messageId: owner?.messageId ?? ctx.messageID,
         };
         if (!sameConversation) delete target.whatsappSource;
-        const message = await (await prepareWhatsApp(identity, target, payload, store, key))();
+        const message = await (
+          await prepareWhatsApp(identity, target, payload, store, key, !args.idempotencyKey)
+        )();
         return { message, idempotencyKey: key, mediaId: args.mediaId ?? null };
       },
     ],

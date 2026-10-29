@@ -120,6 +120,7 @@ export async function prepareWhatsApp(
   payload: { text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string },
   store = createStateStore(),
   originalKey?: string,
+  inheritSourceQuote = true,
 ) {
   if (typeof identity.sendWhatsApp !== "function")
     throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
@@ -130,19 +131,55 @@ export async function prepareWhatsApp(
   if (!(target.conversationId || destination) || (source && source.identityId !== identity.id))
     throw new Error("The original WhatsApp identity or conversation changed.");
   assertWhatsAppOwner(target, store);
-  const logical = createHash("sha256")
-    .update(
-      JSON.stringify([
-        identity.id,
-        target.conversationId ?? destination,
-        source?.messageId ?? target.messageId,
-        payload,
-      ]),
-    )
-    .digest("hex");
-  const idempotencyKey = originalKey ?? `opencode:whatsapp:${logical}`;
+  const keyFor = (body: typeof payload) =>
+    `opencode:whatsapp:${createHash("sha256")
+      .update(
+        JSON.stringify([
+          identity.id,
+          target.conversationId ?? destination,
+          source?.messageId ?? target.messageId,
+          body,
+        ]),
+      )
+      .digest("hex")}`;
+  // A saved plain intent must keep its original body and key after an upgrade.
+  const legacyKey = originalKey ?? keyFor(payload);
+  const sends = (store.read().whatsappSends ?? {}) as Record<string, any>;
+  const saved = sends[legacyKey];
+  const savedPayload =
+    saved && typeof saved.payload === "string"
+      ? (JSON.parse(saved.payload) as typeof payload)
+      : undefined;
+  if (!payload.replyToMessageId && originalKey && savedPayload?.replyToMessageId) {
+    payload = { ...payload, replyToMessageId: savedPayload.replyToMessageId };
+  } else if (
+    !saved &&
+    inheritSourceQuote &&
+    !payload.replyToMessageId &&
+    source?.autoReplyTarget === source?.messageId &&
+    source?.autoReplyTarget &&
+    !source.reactionId &&
+    target.conversationId
+  ) {
+    payload = { ...payload, replyToMessageId: source.autoReplyTarget };
+  }
+  const idempotencyKey = saved ? legacyKey : (originalKey ?? keyFor(payload));
   return async () => {
     assertWhatsAppOwner(target, store);
+    const priorQuote = Object.values(store.read().whatsappSends ?? {}).find(
+      (send: any) =>
+        source &&
+        send.sourceId === source.messageId &&
+        send.identityId === identity.id &&
+        send.conversationId === target.conversationId &&
+        send.quoteAttempt &&
+        ["started", "rejected"].includes(send.state) &&
+        send.idempotencyKey !== idempotencyKey,
+    );
+    if (priorQuote)
+      throw new Error(
+        "The source has an unresolved quoted send; retain its original key and payload.",
+      );
     let previous: any;
     const entry = {
       identityId: identity.id,

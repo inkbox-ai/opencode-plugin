@@ -44,6 +44,7 @@ export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    autoReplyTarget?: string;
     messageId: string;
     identityId: string;
     mediaIds?: string[];
@@ -101,6 +102,7 @@ export interface ReplyTarget {
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    autoReplyTarget?: string;
     messageId: string;
     identityId: string;
     mediaIds?: string[];

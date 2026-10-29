@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,7 +58,7 @@ const target = {
   conversationId: conversation,
   messageId: source,
   sender: "+15555550101",
-  whatsappSource: { messageId: source, identityId: owner },
+  whatsappSource: { messageId: source, identityId: owner, autoReplyTarget: source },
 };
 const directories: string[] = [];
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -86,7 +87,7 @@ afterEach(() => {
   for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-it("uses the real SDK for stable plain replies without quoted-iMessage fields or duplicate sends", async () => {
+it("uses the real SDK for stable source-anchored replies without unsupported fallback fields or duplicate sends", async () => {
   const calls: { url: URL; init?: RequestInit }[] = [];
   vi.stubGlobal(
     "fetch",
@@ -111,6 +112,7 @@ it("uses the real SDK for stable plain replies without quoted-iMessage fields or
   expect(JSON.parse(String(posts[0].init?.body))).toEqual({
     conversation_id: conversation,
     text: "Saved answer",
+    reply_to_message_id: source,
   });
   expect(new Headers(posts[0].init?.headers).get("Idempotency-Key")).toContain(
     "opencode:whatsapp:",
@@ -379,7 +381,7 @@ it("preserves only public quota fields and permits the original key after a know
   await expect(
     (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
   ).rejects.toThrow("request not accepted");
-  expect(hasExplicitWhatsAppReply(target, store)).toBe(false);
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   await expect(
     (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
   ).resolves.toMatchObject({ id: "accepted" });
@@ -446,7 +448,7 @@ it("curates email policy rejection and recovers only the original send key", asy
       "original-email-key",
     );
   await expect((await send())()).rejects.toThrow("request not accepted");
-  expect(hasExplicitWhatsAppReply(target, store)).toBe(false);
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   await expect((await send())()).resolves.toMatchObject({ id: "accepted-original" });
   expect(sendWhatsApp.mock.calls[0][0]).toEqual(sendWhatsApp.mock.calls[1][0]);
 });
@@ -893,3 +895,247 @@ it.each(["", " ", "\n", null])(
     expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   },
 );
+
+it.each(["started", "sent", "rejected"])(
+  "preserves a legacy plain payload and hash across restart (%s)",
+  async (status) => {
+    const store = state(),
+      payload = { text: "Legacy answer" };
+    const key = `opencode:whatsapp:${createHash("sha256")
+      .update(JSON.stringify([owner, conversation, source, payload]))
+      .digest("hex")}`;
+    const saved = {
+      identityId: owner,
+      sourceId: source,
+      conversationId: conversation,
+      explicit: false,
+      payload: JSON.stringify(payload),
+      idempotencyKey: key,
+      state: status,
+      ...(status === "sent" ? { messageId: "accepted" } : {}),
+    };
+    store.updateWhatsAppSend(key, () => saved);
+    const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+    const restarted = createStateStore(directories.at(-1)!);
+    const send = await prepareReply(
+      { getIdentity: async () => identity } as any,
+      target,
+      payload.text,
+      logger,
+      restarted,
+    );
+    if (status === "started") await expect(send()).rejects.toThrow("unconfirmed");
+    else await send();
+    if (status === "rejected")
+      expect(identity.sendWhatsApp).toHaveBeenCalledWith({
+        ...payload,
+        conversationId: conversation,
+        idempotencyKey: key,
+      });
+    else expect(identity.sendWhatsApp).not.toHaveBeenCalled();
+    const rows = restarted.read().whatsappSends as Record<string, any>;
+    expect(Object.keys(rows)).toEqual([key]);
+    expect(rows[key].payload).toBe(JSON.stringify(payload));
+  },
+);
+
+it.each([false, true])(
+  "anchors a new ordinary reply to its source, not its quoted parent (group=%s)",
+  async (group) => {
+    const store = state();
+    const identity: any = {
+      id: owner,
+      sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+      getWhatsAppConversation: vi.fn(async () => ({
+        agentIdentityId: owner,
+        isGroup: true,
+        participants: ["+15555550101", "+15555550102"],
+      })),
+    };
+    const route = {
+      ...target,
+      group,
+      whatsappSource: { ...target.whatsappSource, parentMessageId: "earlier-parent" },
+    };
+    await (
+      await prepareReply(
+        { getIdentity: async () => identity } as any,
+        route,
+        "New answer",
+        logger,
+        store,
+      )
+    )();
+    expect(identity.sendWhatsApp).toHaveBeenCalledWith({
+      text: "New answer",
+      conversationId: conversation,
+      replyToMessageId: source,
+      idempotencyKey: expect.any(String),
+    });
+  },
+);
+
+it("never treats a reaction receipt or unproven reaction target as a quote", async () => {
+  const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+  await (
+    await prepareWhatsApp(
+      identity,
+      {
+        ...target,
+        whatsappSource: {
+          ...target.whatsappSource,
+          messageId: "reaction:receipt:1",
+          reactionId: "receipt",
+          targetMessageId: "unproven-target",
+        },
+      },
+      { text: "Noted" },
+      state(),
+    )
+  )();
+  expect(identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+});
+
+it.each([false, true])(
+  "fences new replacement intents after an explicit quoted attempt (rejected=%s)",
+  async (rejected) => {
+    const store = state(),
+      identity: any = {
+        id: owner,
+        sendWhatsApp: vi.fn(async () => {
+          if (rejected) throw new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" });
+          throw new TypeError("response lost");
+        }),
+      };
+    await expect(
+      (
+        await prepareWhatsApp(
+          identity,
+          target,
+          { text: "Answer", replyToMessageId: "visible-parent" },
+          store,
+          "quote-key",
+        )
+      )(),
+    ).rejects.toThrow();
+    await expect(
+      (await prepareWhatsApp(identity, target, { text: "Replacement" }, store, "new-key", false))(),
+    ).rejects.toThrow("unresolved quoted send");
+    expect(identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
+  },
+);
+
+it("keeps an old persisted source without quote admission plain", async () => {
+  const old = { ...target, whatsappSource: { messageId: source, identityId: owner } };
+  const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+  await (await prepareWhatsApp(identity, old, { text: "Saved answer" }, state()))();
+  expect(identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+});
+
+it.each([false, true])(
+  "defaults source-owned tools without retargeting explicit outreach (group=%s)",
+  async (group) => {
+    const store = state();
+    vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+    store.saveTurn({
+      id: "owned-turn",
+      messageID: "input",
+      sessionID: "session",
+      chatKey: "contact",
+      state: "submitted",
+      kind: "normal",
+      text: "question",
+      deliver: true,
+      replyTarget: { ...target, group },
+      ownerId: "owner",
+      leaseUntil: Date.now() + 60000,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const identity: any = {
+      id: owner,
+      sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+      getWhatsAppConversation: vi.fn(async () => ({
+        agentIdentityId: owner,
+        isGroup: group,
+        participants: group ? ["+15555550101", "+15555550102"] : ["+15555550101"],
+      })),
+    };
+    const tool = whatsappTools({
+      runtime: { getIdentity: async () => identity },
+      config: { outbound: { approval: "auto", allowedRecipients: [] } },
+      opencode: {
+        session: {
+          message: async () => ({
+            data: {
+              info: {
+                role: "assistant",
+                parentID: "input",
+              },
+            },
+          }),
+        },
+      },
+    } as any).find((item) => item.name === "inkbox_send_whatsapp")!;
+    const ctx: any = {
+      sessionID: "session",
+      messageID: "assistant",
+      directory: "/tmp",
+      abort: new AbortController().signal,
+    };
+    await tool.definition.execute({ text: "Source answer" }, ctx);
+    expect(identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
+      conversationId: conversation,
+      replyToMessageId: source,
+      text: "Source answer",
+    });
+    expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
+    await tool.definition.execute({ to: "+15555550103", text: "Outreach" }, ctx);
+    expect(identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ to: "+15555550103" });
+    expect(identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
+    await tool.definition.execute(
+      { conversationId: "another-conversation", text: "Other room" },
+      ctx,
+    );
+    expect(identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({
+      conversationId: "another-conversation",
+    });
+    expect(identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("replyToMessageId");
+    await tool.definition.execute(
+      { text: "Legacy recovery", idempotencyKey: "unknown-old-key" },
+      ctx,
+    );
+    expect(identity.sendWhatsApp.mock.calls[3][0]).not.toHaveProperty("replyToMessageId");
+    store.updateTurn("owned-turn", { state: "interrupted" });
+    await expect(tool.definition.execute({ text: "Cancelled" }, ctx)).rejects.toThrow(
+      "no longer owns",
+    );
+    expect(identity.sendWhatsApp).toHaveBeenCalledTimes(4);
+  },
+);
+
+it("restores an exact saved explicit quote on key-only retry without replacing its target", async () => {
+  const store = state();
+  const identity: any = {
+    id: owner,
+    sendWhatsApp: vi
+      .fn()
+      .mockRejectedValueOnce(new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }))
+      .mockResolvedValue({ id: "accepted" }),
+  };
+  await expect(
+    (
+      await prepareWhatsApp(
+        identity,
+        target,
+        { text: "Answer", replyToMessageId: "chosen-visible-message" },
+        store,
+        "chosen-key",
+      )
+    )(),
+  ).rejects.toThrow();
+  await (await prepareWhatsApp(identity, target, { text: "Answer" }, store, "chosen-key", false))();
+  expect(identity.sendWhatsApp.mock.calls[0][0]).toEqual(identity.sendWhatsApp.mock.calls[1][0]);
+  expect(identity.sendWhatsApp.mock.calls[1][0].replyToMessageId).toBe("chosen-visible-message");
+});

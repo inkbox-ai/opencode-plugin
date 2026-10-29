@@ -3523,3 +3523,30 @@ it("does not send automatic group answers to a locally disallowed peer", async (
     await h.mgr.close();
   }
 });
+
+it("keeps a coalesced WhatsApp answer anchored to its first admitted source", async () => {
+  const h = makeManager();
+  try {
+    for (const id of ["burst-first", "burst-second"]) {
+      await h.mgr.handleInbound(
+        sms(id, {
+          channel: "whatsapp",
+          messageId: id,
+          whatsappSource: { messageId: id, identityId: "identity-1", autoReplyTarget: id },
+        }),
+      );
+    }
+    await vi.waitFor(() => expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce(), {
+      timeout: 5000,
+    });
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
+      conversationId: "conv-1",
+      replyToMessageId: "burst-first",
+    });
+    const turn = h.state.listTurns().find((item) => item.replyTarget?.channel === "whatsapp");
+    expect(turn?.sourceIds).toEqual(["burst-first", "burst-second"]);
+  } finally {
+    await h.mgr.close();
+  }
+});
