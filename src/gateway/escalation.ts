@@ -29,7 +29,12 @@ export interface EscalationRelay {
     chatKey: string,
     prompt: string,
     target?: ReplyTarget,
-    options?: { signal: AbortSignal; timeoutMs: number; current?: () => boolean },
+    options?: {
+      signal: AbortSignal;
+      timeoutMs: number;
+      current?: () => boolean;
+      requestId?: string | null;
+    },
   ): Promise<string | undefined>;
 }
 
@@ -258,7 +263,10 @@ export function createEscalationBridge(deps: EscalationDeps) {
     const deadline =
       existing?.deadline ??
       (deps.timeoutMs > 0 ? Date.now() + deps.timeoutMs : Number.MAX_SAFE_INTEGER);
+    // Retained prompts keep their original delivery identity across upgrades.
+    const requestId = existing ? (existing.requestId ?? null) : `permission:${perm.permissionID}`;
     deps.state.savePermission({
+      requestId,
       ...(owner ? { owner } : {}),
       replyTarget: origin,
       permissionID: perm.permissionID,
@@ -278,6 +286,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
       let response: DurablePermission["response"];
       if (!response) {
         deps.state.savePermission({
+          requestId,
           ...(owner ? { owner } : {}),
           replyTarget: origin,
           permissionID: perm.permissionID,
@@ -294,6 +303,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
               deps.relay.ask(chatKey, menu(perm.title), origin, {
                 signal: controller.signal,
                 timeoutMs: remaining,
+                requestId,
                 ...(owner ? { current: () => !closed && Boolean(deps.ownerCurrent?.(owner)) } : {}),
               }),
               remaining,
@@ -306,6 +316,7 @@ export function createEscalationBridge(deps: EscalationDeps) {
         }
       }
       deps.state.savePermission({
+        requestId,
         ...(owner ? { owner } : {}),
         replyTarget: origin,
         permissionID: perm.permissionID,

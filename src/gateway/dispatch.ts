@@ -821,7 +821,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
         error &&
         typeof error === "object" &&
         "statusCode" in error &&
-        [401, 403].includes(Number(error.statusCode))
+        Number(error.statusCode) === 401
       )
         throw error;
     }

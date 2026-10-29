@@ -1372,3 +1372,57 @@ it.each([false, true])(
     ).rejects.toThrow("different operation");
   },
 );
+
+it.each([401, 403, 404, 410])(
+  "handles unavailable attachment status %s without losing authorized text",
+  async (statusCode) => {
+    const store = state();
+    const handleInbound = vi.fn();
+    const failure = Object.assign(new Error("media unavailable"), { statusCode });
+    const deps: any = {
+      config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true } },
+      inkbox: {
+        getIdentity: async () => ({
+          id: owner,
+          getWhatsAppMedia: async () => {
+            throw failure;
+          },
+        }),
+      },
+      contacts: { resolve: async () => ({ contactId: "contact" }), chatKeyFor: () => "contact" },
+      sessions: { handleInbound },
+      state: store,
+      notify: createNotifyOnce(),
+      logger,
+    };
+    const event: any = {
+      provider: "inkbox",
+      verified: true,
+      eventType: "whatsapp.received",
+      headers: {},
+      body: {
+        data: {
+          message: {
+            ...wire,
+            direction: "inbound",
+            sender_number: "+15555550101",
+            status: "received",
+            media: [{ id: "owned-media" }],
+          },
+        },
+      },
+    };
+    if (statusCode === 401) {
+      await expect(dispatchEvent(deps, event)).rejects.toBe(failure);
+      expect(handleInbound).not.toHaveBeenCalled();
+    } else {
+      await dispatchEvent(deps, event);
+      expect(handleInbound).toHaveBeenCalledOnce();
+      expect(handleInbound.mock.calls[0][0]).toMatchObject({
+        text: expect.stringContaining("Saved answer"),
+        mediaPaths: [],
+      });
+      expect(handleInbound.mock.calls[0][0].text).toContain("attachment unavailable");
+    }
+  },
+);

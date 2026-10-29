@@ -121,6 +121,7 @@ export async function prepareWhatsApp(
   store = createStateStore(),
   originalKey?: string,
   inheritSourceQuote = true,
+  requestId?: string,
 ) {
   if (typeof identity.sendWhatsApp !== "function")
     throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
@@ -139,6 +140,7 @@ export async function prepareWhatsApp(
           target.conversationId ?? destination,
           source?.messageId ?? target.messageId,
           body,
+          ...(requestId ? [requestId] : []),
         ]),
       )
       .digest("hex")}`;

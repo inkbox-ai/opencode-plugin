@@ -42,9 +42,7 @@ export async function handleCommand(
       try {
         const aborted = await deps.sessions.abortTurn(chatKey);
         if (aborted) return "Stopped.";
-        return deps.sessions.status(chatKey).busy
-          ? "No matching earlier work was stopped; newer work is still active."
-          : "Nothing was running.";
+        return "No matching work was stopped.";
       } catch {
         return "Stop requested, but the host has not confirmed execution ended. This conversation remains blocked; check /health.";
       }

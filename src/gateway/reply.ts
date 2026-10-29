@@ -3,7 +3,7 @@ import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
 import { checkOutboundRecipients } from "../permissions.js";
 import { prepareSlackReply } from "../slack.js";
-import { prepareWhatsApp } from "../whatsapp-native.js";
+import { assertWhatsAppText, prepareWhatsApp } from "../whatsapp-native.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
@@ -45,6 +45,7 @@ export async function prepareReply(
   logger: GatewayLogger,
   store?: StateStore,
   allowedRecipients?: string[],
+  requestId?: string,
 ): Promise<() => Promise<ReplyResult>> {
   const trimmed = (raw ?? "").trim();
   if (!trimmed || trimmed === SILENT)
@@ -65,6 +66,7 @@ export async function prepareReply(
   const body = target.channel === "email" ? trimmed : stripMarkdown(trimmed);
   try {
     if (target.channel === "sms") assertSmsTextWithinLimit(body);
+    if (target.channel === "whatsapp") assertWhatsAppText(body);
     if (target.channel === "imessage") assertIMessageTextWithinLimit(body);
   } catch (error) {
     throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
@@ -86,7 +88,15 @@ export async function prepareReply(
       const blocked = checkOutboundRecipients(conversation.participants, allowedRecipients);
       if (blocked) throw new ReplyPreparationError(blocked);
     }
-    const send = await prepareWhatsApp(identity, target, { text: body }, store);
+    const send = await prepareWhatsApp(
+      identity,
+      target,
+      { text: body },
+      store,
+      undefined,
+      true,
+      requestId,
+    );
     return async () => ({ delivered: true, reason: "sent", messageId: (await send()).id });
   }
   const nativeSend =

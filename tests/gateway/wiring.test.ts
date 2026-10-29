@@ -493,6 +493,24 @@ function enableWhatsApp(fixture: Awaited<ReturnType<typeof start>>) {
     })),
   });
 }
+it.each(["/stop", "/cancel"])(
+  "does not disclose or interrupt another group sender's work on %s",
+  async (command) => {
+    hooks.realSessions = true;
+    const f = await start();
+    enableWhatsApp(f);
+    await waInput("Other participant's task", "+15550000002", "other-participant-task", true);
+    const state = hooks.manager.state;
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const other = state.listTurns()[0];
+    await waInput(command, "+15550000001", "scoped-stop", true);
+    expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: "No matching work was stopped." }),
+    );
+    expect(state.getTurn(other.id)?.state).toBe("submitted");
+    expect(f.opencode.session.abort).not.toHaveBeenCalled();
+  },
+);
 it("never lets a replayed WhatsApp approval approve a later permission, even across restart", async () => {
   const first = await start();
   enableWhatsApp(first);
@@ -619,7 +637,12 @@ it("revalidates an SMS resume selection after WhatsApp work starts in the shared
   expect(f.statuses[sessionID]).toEqual({ type: "busy" });
   expect(f.opencode.session.abort).not.toHaveBeenCalled();
   expect(f.opencode.session.promptAsync).toHaveBeenCalledOnce();
-  expect(f.identity.sendText).toHaveBeenCalledOnce();
+  expect(f.identity.sendText).toHaveBeenCalledTimes(2);
+  expect(f.identity.sendText).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      text: "This request could not change the conversation. Try again after the current task finishes.",
+    }),
+  );
   for (const command of ["/stop", "/cancel"]) await inbound(command, sender);
   expect(state.getTurn(before.id)?.state).toBe("submitted");
   expect(f.opencode.session.abort).not.toHaveBeenCalled();
@@ -676,7 +699,8 @@ it.each(["/stop", "/cancel"])(
       path: { id: sessionID },
       query: { directory: "/project" },
     });
-    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledExactlyOnceWith(
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledTimes(4);
+    expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
       expect.objectContaining({ text: "Stopped.", conversationId: "wa-conversation" }),
     );
     await vi.waitFor(() => expect(state.getTurn(otherTurn.id)?.state).toBe("submitted"));
@@ -1049,7 +1073,7 @@ it.each(
     if (["/stop", "/cancel"].includes(command))
       expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          text: "No matching earlier work was stopped; newer work is still active.",
+          text: "No matching work was stopped.",
         }),
       );
     expect(current.getTurn(second.id)?.state).toBe("submitted");
@@ -1217,5 +1241,81 @@ it.each(
     expect(current.getTurn(second.id)?.state).toBe("interrupted");
     expect(hooks.escalation.ownerCurrent(owner)).toBe(false);
     expect(f.opencode.session.abort).toHaveBeenCalledTimes(aborts + 1);
+  },
+);
+
+it("delivers identical permission prompts separately while retaining each request key", async () => {
+  const f = await start();
+  enableWhatsApp(f);
+  const target: ReplyTarget = {
+    channel: "whatsapp",
+    sender: "+15550000001",
+    conversationId: "wa-conversation",
+    messageId: "source",
+    whatsappSource: { messageId: "source", identityId: "wa-identity" },
+  };
+  for (const [index, requestId] of [
+    "permission-one",
+    "permission-two",
+    "permission-two",
+  ].entries()) {
+    const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target, {
+      requestId,
+      timeoutMs: 1000,
+      signal: new AbortController().signal,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await waInput("allow", target.sender!, `approval-${index}`);
+    expect(await answer).toBe("allow");
+  }
+  const sends = (f.identity as any).sendWhatsApp.mock.calls;
+  expect(sends).toHaveLength(2);
+  expect(sends[0][0].idempotencyKey).not.toBe(sends[1][0].idempotencyKey);
+  expect(
+    Object.values(hooks.manager.state.read().whatsappSends).filter((send: any) => send.explicit),
+  ).toEqual([]);
+});
+it.each(["/clear", "/new", "/resume", "/status", "/health", "/usage"])(
+  "requires a mention for WhatsApp group command %s",
+  async (command) => {
+    const f = await start();
+    enableWhatsApp(f);
+    f.config.gateway.groupReplyMode = "mention";
+    await waInput(command, "+15550000001", "unmentioned-command", true);
+    expect((f.identity as any).sendWhatsApp).not.toHaveBeenCalled();
+    expect(hooks.reset).not.toHaveBeenCalled();
+    expect(hooks.inbound).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(["/clear", "/new", "/resume"])(
+  "explains rejected %s without exposing or stopping another source",
+  async (command) => {
+    const f = await start();
+    enableWhatsApp(f);
+    hooks.manager.state.saveTurn({
+      id: "foreign",
+      messageID: "foreign",
+      chatKey: "contact-1",
+      state: "submitted",
+      kind: "normal",
+      text: "private",
+      deliver: true,
+      replyTarget: { channel: "email", sender: "other@example.com", messageId: "foreign" },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await waInput(command, "+15550000001", "denied-control");
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "This request could not change the conversation. Try again after the current task finishes.",
+      }),
+    );
+    expect(hooks.reset).not.toHaveBeenCalled();
+    expect(hooks.abort).not.toHaveBeenCalled();
+    expect(hooks.manager.state.getTurn("foreign").state).toBe("submitted");
+    await waInput(command, "+15550000001", "denied-control");
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
   },
 );

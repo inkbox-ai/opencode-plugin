@@ -355,6 +355,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                 logger,
                 undefined,
                 opts.config.outbound.allowedRecipients,
+                options?.requestId === null
+                  ? undefined
+                  : (options?.requestId ?? `permission:${pending.current(chatKey)}`),
               );
               if (options?.signal.aborted || options?.current?.() === false)
                 throw new Error("Native permission owner is no longer current.");
@@ -531,8 +534,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         const admitted =
           !msg.reaction &&
           (!msg.group ||
-            (Boolean(msg.whatsappSource) &&
-              /^\/(?:stop|cancel|clear|new|resume|status|health|usage)$/i.test(raw.trim())) ||
+            (Boolean(msg.whatsappSource) && /^\/(?:stop|cancel)$/i.test(raw.trim())) ||
             msg.channel === "email" ||
             g.groupReplyMode !== "mention" ||
             (msg.slack
@@ -612,6 +614,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                   !sameAuthor(msg.channel, turn.replyTarget?.sender ?? "", msg.from)),
             );
         if (/^\/(?:clear|new|resume)$/i.test(raw.trim()) && hasForeignWhatsAppWork()) {
+          await deliverReply(
+            opts.inkbox,
+            target,
+            "This request could not change the conversation. Try again after the current task finishes.",
+            logger,
+          );
           complete();
           return; // Session-wide controls cannot affect another source's work.
         }
@@ -630,6 +638,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
             if (hasForeignWhatsAppWork()) {
+              await deliverReply(
+                opts.inkbox,
+                target,
+                "This request could not change the conversation. Try again after the current task finishes.",
+                logger,
+              );
               complete();
               return;
             }
