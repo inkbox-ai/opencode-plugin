@@ -14,7 +14,12 @@ export interface PendingReplies {
     send: () => Promise<unknown>,
     signal?: AbortSignal,
   ): Promise<string | undefined>;
-  tryConsume(chatKey: string, text: string, author?: ReplyAuthor): boolean;
+  tryConsume(
+    chatKey: string,
+    text: string,
+    author?: ReplyAuthor,
+    beforeConsume?: () => void,
+  ): boolean;
   pending(chatKey: string): boolean;
   cancel(chatKey: string): void;
   cancelFor(chatKey: string, author: ReplyAuthor): boolean;
@@ -88,7 +93,7 @@ export function createPendingReplies(): PendingReplies {
         if (queues.get(chatKey) === task) queues.delete(chatKey);
       }
     },
-    tryConsume(chatKey, text, author) {
+    tryConsume(chatKey, text, author, beforeConsume) {
       if (!isPermissionReply(text)) return false;
       const entry = waiters.get(chatKey);
       if (!entry) return false;
@@ -103,6 +108,7 @@ export function createPendingReplies(): PendingReplies {
           !sameAuthor(expected.channel, expected.sender, author.sender))
       )
         return false;
+      beforeConsume?.();
       entry.done(text);
       return true;
     },

@@ -72,6 +72,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
+  const ingressRuns = new Map<string, Promise<void>>();
   const resumeCandidates = new Map<
     string,
     { ids: string[]; sender: string; channel: string; route?: string }
@@ -440,9 +441,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   // answer consumes the message; (2) a /resume selection; (3) a control
   // command replies directly.
   function wrapSessions() {
-    return {
+    const wrapped = {
       ...sessions,
-      handleInbound: async (msg: import("./types.js").InboundMessage) => {
+      handleInbound: async (msg: import("./types.js").InboundMessage): Promise<void> => {
+        let complete = () => {};
         const originalRaw = msg.rawText ?? msg.text;
         let raw = originalRaw;
         if (msg.whatsappSource) {
@@ -453,8 +455,22 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             state,
           );
           msg = { ...msg, chatKey: receipt.chatKey };
-          if (!receipt.first) {
-            if (!receipt.control) await sessions.handleInbound(msg);
+          complete = receipt.complete;
+          if (receipt.control && receipt.completed) return;
+          if (
+            !receipt.first &&
+            (!receipt.control ||
+              state
+                .listTurns()
+                .some(
+                  (turn) =>
+                    turn.replyTarget?.whatsappSource?.identityId ===
+                      msg.whatsappSource?.identityId &&
+                    turn.sourceIds?.includes(msg.whatsappSource!.messageId),
+                ))
+          ) {
+            await sessions.handleInbound(msg);
+            complete();
             return;
           }
         }
@@ -485,20 +501,26 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           !msg.reaction &&
           isPermissionReply(raw) &&
           (admitted || Boolean(msg.whatsappSource)) &&
-          pending.tryConsume(msg.chatKey, raw, {
-            sender: msg.from,
-            channel: msg.channel,
-            route: msg.slack
-              ? slackRouteKey(msg.slack)
-              : msg.channel === "whatsapp"
-                ? msg.conversationId
-                : undefined,
-          })
+          pending.tryConsume(
+            msg.chatKey,
+            raw,
+            {
+              sender: msg.from,
+              channel: msg.channel,
+              route: msg.slack
+                ? slackRouteKey(msg.slack)
+                : msg.channel === "whatsapp"
+                  ? msg.conversationId
+                  : undefined,
+            },
+            complete,
+          )
         )
           return;
 
         if (!admitted) {
           await sessions.handleInbound(msg);
+          complete();
           return;
         }
 
@@ -562,12 +584,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                   turn.replyTarget?.conversationId !== msg.conversationId ||
                   !sameAuthor(msg.channel, turn.replyTarget?.sender ?? "", msg.from)),
             );
-        if (
-          (/^\/(?:clear|new|resume)$/i.test(raw.trim()) ||
-            (!msg.whatsappSource && /^\/(?:stop|cancel)$/i.test(raw.trim()))) &&
-          hasForeignWhatsAppWork()
-        )
+        if (/^\/(?:clear|new|resume)$/i.test(raw.trim()) && hasForeignWhatsAppWork()) {
+          complete();
           return; // Session-wide controls cannot affect another source's work.
+        }
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
         if (
@@ -582,10 +602,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
-            if (hasForeignWhatsAppWork()) return;
+            if (hasForeignWhatsAppWork()) {
+              complete();
+              return;
+            }
             if (msg.whatsappSource) await sessions.resetSession(msg.chatKey, target);
             else await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);
+            complete();
             await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
           }
@@ -604,9 +628,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                       abortTurn: (key) => sessions.abortTurn(key, msg.channel, target),
                       resetSession: (key) => sessions.resetSession(key, target),
                     }
-                  : msg.imessageSource
-                    ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, msg.channel) }
-                    : sessions,
+                  : {
+                      ...sessions,
+                      abortTurn: (key) => sessions.abortTurn(key, msg.channel, target),
+                    },
                 logger,
                 directory: opts.directory,
                 health: () => health(opts, transport.publicUrl),
@@ -624,6 +649,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               channel: msg.channel,
             });
           }
+          complete();
           await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
@@ -638,6 +664,22 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
                 : undefined,
           });
         await sessions.handleInbound(msg);
+        complete();
+      },
+    };
+    return {
+      ...wrapped,
+      handleInbound: (msg: import("./types.js").InboundMessage) => {
+        if (!msg.whatsappSource) return wrapped.handleInbound(msg);
+        const key = JSON.stringify([msg.whatsappSource.identityId, msg.whatsappSource.messageId]);
+        const previous = ingressRuns.get(key);
+        const task = (previous ?? Promise.resolve())
+          .catch(() => {})
+          .then(() => wrapped.handleInbound(msg));
+        ingressRuns.set(key, task);
+        return task.finally(() => {
+          if (ingressRuns.get(key) === task) ingressRuns.delete(key);
+        });
       },
     };
   }

@@ -1,6 +1,7 @@
 // The advertised tool surface is a compatibility contract: names, groups,
 // default-enabled state, and the sensitive set. Renaming or re-gating a tool
 // is a breaking change and must show up here as a deliberate diff.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { buildAllTools } from "../../src/tools/index.js";
@@ -140,6 +141,29 @@ describe("tool vocabulary", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
     expect(names).toHaveLength(72);
+  });
+
+  it("documents the actual default counts and complete grouped tool inventory", () => {
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    expect(readme).toContain(
+      `${DEFAULT_ENABLED.length} tools are enabled by default; ${OPT_IN.length} more are opt-in`,
+    );
+    for (const group of GROUPS) {
+      const row = readme.split("\n").find((line) => line.startsWith(`| \`${group}\` |`));
+      expect(row, group).toBeDefined();
+      const columns = row!.split("|");
+      for (const enabled of [true, false]) {
+        const documented = [...columns[enabled ? 2 : 3].matchAll(/`(inkbox_[a-z0-9_]+)`/g)]
+          .map((match) => match[1])
+          .sort();
+        expect(documented).toEqual(
+          all
+            .filter((tool) => tool.group === group && tool.defaultEnabled === enabled)
+            .map((tool) => tool.name)
+            .sort(),
+        );
+      }
+    }
   });
 
   it("has no duplicate tool names", () => {

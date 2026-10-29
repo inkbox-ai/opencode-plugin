@@ -356,12 +356,12 @@ export function whatsappRecipients(value: unknown): string[] {
   return numbers;
 }
 
-/** Reserve control consumption before side effects; retain the first session route. */
+/** Retain the first route, but distinguish reservation from completed control handling. */
 export function reserveWhatsAppIngress(
   message: InboundMessage,
   control: boolean,
   store: StateStore,
-): { first: boolean; chatKey: string; control: boolean } {
+): { first: boolean; chatKey: string; control: boolean; completed: boolean; complete(): void } {
   const source = message.whatsappSource;
   if (!source || !message.conversationId || !source.identityId || !source.messageId)
     throw new Error("WhatsApp ingress ownership is unavailable.");
@@ -373,6 +373,7 @@ export function reserveWhatsAppIngress(
     .digest("hex");
   const candidate = {
     ingress: true,
+    completed: false,
     identityId: source.identityId,
     sourceId: source.messageId,
     conversationId: message.conversationId,
@@ -401,5 +402,17 @@ export function reserveWhatsAppIngress(
     result = old;
     return old;
   });
-  return { first, chatKey: result.chatKey, control: result.control };
+  return {
+    first,
+    chatKey: result.chatKey,
+    control: result.control,
+    // Older control receipts were consumed at reservation; never replay those effects.
+    completed: result.completed ?? result.control,
+    complete() {
+      store.updateWhatsAppSend(key, (entry) => ({
+        ...(entry as typeof candidate),
+        completed: true,
+      }));
+    },
+  };
 }

@@ -1139,3 +1139,76 @@ it("restores an exact saved explicit quote on key-only retry without replacing i
   expect(identity.sendWhatsApp.mock.calls[0][0]).toEqual(identity.sendWhatsApp.mock.calls[1][0]);
   expect(identity.sendWhatsApp.mock.calls[1][0].replyToMessageId).toBe("chosen-visible-message");
 });
+
+it.each([false, true])(
+  "retains reaction policy and immutable original operations (remove: %s)",
+  async (remove) => {
+    const f = v2Tools();
+    const method = remove ? f.identity.removeWhatsAppReaction : f.identity.sendWhatsAppReaction;
+    const tool = remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction";
+    const args = remove
+      ? { reactionId: "revision-1", idempotencyKey: "policy-key" }
+      : { messageId: source, reaction: "eyes", idempotencyKey: "policy-key" };
+    method.mockRejectedValueOnce(
+      new InkboxAPIError(409, {
+        error: "whatsapp_reaction_target_unavailable",
+        diagnostic: "not-public",
+      }),
+    );
+    expect(await f.execute(tool, args)).toBe(
+      formatJson({
+        error: "whatsapp_reaction_target_unavailable",
+        status_code: 409,
+        idempotencyKey: "policy-key",
+      }),
+    );
+    const changed = remove ? { ...args, reactionId: "revision-2" } : { ...args, reaction: "love" };
+    await expect(f.execute(tool, changed)).rejects.toThrow("different operation");
+    expect(method).toHaveBeenCalledOnce();
+    // An explicitly new operation is independent of an earlier definitive rejection.
+    await f.execute(tool, { ...changed, idempotencyKey: "new-operation" });
+    await f.execute(tool, args);
+    expect(method).toHaveBeenCalledTimes(3);
+    await f.execute(tool, args);
+    expect(method).toHaveBeenCalledTimes(3);
+  },
+);
+
+it.each([false, true])(
+  "retains uncertain reaction keys across tool reconstruction (remove: %s)",
+  async (remove) => {
+    const f = v2Tools();
+    const method = remove ? f.identity.removeWhatsAppReaction : f.identity.sendWhatsAppReaction;
+    const tool = remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction";
+    const args = remove
+      ? { reactionId: "revision-1", idempotencyKey: "uncertain-key" }
+      : { messageId: source, reaction: "eyes", idempotencyKey: "uncertain-key" };
+    method.mockRejectedValueOnce(new TypeError("lost response"));
+    await expect(f.execute(tool, args)).rejects.toThrow("uncertain-key");
+    expect(method).toHaveBeenCalledOnce();
+    const tools = whatsappTools({
+      runtime: { getIdentity: async () => f.identity },
+      config: { outbound: { approval: "auto", allowedRecipients: [] } },
+    } as any);
+    const execute = (input: any) =>
+      tools.find((item) => item.name === `inkbox_${tool}`)!.definition.execute(input, f.ctx);
+    await expect(
+      execute(remove ? { ...args, reactionId: "revision-2" } : { ...args, reaction: "love" }),
+    ).rejects.toThrow("different operation");
+    expect(method).toHaveBeenCalledOnce();
+    await execute(args);
+    expect(method).toHaveBeenCalledTimes(2);
+    expect(method.mock.calls[1]).toEqual(method.mock.calls[0]);
+    await execute(args);
+    expect(method).toHaveBeenCalledTimes(2);
+    const opposite = remove ? "send_whatsapp_reaction" : "remove_whatsapp_reaction";
+    await expect(
+      f.execute(
+        opposite,
+        remove
+          ? { messageId: source, reaction: "eyes", idempotencyKey: args.idempotencyKey }
+          : { reactionId: "revision-1", idempotencyKey: args.idempotencyKey },
+      ),
+    ).rejects.toThrow("different operation");
+  },
+);

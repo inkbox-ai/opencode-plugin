@@ -682,3 +682,226 @@ it.each(["/stop", "/cancel"])(
     expect(state.getTurn(otherTurn.id)?.state).toBe("submitted");
   },
 );
+
+it.each(["ok", "allow"])(
+  "retries incomplete WhatsApp control-shaped admission: %s",
+  async (text) => {
+    hooks.realSessions = true;
+    const f = await start();
+    enableWhatsApp(f);
+    const state = hooks.manager.state;
+    const reserve = vi.spyOn(state, "reserveWhatsAppTurn");
+    reserve.mockImplementationOnce(() => {
+      throw new Error("admission write failed");
+    });
+    await expect(waInput(text, "+15550000001", "retry-control")).rejects.toThrow(
+      "admission write failed",
+    );
+    expect(state.listTurns()).toHaveLength(0);
+    await Promise.all([
+      waInput(text, "+15550000001", "retry-control"),
+      waInput(text, "+15550000001", "retry-control"),
+    ]);
+    expect(state.listTurns()).toHaveLength(1);
+    expect(state.listTurns()[0].sourceIds).toEqual(["retry-control"]);
+    await vi.waitFor(() => expect(f.opencode.session.promptAsync).toHaveBeenCalledOnce());
+  },
+);
+
+it("does not consume a permission until its WhatsApp control checkpoint succeeds", async () => {
+  const f = await start();
+  enableWhatsApp(f);
+  const target: ReplyTarget = {
+    channel: "whatsapp",
+    sender: "+15550000001",
+    conversationId: "wa-conversation",
+  };
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Approve", target)
+    .then((value: string) => {
+      settled = true;
+      return value;
+    });
+  const state = hooks.manager.state;
+  const update = state.updateWhatsAppSend.bind(state);
+  let fail = true;
+  vi.spyOn(state, "updateWhatsAppSend").mockImplementation((key: any, fn: any) =>
+    update(key, (old: any) => {
+      const next = fn(old);
+      if (key.startsWith("ingress:") && next.completed && fail) {
+        fail = false;
+        throw new Error("control checkpoint failed");
+      }
+      return next;
+    }),
+  );
+  await expect(waInput("allow", target.sender!, "retry-approval")).rejects.toThrow(
+    "control checkpoint failed",
+  );
+  expect(settled).toBe(false);
+  await waInput("allow", target.sender!, "retry-approval");
+  expect(await answer).toBe("allow");
+});
+
+it("keeps an admitted control-shaped message out of later permissions after checkpoint failure", async () => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsApp(f);
+  const state = hooks.manager.state;
+  const update = state.updateWhatsAppSend.bind(state);
+  let fail = true;
+  vi.spyOn(state, "updateWhatsAppSend").mockImplementation((key: any, fn: any) =>
+    update(key, (old: any) => {
+      const next = fn(old);
+      if (key.startsWith("ingress:") && next.completed && fail) {
+        fail = false;
+        throw new Error("completion write failed");
+      }
+      return next;
+    }),
+  );
+  await expect(waInput("ok", "+15550000001", "already-admitted")).rejects.toThrow(
+    "completion write failed",
+  );
+  expect(state.listTurns()).toHaveLength(1);
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Later approval", {
+      channel: "whatsapp",
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+    })
+    .then((value: string) => {
+      settled = true;
+      return value;
+    });
+  await waInput("ok", "+15550000001", "already-admitted");
+  expect(settled).toBe(false);
+  expect(state.listTurns()).toHaveLength(1);
+  await waInput("allow", "+15550000001", "fresh-approval");
+  expect(await answer).toBe("allow");
+});
+
+it("does not repeat a completed WhatsApp Stop after reply failure and restart", async () => {
+  const f = await start();
+  enableWhatsApp(f);
+  (f.identity as any).sendWhatsApp.mockRejectedValueOnce(new TypeError("response lost"));
+  await expect(waInput("/stop", "+15550000001", "completed-stop")).rejects.toThrow("not confirmed");
+  expect(hooks.abort).toHaveBeenCalledOnce();
+  await f.gateway.close();
+  const next = await start(undefined, f.dir);
+  enableWhatsApp(next);
+  await waInput("/stop", "+15550000001", "completed-stop");
+  expect(hooks.abort).toHaveBeenCalledOnce();
+  expect((next.identity as any).sendWhatsApp).not.toHaveBeenCalled();
+  await waInput("/stop", "+15550000001", "new-stop");
+  expect(hooks.abort).toHaveBeenCalledTimes(2);
+});
+
+it.each(
+  ["sms", "email", "imessage"].flatMap((channel) =>
+    ["/stop", "/cancel"].flatMap((command) =>
+      [true, false].map((waRunning) => ({ channel, command, waRunning })),
+    ),
+  ),
+)(
+  "scopes $channel $command with shared WhatsApp work (WA running: $waRunning)",
+  async ({ channel, command, waRunning }) => {
+    hooks.realSessions = true;
+    const f = await start();
+    enableWhatsApp(f);
+    Object.assign(f.identity, { sendIMessage: vi.fn(async () => ({ id: "sent-imessage" })) });
+    const sender = channel === "email" ? "person@example.com" : "+15550000001";
+    const input = (text: string): Promise<void> =>
+      hooks.server.onEvent({
+        body: {
+          message: {
+            chatKey: "contact-1",
+            from: sender,
+            channel,
+            text,
+            rawText: text,
+            mediaPaths: [],
+            messageId: `input-${text}`,
+          },
+        },
+      });
+    const state = hooks.manager.state;
+    let pendingWork: Promise<void> | undefined;
+    if (waRunning) await waInput("WA work", "+15550000001", "wa-work");
+    else {
+      pendingWork = input("Other work");
+      void pendingWork.catch(() => {});
+    }
+    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
+    const running = state.listTurns()[0];
+    const sessionID = running.sessionID;
+    if (waRunning) {
+      state.saveTurn({
+        ...running,
+        id: "own-queued",
+        messageID: "own-queued",
+        state: "queued",
+        ownerId: undefined,
+        replyTarget: { channel, sender, to: sender, messageId: "original" },
+      });
+    } else await waInput("WA work", "+15550000001", "wa-work");
+    const own = state.listTurns().find((turn: any) => turn.replyTarget?.channel === channel)!;
+    const wa = state.listTurns().find((turn: any) => turn.replyTarget?.channel === "whatsapp")!;
+    for (const [id, patch] of [
+      ["foreign-author", { sender: "other@example.com" }],
+      ["foreign-route", { conversationId: "another-route" }],
+    ] as const) {
+      state.saveTurn({
+        ...own,
+        id,
+        messageID: id,
+        state: "queued",
+        ownerId: undefined,
+        replyTarget: { ...own.replyTarget, ...patch },
+      });
+    }
+    await input(command);
+    expect(state.getTurn(own.id)?.state).toBe("interrupted");
+    for (const id of ["foreign-author", "foreign-route"])
+      expect(state.getTurn(id)?.state).toBe("queued");
+    expect(state.getTurn(wa.id)?.state).not.toBe("interrupted");
+    expect(state.getSession("contact-1")).toBe(sessionID);
+    if (waRunning) {
+      expect(f.opencode.session.abort).not.toHaveBeenCalled();
+      expect(state.getTurn(wa.id)?.state).toBe("submitted");
+    } else {
+      await pendingWork;
+      expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(state.getTurn(wa.id)?.state).toBe("submitted"));
+      await input(command);
+      expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+    }
+    const send =
+      channel === "sms"
+        ? f.identity.sendText
+        : channel === "email"
+          ? f.identity.replyAllEmail
+          : (f.identity as any).sendIMessage;
+    expect(JSON.stringify(send.mock.calls[0])).toContain("Stopped.");
+  },
+);
+
+it.each(["/clear", "/new"])(
+  "retries an incomplete WhatsApp command without repeating its completed effect: %s",
+  async (command) => {
+    const f = await start();
+    enableWhatsApp(f);
+    hooks.reset.mockRejectedValueOnce(new Error("reset not admitted"));
+    await expect(waInput(command, "+15550000001", "retry-reset")).rejects.toThrow(
+      "reset not admitted",
+    );
+    await Promise.all([
+      waInput(command, "+15550000001", "retry-reset"),
+      waInput(command, "+15550000001", "retry-reset"),
+    ]);
+    expect(hooks.reset).toHaveBeenCalledTimes(2);
+    expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
+  },
+);

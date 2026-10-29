@@ -309,8 +309,28 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         });
         assertWhatsAppOwner(owner, store);
         if (ctx.abort?.aborted) throw new Error("The originating tool was cancelled.");
+        const operation = remove
+          ? { remove: args.reactionId }
+          : { messageId: args.messageId, reaction: args.reaction, customEmoji: args.customEmoji };
+        const key = `reaction:${createHash("sha256")
+          .update(JSON.stringify([identity.id, args.idempotencyKey]))
+          .digest("hex")}`;
+        const entry = {
+          identityId: identity.id,
+          idempotencyKey: args.idempotencyKey,
+          operation: JSON.stringify(operation),
+          state: "started",
+        };
+        let previous: (typeof entry & { result?: unknown }) | undefined;
+        store.updateWhatsAppSend(key, (existing) => {
+          previous = existing as typeof previous;
+          if (previous && previous.operation !== entry.operation)
+            throw new Error("The original WhatsApp reaction key belongs to a different operation.");
+          return previous?.state === "accepted" ? previous : entry;
+        });
+        if (previous?.state === "accepted") return previous.result;
         try {
-          return remove
+          const result = remove
             ? await identity.removeWhatsAppReaction(args.reactionId, args.idempotencyKey)
             : await identity.sendWhatsAppReaction({
                 messageId: args.messageId,
@@ -319,7 +339,17 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
                   : { customEmoji: args.customEmoji }),
                 idempotencyKey: args.idempotencyKey,
               });
-        } catch {
+          store.updateWhatsAppSend(key, () => ({ ...entry, state: "accepted", result }));
+          return result;
+        } catch (error) {
+          const policy = publicWhatsAppPolicy(error);
+          if (policy) {
+            store.updateWhatsAppSend(key, () => ({ ...entry, state: "rejected", policy }));
+            throw Object.assign(new Error("WhatsApp reaction request was not accepted."), {
+              whatsappPolicy: policy,
+              idempotencyKey: args.idempotencyKey,
+            });
+          }
           throw new Error(
             `WhatsApp reaction outcome is not confirmed. Retain the exact operation and idempotencyKey=${args.idempotencyKey}; do not create another request. Queued or uncertain is not applied.`,
           );
