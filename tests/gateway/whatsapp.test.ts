@@ -189,7 +189,7 @@ it("records callback-first delivery facts without content, downgrades, wakeups, 
   expect(store.listTurns()).toEqual([]);
 });
 
-it("refreshes inbound owned media, preserves contact session convergence, and ignores groups/other owners/echoes/status-only events", async () => {
+it("refreshes inbound owned media, preserves contact session convergence, and ignores malformed groups/other owners/echoes/status-only events", async () => {
   const store = state(),
     handleInbound = vi.fn(async (_message: unknown) => {});
   const identity: any = {
@@ -245,7 +245,7 @@ it("refreshes inbound owned media, preserves contact session convergence, and ig
   });
   expect(vi.mocked(fetch).mock.calls[0][0]).toBe("https://media.test/fresh");
   for (const changes of [
-    { is_group: true },
+    { is_group: true, sender_number: null },
     { agent_identity_id: "other" },
     { sender_number: "+15555550100" },
   ])
@@ -554,3 +554,286 @@ it.each([
     expect(hasExplicitWhatsAppReply(target, store)).toBe(to !== "+15555550102");
   },
 );
+
+function v2Tools(allowedRecipients: string[] = []) {
+  state();
+  vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+  const identity: any = {
+    id: owner,
+    getWhatsAppConversation: vi.fn(async () => ({
+      agentIdentityId: owner,
+      isGroup: true,
+      participants: ["+15555550101", "+15555550102"],
+      unresolvedParticipantCount: 0,
+    })),
+    getWhatsAppMessage: vi.fn(async () => ({
+      agentIdentityId: owner,
+      conversationId: conversation,
+    })),
+    getWhatsAppReaction: vi.fn(async () => ({ targetMessageId: source })),
+    sendWhatsApp: vi.fn(async () => ({
+      id: "accepted",
+      conversationId: conversation,
+      status: "queued",
+    })),
+    sendWhatsAppReaction: vi.fn(async () => ({
+      reaction: { id: "reaction", status: "queued", revision: 1 },
+    })),
+    removeWhatsAppReaction: vi.fn(async () => ({
+      reaction: { id: "reaction", status: "removed" },
+    })),
+    getWhatsAppThread: vi.fn(async () => ({
+      conversationId: conversation,
+      threadId: null,
+      threadRootMessageId: null,
+      messages: [],
+      nextCursor: null,
+    })),
+  };
+  const ctx: any = {
+    sessionID: "test-session",
+    messageID: "assistant",
+    directory: "/tmp",
+    ask: vi.fn(async () => {}),
+    abort: new AbortController().signal,
+  };
+  const tools = whatsappTools({
+    runtime: { getIdentity: async () => identity },
+    config: { outbound: { approval: "auto", allowedRecipients, askTimeoutMs: 100 } },
+  } as any);
+  return {
+    identity,
+    ctx,
+    tools,
+    execute: (name: string, args: any) =>
+      tools.find((tool) => tool.name === `inkbox_${name}`)!.definition.execute(args, ctx),
+  };
+}
+it("supports group creation and explicit quotes while enforcing every participant permission", async () => {
+  const f = v2Tools(["+15555550101", "+15555550102"]);
+  expect(f.tools).toHaveLength(15);
+  await f.execute("send_whatsapp", {
+    to: ["+1 (555)555-0101", "+15555550102"],
+    groupName: "Team",
+    text: "Hello",
+    idempotencyKey: "group-key",
+  });
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({
+    to: ["+15555550101", "+15555550102"],
+    groupName: "Team",
+    text: "Hello",
+    idempotencyKey: "group-key",
+  });
+  await f.execute("send_whatsapp", {
+    conversationId: conversation,
+    replyToMessageId: source,
+    text: "Quoted",
+    idempotencyKey: "quote-key",
+  });
+  expect(f.identity.sendWhatsApp.mock.calls[1][0]).toEqual({
+    conversationId: conversation,
+    replyToMessageId: source,
+    text: "Quoted",
+    idempotencyKey: "quote-key",
+  });
+  for (const to of [
+    ["+15555550101", "+15555550103"],
+    ["+15555550101", "+1 (555)555-0101"],
+    ["123@g.us"],
+  ])
+    await expect(f.execute("send_whatsapp", { to, text: "Blocked" })).rejects.toThrow();
+  await expect(
+    f.execute("send_whatsapp", { to: "+15555550101", replyToMessageId: source, text: "Bad" }),
+  ).rejects.toThrow("requires conversationId");
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+});
+it("addresses larger existing groups by ID and rejects unresolved or foreign conversation targets", async () => {
+  const f = v2Tools();
+  f.identity.getWhatsAppConversation.mockResolvedValue({
+    agentIdentityId: owner,
+    isGroup: true,
+    participants: Array.from({ length: 10 }, (_, i) => `+15555550${String(120 + i)}`),
+  });
+  await f.execute("send_whatsapp", {
+    conversationId: conversation,
+    text: "All",
+    idempotencyKey: "large-group",
+  });
+  expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("to");
+  for (const change of [{ agentIdentityId: "foreign" }, { unresolvedParticipantCount: 1 }]) {
+    f.identity.getWhatsAppConversation.mockResolvedValue({
+      agentIdentityId: owner,
+      participants: ["+15555550101"],
+      ...change,
+    });
+    await expect(
+      f.execute("send_whatsapp", {
+        conversationId: conversation,
+        text: "Blocked",
+        idempotencyKey: "blocked",
+      }),
+    ).rejects.toThrow("resolved conversation");
+  }
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+});
+it("retains explicit quote and destination identity across lost-response retries instead of issuing a new send", async () => {
+  const store = state(),
+    sendWhatsApp = vi.fn().mockRejectedValue(new TypeError("timeout")),
+    identity: any = { id: owner, sendWhatsApp };
+  const payload = { text: "Quoted", replyToMessageId: source };
+  await expect(
+    (await prepareWhatsApp(identity, target, payload, store, "original-quote"))(),
+  ).rejects.toThrow("original-quote");
+  await expect(
+    (await prepareWhatsApp(identity, target, payload, store, "original-quote"))(),
+  ).rejects.toThrow("outcome is unconfirmed");
+  await expect(
+    (
+      await prepareWhatsApp(
+        identity,
+        target,
+        { ...payload, replyToMessageId: "another" },
+        store,
+        "original-quote",
+      )
+    )(),
+  ).rejects.toThrow("different payload");
+  expect(sendWhatsApp).toHaveBeenCalledOnce();
+});
+it("preserves reaction receipts and exact keys without claiming queued means applied", async () => {
+  const f = v2Tools();
+  f.identity.sendWhatsAppReaction.mockRejectedValueOnce(new TypeError("timeout"));
+  const args = { messageId: source, reaction: "eyes", idempotencyKey: "reaction-key" };
+  await expect(f.execute("send_whatsapp_reaction", args)).rejects.toThrow("reaction-key");
+  expect(await f.execute("send_whatsapp_reaction", args)).toContain('"queued"');
+  expect(f.identity.sendWhatsAppReaction.mock.calls[0][0]).toEqual(
+    f.identity.sendWhatsAppReaction.mock.calls[1][0],
+  );
+  await f.execute("remove_whatsapp_reaction", {
+    reactionId: "reaction",
+    idempotencyKey: "remove-key",
+  });
+  expect(f.identity.removeWhatsAppReaction).toHaveBeenCalledWith("reaction", "remove-key");
+  await expect(f.execute("send_whatsapp_reaction", { ...args, customEmoji: "👀" })).rejects.toThrow(
+    "Specify reaction or customEmoji",
+  );
+  expect(f.identity.sendWhatsAppReaction).toHaveBeenCalledTimes(2);
+});
+it("reads nullable unthreaded envelopes without inventing thread IDs", async () => {
+  const f = v2Tools();
+  expect(await f.execute("get_whatsapp_thread", { messageId: source, limit: 50 })).toContain(
+    '"threadId": null',
+  );
+  expect(f.identity.getWhatsAppThread).toHaveBeenCalledWith(source, {
+    limit: 50,
+    cursor: undefined,
+  });
+});
+it("routes group messages and peer reactions by conversation while checking the actual author", async () => {
+  const handleInbound = vi.fn(),
+    chatKeyFor = vi.fn((input) => input.contactId ?? `group:${input.conversationId}`);
+  const deps: any = {
+    config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true } },
+    inkbox: { getIdentity: async () => ({ id: owner }) },
+    contacts: { resolve: vi.fn(async () => ({ contactId: "same-contact" })), chatKeyFor },
+    sessions: { handleInbound },
+    state: state(),
+    notify: createNotifyOnce(),
+    logger,
+  };
+  const message = {
+    ...wire,
+    remote_number: null,
+    is_group: true,
+    direction: "inbound",
+    sender_number: "+15555550101",
+    participants: ["+15555550101", "+15555550102"],
+  };
+  const e: any = {
+    provider: "inkbox",
+    verified: true,
+    eventType: "whatsapp.received",
+    body: { data: { message } },
+    headers: {},
+  };
+  await dispatchEvent(deps, e);
+  expect(handleInbound.mock.calls[0][0]).toMatchObject({
+    chatKey: `group:${conversation}`,
+    group: { participantCount: 2 },
+    from: "+15555550101",
+  });
+  const reaction = {
+    id: "reaction-1",
+    revision: 1,
+    agent_identity_id: owner,
+    conversation_id: conversation,
+    target_message_id: source,
+    direction: "inbound",
+    remote_number: "+15555550102",
+    status: "applied",
+    emoji: "👀",
+  };
+  await dispatchEvent(deps, {
+    ...e,
+    eventType: "whatsapp.reaction_received",
+    body: { data: { message: { ...message, direction: "outbound" }, reaction } },
+  });
+  expect(handleInbound.mock.calls[1][0]).toMatchObject({
+    messageId: "reaction:reaction-1:1:applied",
+    chatKey: `group:${conversation}`,
+    reaction: true,
+    from: "+15555550102",
+  });
+  expect(handleInbound.mock.calls[1][0].text).toContain("context, not a new instruction");
+  await dispatchEvent(deps, {
+    ...e,
+    eventType: "whatsapp.reaction_received",
+    body: { data: { message, reaction: { ...reaction, direction: "outbound" } } },
+  });
+  await dispatchEvent(deps, {
+    ...e,
+    body: { data: { message: { ...message, sender_number: null } } },
+  });
+  await dispatchEvent(deps, {
+    ...e,
+    eventType: "whatsapp.reaction_received",
+    body: { data: { message: { ...message, is_blocked: true }, reaction } },
+  });
+  expect(handleInbound).toHaveBeenCalledTimes(2);
+  await dispatchEvent(deps, {
+    ...e,
+    eventType: "whatsapp.reaction_received",
+    body: { data: { message, reaction: { ...reaction, revision: 2, status: "removed" } } },
+  });
+  expect(handleInbound.mock.calls[2][0]).toMatchObject({
+    messageId: "reaction:reaction-1:2:removed",
+    reaction: true,
+  });
+});
+
+it.each(["whatsapp_new_group_limit", "whatsapp_group_unanswered_limit"])(
+  "curates the exact server group-policy rejection %s",
+  (code) => {
+    expect(
+      publicWhatsAppPolicy(
+        new InkboxAPIError(429, {
+          error: code,
+          quota: "whatsapp.groups_per_24h",
+          limit: 5,
+          private_detail: "not-public",
+        }),
+      ),
+    ).toEqual({ error: code, quota: "whatsapp.groups_per_24h", limit: 5, status_code: 429 });
+  },
+);
+it("checks every group peer before a reaction write", async () => {
+  const f = v2Tools(["+15555550101"]);
+  await expect(
+    f.execute("send_whatsapp_reaction", {
+      messageId: source,
+      reaction: "eyes",
+      idempotencyKey: "blocked-key",
+    }),
+  ).rejects.toThrow("not on the outbound allowlist");
+  expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
+});

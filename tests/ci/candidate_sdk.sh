@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare an exact public SDK candidate, preserving normal package metadata.
 set -euo pipefail
-revision=5bf65d4dfa6d8cfe65ec13a39ffa89a66ecb6b97
+revision=e406508e0645531cf893fc52c2c4c3a48a980644
 root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-${revision}"
 if [[ ! -d "$root/source/.git" ]]; then
   mkdir -p "$root"
@@ -11,7 +11,7 @@ if [[ ! -d "$root/source/.git" ]]; then
   git -C "$root/source" checkout --detach FETCH_HEAD >&2
 fi
 [[ "$(git -C "$root/source" rev-parse HEAD)" == "$revision" ]]
-archive="$root/inkbox-sdk-0.7.21.tgz"
+archive="$root/inkbox-sdk-0.7.24.tgz"
 if [[ ! -f "$archive" ]]; then
   (cd "$root/source/sdk/typescript" && npm ci --ignore-scripts >&2 && npm run build >&2 && npm pack --pack-destination "$root" >&2)
 fi

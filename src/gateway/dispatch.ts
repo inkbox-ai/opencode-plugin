@@ -740,12 +740,36 @@ async function conversationParticipants(
 
 async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (!event.verified || event.body.companion != null) return false;
-  const message = resourceOf(event.body, "message");
+  let message = resourceOf(event.body, "message");
   if (!message) return true;
   const identity = await deps.inkbox.getIdentity();
-  if (message.agent_identity_id !== identity.id) return true;
+  if (message.agent_identity_id !== identity.id || message.is_blocked === true) return true;
   const type = event.eventType ?? inferType(event.body);
-  if (type !== "whatsapp.received") {
+  const reaction =
+    type === "whatsapp.reaction_received" ? resourceOf(event.body, "reaction") : undefined;
+  if (reaction) {
+    if (
+      reaction.direction !== "inbound" ||
+      !["applied", "removed"].includes(String(reaction.status)) ||
+      reaction.agent_identity_id !== identity.id ||
+      reaction.conversation_id !== message.conversation_id ||
+      reaction.target_message_id !== message.id ||
+      typeof reaction.id !== "string" ||
+      !Number.isInteger(reaction.revision) ||
+      Number(reaction.revision) < 1
+    )
+      return true;
+    message = {
+      ...message,
+      id: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`,
+      sender_number: reaction.remote_number,
+      remote_number: reaction.remote_number,
+      direction: "inbound",
+      media: [],
+      content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${reaction.target_message_id}. A reaction is context, not a new instruction. Reply only if warranted; otherwise return exactly ${SILENT}.`,
+    };
+  }
+  if (type !== "whatsapp.received" && !reaction) {
     if (WHATSAPP_EVENTS.includes(type ?? ""))
       recordWhatsAppStatus(message, identity.id, deps.state ?? createStateStore());
     return true;
@@ -759,11 +783,17 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     !conversationId ||
     !messageId ||
     message.direction !== "inbound" ||
-    message.is_group ||
+    typeof message.is_group !== "boolean" ||
+    !/^\+[1-9]\d{6,14}$/.test(from) ||
     !Array.isArray(participants) ||
-    participants.length !== 1 ||
-    participants[0] !== from ||
-    from !== message.remote_number ||
+    !participants.length ||
+    participants.some(
+      (number) => typeof number !== "string" || !/^\+[1-9]\d{6,14}$/.test(number),
+    ) ||
+    new Set(participants).size !== participants.length ||
+    !participants.includes(from) ||
+    (!message.is_group && participants.length !== 1) ||
+    (!message.is_group && from !== message.remote_number) ||
     from === message.local_number
   )
     return true;
@@ -809,12 +839,16 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     : [];
   await deps.sessions.handleInbound({
     channel: "whatsapp",
-    chatKey: deps.contacts.chatKeyFor({
-      channel: "whatsapp",
-      contactId: resolved.contactId,
-      conversationId,
-      from,
-    }),
+    chatKey: messageChatKey(
+      deps,
+      {
+        channel: "whatsapp",
+        contactId: resolved.contactId,
+        conversationId,
+        from,
+      },
+      message.is_group ? Math.max(2, participants.length) : 1,
+    ),
     from,
     conversationId,
     messageId,
@@ -823,10 +857,17 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),
+      ...(reaction
+        ? { reactionId: String(reaction.id), targetMessageId: String(reaction.target_message_id) }
+        : {}),
     },
-    ...(resolved.contactId
+    ...(resolved.contactId || message.is_group
       ? {}
       : { senderAgent: senderAgentIdentity("whatsapp", event.body, from) }),
+    ...(message.is_group
+      ? { group: { participantCount: participants.length, participants: participants as string[] } }
+      : {}),
+    ...(reaction ? { reaction: true } : {}),
     contactMemories,
     text,
     rawText: str(message.content) ?? "",

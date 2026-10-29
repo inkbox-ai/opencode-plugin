@@ -11,6 +11,7 @@ import {
   prepareWhatsApp,
   publicWhatsAppPolicy,
   WHATSAPP_MAX_MEDIA_BYTES,
+  whatsappRecipients,
   whatsappToolOwner,
 } from "../whatsapp-native.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -30,7 +31,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     const identity = await deps.runtime.getIdentity();
     const call = (identity as any)[method];
     if (typeof call !== "function")
-      throw new Error("WhatsApp requires Inkbox SDK 0.7.21 or newer.");
+      throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
     if (method === "getWhatsAppStatus") {
       const status = await call.call(identity);
       let limits = null;
@@ -58,8 +59,8 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "list_whatsapp_conversations",
-      "List one-to-one WhatsApp conversations and local unread counts.",
-      page,
+      "List direct and group WhatsApp conversations and local unread counts.",
+      { ...page, includeGroups: z.boolean().optional() },
       read("listWhatsAppConversations"),
     ],
     [
@@ -71,7 +72,12 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     [
       "list_whatsapp_messages",
       "List WhatsApp messages newest first.",
-      { ...page, conversationId: z.string() },
+      {
+        ...page,
+        conversationId: z.string().optional(),
+        includeGroups: z.boolean().optional(),
+        threadId: z.string().optional(),
+      },
       read("listWhatsAppMessages"),
     ],
     [
@@ -79,6 +85,38 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       "Read sending and delivery state without resending.",
       { messageId: z.string() },
       read("getWhatsAppMessage"),
+    ],
+    [
+      "get_whatsapp_thread",
+      "Read a chronological quoted-reply thread.",
+      { messageId: z.string(), limit: page.limit, cursor: z.string().optional() },
+      async (args) =>
+        (await deps.runtime.getIdentity()).getWhatsAppThread(args.messageId, {
+          limit: args.limit,
+          cursor: args.cursor,
+        }),
+    ],
+    [
+      "get_whatsapp_conversation_thread",
+      "Read one conversation's quoted-reply thread.",
+      {
+        conversationId: z.string(),
+        threadId: z.string(),
+        limit: page.limit,
+        cursor: z.string().optional(),
+      },
+      async (args) =>
+        (await deps.runtime.getIdentity()).getWhatsAppConversationThread(
+          args.conversationId,
+          args.threadId,
+          { limit: args.limit, cursor: args.cursor },
+        ),
+    ],
+    [
+      "get_whatsapp_reaction",
+      "Read a reaction receipt; queued or uncertain is not applied.",
+      { reactionId: z.string() },
+      async (args) => (await deps.runtime.getIdentity()).getWhatsAppReaction(args.reactionId),
     ],
     [
       "get_whatsapp_media",
@@ -138,9 +176,11 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "send_whatsapp",
-      "Send one-to-one WhatsApp text and one owned media ID. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
+      "Send WhatsApp text/media to one recipient, 2–8 recipients for a group, or an existing direct/group conversation. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
       {
-        to: z.string().optional(),
+        to: z.union([z.string(), z.array(z.string()).min(1).max(8)]).optional(),
+        replyToMessageId: z.string().optional(),
+        groupName: z.string().min(1).max(100).optional(),
         conversationId: z.string().optional(),
         text: z.string().optional(),
         mediaId: z.string().optional(),
@@ -159,9 +199,20 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const conversation = args.conversationId
           ? await identity.getWhatsAppConversation(args.conversationId)
           : undefined;
-        if (conversation?.isGroup || (conversation && conversation.participants.length !== 1))
-          throw new Error("Only one-to-one WhatsApp is supported.");
-        const recipients = args.to ? [args.to] : (conversation?.participants ?? []);
+        const explicitRecipients = args.to === undefined ? undefined : whatsappRecipients(args.to);
+        if (args.replyToMessageId && !args.conversationId)
+          throw new Error("replyToMessageId requires conversationId.");
+        if (args.groupName && (!explicitRecipients || explicitRecipients.length < 2))
+          throw new Error("groupName is only a group creation hint.");
+        if (
+          conversation &&
+          (conversation.agentIdentityId !== identity.id ||
+            !conversation.participants.length ||
+            (conversation.unresolvedParticipantCount ?? 0) > 0 ||
+            conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number)))
+        )
+          throw new Error("A resolved conversation owned by this identity is required.");
+        const recipients = explicitRecipients ?? conversation?.participants ?? [];
         await approveOutbound(ctx, deps.config, {
           tool: "inkbox_send_whatsapp",
           recipients,
@@ -174,6 +225,8 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const payload = {
           ...(args.text !== undefined ? { text: args.text } : {}),
           ...(args.mediaId ? { mediaIds: [args.mediaId] } : {}),
+          ...(args.replyToMessageId ? { replyToMessageId: args.replyToMessageId } : {}),
+          ...(args.groupName ? { groupName: args.groupName } : {}),
         };
         const source = owner?.nativeOwner?.turnId ?? ctx.messageID;
         const key =
@@ -185,11 +238,17 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         const sameConversation =
           owner?.channel === "whatsapp" &&
           (args.conversationId === owner.conversationId ||
-            (/^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
+            (!owner.group && /^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
         const target = {
           ...(owner ?? {}),
           channel: "whatsapp" as const,
-          to: sameConversation ? undefined : args.to,
+          to: sameConversation
+            ? undefined
+            : typeof args.to === "string"
+              ? explicitRecipients?.[0]
+              : undefined,
+          whatsappRecipients:
+            !sameConversation && Array.isArray(args.to) ? explicitRecipients : undefined,
           conversationId: sameConversation ? owner.conversationId : args.conversationId,
           messageId: owner?.messageId ?? ctx.messageID,
         };
@@ -199,6 +258,67 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       },
     ],
   ];
+  for (const remove of [false, true])
+    specs.push([
+      remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction",
+      remove
+        ? "Remove this exact reaction revision. Keep the original key after uncertainty."
+        : "React with a named reaction or custom emoji. Queued or uncertain is not applied; keep the original key.",
+      remove
+        ? { reactionId: z.string(), idempotencyKey: z.string().min(1) }
+        : {
+            messageId: z.string(),
+            reaction: z
+              .enum(["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"])
+              .optional(),
+            customEmoji: z.string().min(1).max(32).optional(),
+            idempotencyKey: z.string().min(1),
+          },
+      async (args, ctx) => {
+        if (!remove && Boolean(args.reaction) === Boolean(args.customEmoji))
+          throw new Error("Specify reaction or customEmoji.");
+        const store = createStateStore();
+        const owner = await whatsappToolOwner(ctx.sessionID, ctx, deps.opencode, store);
+        const identity = await deps.runtime.getIdentity();
+        if (owner?.whatsappSource && owner.whatsappSource.identityId !== identity.id)
+          throw new Error("The originating identity changed.");
+        const receipt = remove ? await identity.getWhatsAppReaction(args.reactionId) : undefined;
+        const message = await identity.getWhatsAppMessage(
+          receipt?.targetMessageId ?? args.messageId,
+        );
+        const conversation = await identity.getWhatsAppConversation(message.conversationId);
+        if (
+          message.agentIdentityId !== identity.id ||
+          conversation.agentIdentityId !== identity.id ||
+          !conversation.participants.length ||
+          (conversation.unresolvedParticipantCount ?? 0) > 0 ||
+          conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number))
+        )
+          throw new Error("The reaction target must belong to a resolved owned conversation.");
+        await approveOutbound(ctx, deps.config, {
+          tool: remove ? "inkbox_remove_whatsapp_reaction" : "inkbox_send_whatsapp_reaction",
+          recipients: conversation.participants,
+          summary: "Apply the requested WhatsApp reaction operation",
+        });
+        assertWhatsAppOwner(owner, store);
+        if (ctx.abort?.aborted) throw new Error("The originating tool was cancelled.");
+        try {
+          return remove
+            ? await identity.removeWhatsAppReaction(args.reactionId, args.idempotencyKey)
+            : await identity.sendWhatsAppReaction({
+                messageId: args.messageId,
+                ...(args.reaction
+                  ? { reaction: args.reaction }
+                  : { customEmoji: args.customEmoji }),
+                idempotencyKey: args.idempotencyKey,
+              });
+        } catch {
+          throw new Error(
+            `WhatsApp reaction outcome is not confirmed. Retain the exact operation and idempotencyKey=${args.idempotencyKey}; do not create another request. Queued or uncertain is not applied.`,
+          );
+        }
+      },
+    ]);
   return specs.map(([name, description, args, execute]) => ({
     name: `inkbox_${name}`,
     group: "whatsapp",

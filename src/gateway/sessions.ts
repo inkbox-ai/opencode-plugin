@@ -1714,12 +1714,16 @@ export function createSessionManager(
           ...(msg.whatsappSource
             ? {
                 burstKey:
-                  !msg.whatsappSource.mediaIds?.length && !msg.text.trim().startsWith("/")
+                  !msg.reaction &&
+                  !msg.whatsappSource.mediaIds?.length &&
+                  !msg.text.trim().startsWith("/")
                     ? JSON.stringify(["whatsapp", msg.from, msg.conversationId])
                     : undefined,
                 burstTextChars: [...msg.text].length,
                 retryAt:
-                  !msg.whatsappSource.mediaIds?.length && !msg.text.trim().startsWith("/")
+                  !msg.reaction &&
+                  !msg.whatsappSource.mediaIds?.length &&
+                  !msg.text.trim().startsWith("/")
                     ? Date.now() + 750
                     : undefined,
               }

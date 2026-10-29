@@ -43,7 +43,13 @@ export interface SenderAgentIdentity {
 export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
-  whatsappSource?: { messageId: string; identityId: string; mediaIds?: string[] };
+  whatsappSource?: {
+    messageId: string;
+    identityId: string;
+    mediaIds?: string[];
+    reactionId?: string;
+    targetMessageId?: string;
+  };
   imessageSource?: {
     messageId: string;
     conversationId: string;
@@ -91,7 +97,13 @@ export interface InboundMessage {
 export interface ReplyTarget {
   channel: Channel;
   slack?: SlackRoute;
-  whatsappSource?: { messageId: string; identityId: string; mediaIds?: string[] };
+  whatsappSource?: {
+    messageId: string;
+    identityId: string;
+    mediaIds?: string[];
+    reactionId?: string;
+    targetMessageId?: string;
+  };
   imessageSource?: {
     messageId: string;
     conversationId: string;
@@ -100,6 +112,7 @@ export interface ReplyTarget {
     rootMessageId?: string | null;
   };
   to?: string;
+  whatsappRecipients?: string[];
   conversationId?: string;
   subject?: string;
   rfcMessageId?: string;

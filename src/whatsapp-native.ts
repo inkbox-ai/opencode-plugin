@@ -6,6 +6,7 @@ import type { HostClient } from "./host/types.js";
 
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
+  "whatsapp.reaction_received",
   "whatsapp.sent",
   "whatsapp.delivered",
   "whatsapp.delivery_failed",
@@ -18,6 +19,14 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
     "whatsapp_access_required",
     "whatsapp_contact_not_allowed",
     "whatsapp_media_source_not_allowed",
+  ],
+  409: [
+    "whatsapp_capability_not_ready",
+    "whatsapp_quote_unavailable",
+    "whatsapp_membership_unresolved",
+    "whatsapp_group_unavailable",
+    "whatsapp_reaction_pending",
+    "whatsapp_reaction_target_unavailable",
   ],
   413: ["whatsapp_media_too_large"],
   422: [
@@ -33,6 +42,8 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
   ],
   429: [
     "whatsapp_daily_limit_exceeded",
+    "whatsapp_new_group_limit",
+    "whatsapp_group_unanswered_limit",
     "whatsapp_unanswered_message_limit",
     "whatsapp_conversation_rate_limited",
     "whatsapp_new_contact_rate_limited",
@@ -106,22 +117,24 @@ export function assertWhatsAppText(text: string): void {
 export async function prepareWhatsApp(
   identity: AgentIdentity,
   target: WhatsAppOwner,
-  payload: { text?: string; mediaIds?: string[] },
+  payload: { text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string },
   store = createStateStore(),
   originalKey?: string,
 ) {
   if (typeof identity.sendWhatsApp !== "function")
-    throw new Error("WhatsApp requires Inkbox SDK 0.7.21 or newer.");
+    throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
   assertWhatsAppText(payload.text ?? "");
   const source = target.whatsappSource;
-  if (!(target.conversationId || target.to) || (source && source.identityId !== identity.id))
+  const destination =
+    (target as WhatsAppOwner & { whatsappRecipients?: string[] }).whatsappRecipients ?? target.to;
+  if (!(target.conversationId || destination) || (source && source.identityId !== identity.id))
     throw new Error("The original WhatsApp identity or conversation changed.");
   assertWhatsAppOwner(target, store);
   const logical = createHash("sha256")
     .update(
       JSON.stringify([
         identity.id,
-        target.conversationId ?? target.to,
+        target.conversationId ?? destination,
         source?.messageId ?? target.messageId,
         payload,
       ]),
@@ -135,7 +148,7 @@ export async function prepareWhatsApp(
       identityId: identity.id,
       sourceId: source?.messageId ?? target.messageId,
       conversationId: target.conversationId,
-      to: target.to,
+      to: destination,
       explicit: Boolean(originalKey),
       payload: JSON.stringify(payload),
       idempotencyKey,
@@ -149,7 +162,7 @@ export async function prepareWhatsApp(
         (old.payload !== entry.payload ||
           old.identityId !== entry.identityId ||
           old.conversationId !== entry.conversationId ||
-          old.to !== entry.to)
+          JSON.stringify(old.to) !== JSON.stringify(entry.to))
       )
         throw new Error("The original WhatsApp key belongs to a different payload or destination.");
       return (old as { state?: string } | undefined)?.state === "rejected"
@@ -161,7 +174,7 @@ export async function prepareWhatsApp(
       (previous.payload !== entry.payload ||
         previous.identityId !== entry.identityId ||
         previous.conversationId !== entry.conversationId ||
-        previous.to !== entry.to)
+        JSON.stringify(previous.to) !== JSON.stringify(entry.to))
     )
       throw new Error("The original WhatsApp key belongs to a different payload or destination.");
     if (previous?.state === "sent" && previous.messageId)
@@ -174,7 +187,9 @@ export async function prepareWhatsApp(
       assertWhatsAppOwner(target, store);
       const message = await identity.sendWhatsApp({
         ...payload,
-        ...(target.conversationId ? { conversationId: target.conversationId } : { to: target.to }),
+        ...(target.conversationId
+          ? { conversationId: target.conversationId }
+          : { to: destination }),
         idempotencyKey,
       });
       store.updateWhatsAppSend(idempotencyKey, () => ({
@@ -282,4 +297,23 @@ export function publicWhatsAppPolicy(error: unknown): Record<string, unknown> | 
     result.retry_after_seconds = original.retryAfterSeconds;
   if (Number.isInteger(original.statusCode)) result.status_code = original.statusCode;
   return result;
+}
+
+/** Normalize human phone inputs only. Group identifiers are never phone numbers. */
+export function whatsappRecipients(value: unknown): string[] {
+  const raw = typeof value === "string" ? [value] : value;
+  if (
+    !Array.isArray(raw) ||
+    raw.length < 1 ||
+    raw.length > 8 ||
+    raw.some((number) => typeof number !== "string")
+  )
+    throw new Error("Use one to eight unique E.164 recipients.");
+  const numbers = raw.map((number: string) => number.replace(/[\s().-]/g, ""));
+  if (
+    numbers.some((number) => !/^\+[1-9]\d{6,14}$/.test(number)) ||
+    new Set(numbers).size !== numbers.length
+  )
+    throw new Error("Use one to eight unique E.164 recipients.");
+  return numbers;
 }

@@ -42,6 +42,11 @@ const DEFAULT_ENABLED = [
   "inkbox_mark_whatsapp_read",
   "inkbox_get_whatsapp_status",
   "inkbox_lookup_whatsapp_send",
+  "inkbox_get_whatsapp_thread",
+  "inkbox_get_whatsapp_conversation_thread",
+  "inkbox_send_whatsapp_reaction",
+  "inkbox_get_whatsapp_reaction",
+  "inkbox_remove_whatsapp_reaction",
 
   "inkbox_a2a_call",
   "inkbox_a2a_check",
@@ -131,10 +136,10 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 67 default-configuration tools", () => {
+  it("ships exactly the expected 72 default-configuration tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(67);
+    expect(names).toHaveLength(72);
   });
 
   it("has no duplicate tool names", () => {

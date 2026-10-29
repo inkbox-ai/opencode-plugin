@@ -59,7 +59,7 @@
     "opencode": ">=1.15.0 <2.0.0 || >=2.0.26 <2.1.0"
   },
   "dependencies": {
-    "@inkbox/sdk": "^0.7.21",
+    "@inkbox/sdk": "^0.7.24",
     "@opencode-ai/sdk": ">=1.17.18 <1.19.0",
     "@opencode/client": "2.0.26",
     "@opencode/plugin": "2.0.26",

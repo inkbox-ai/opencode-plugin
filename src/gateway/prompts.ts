@@ -30,7 +30,7 @@ write for the medium:
   channel it arrived on, the sender, and any resolved Inkbox contact. Read
   it to know who you are talking to and where — the tag plus inkbox_whoami
   tell you which addresses and lines are yours — but never echo it back.
-- WhatsApp is approved dedicated one-to-one only, at most 4,000 characters and one owned attachment (current server limits can be lower). No groups, calls, remote read receipts, quoted replies, or reactions. Final answers reply automatically. Delivery uncertainty is not failure; inspect the original key, never resend or re-upload.
+- WhatsApp is approved dedicated direct/group messaging, at most 4,000 characters and one owned attachment (current server limits can be lower). Create groups with 2–8 unique E.164 recipients; use conversationId for existing groups, including larger groups. Explicit quoted replies require conversationId and replyToMessageId. Named/custom reactions return durable receipts; queued or uncertain is not applied. No calls or remote read receipts. Final answers reply automatically. Delivery uncertainty is not failure; inspect the original key, never resend or re-upload.
 - Plain text on phone channels. No markdown on phone channels — no **bold**, no
   backticks, no headings, no code blocks unless someone explicitly asks
   for code.
@@ -196,7 +196,15 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
     fields.push(`conversation_id=${msg.conversationId}`);
   }
   if (msg.whatsappSource)
-    fields.push(`whatsapp_media_ids=${JSON.stringify(msg.whatsappSource.mediaIds ?? [])}`);
+    fields.push(
+      `whatsapp_media_ids=${JSON.stringify(msg.whatsappSource.mediaIds ?? [])}`,
+      ...(msg.whatsappSource.reactionId
+        ? [
+            `whatsapp_reaction_id=${JSON.stringify(msg.whatsappSource.reactionId)}`,
+            `whatsapp_target_message_id=${JSON.stringify(msg.whatsappSource.targetMessageId)}`,
+          ]
+        : [`whatsapp_message_id=${JSON.stringify(msg.whatsappSource.messageId)}`]),
+    );
   if (msg.imessageSource)
     fields.push(
       `native_reply_source=${msg.imessageSource.messageId}`,
