@@ -2,6 +2,7 @@ import type { AgentIdentity } from "@inkbox/sdk";
 import { IncomingCallAction } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
 import { reconcileSlackSubscription } from "../slack.js";
+import { WHATSAPP_EVENTS } from "../whatsapp-native.js";
 import type { GatewayDeps } from "./types.js";
 
 // Path (under the public URL) all gateway webhook subscriptions target.
@@ -187,6 +188,17 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (
+        kind === "whatsapp" &&
+        /whatsapp/i.test(inkboxErrorMessage(err)) &&
+        /event|prefix|unknown|unsupported/i.test(inkboxErrorMessage(err)) &&
+        err instanceof Error &&
+        "statusCode" in err &&
+        [400, 422].includes(Number(err.statusCode))
+      ) {
+        deps.logger.warn("WhatsApp event subscription unavailable on this API version");
+        return;
+      }
       if (kind === "a2a" && isUnsupportedA2AEventTypes(err)) {
         deps.logger.warn(
           "Inkbox API does not support A2A webhook events yet; " + "skipping the A2A subscription",
@@ -207,6 +219,7 @@ export async function reconcileSubscriptions(
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
   await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
+  await reconcileOwner("whatsapp", { agentIdentityId: identity.id }, WHATSAPP_EVENTS);
   if (identity.imessageEnabled) {
     await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
   }

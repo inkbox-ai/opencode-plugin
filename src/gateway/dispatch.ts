@@ -2,6 +2,11 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
+import {
+  recordWhatsAppStatus,
+  WHATSAPP_EVENTS,
+  WHATSAPP_MAX_MEDIA_BYTES,
+} from "../whatsapp-native.js";
 import type { BurstBuffer } from "./burst.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import { matchedContactMemories } from "./contact-memories.js";
@@ -67,6 +72,8 @@ function messageChatKey(deps: DispatchDeps, input: ChatKeyInput, participants: n
 // genuine processing failure (so the request id rolls back and the sender
 // may retry); filtered/ignored events return true (ack, no retry).
 export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
+  if ((event.eventType ?? inferType(event.body))?.startsWith("whatsapp."))
+    return event.provider === "inkbox" ? handleWhatsApp(deps, event) : false;
   if (event.provider !== "inkbox") {
     if (deps.onExternal) {
       void deps
@@ -729,4 +736,154 @@ async function conversationParticipants(
     deps.logger.warn("conversation.lookup_failed", { channel, error: String(error) });
   }
   return inline;
+}
+
+async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
+  if (!event.verified || event.body.companion != null) return false;
+  let message = resourceOf(event.body, "message");
+  if (!message) return true;
+  const identity = await deps.inkbox.getIdentity();
+  if (message.agent_identity_id !== identity.id || message.is_blocked === true) return true;
+  const type = event.eventType ?? inferType(event.body);
+  const reaction =
+    type === "whatsapp.reaction_received" ? resourceOf(event.body, "reaction") : undefined;
+  if (reaction) {
+    if (
+      reaction.direction !== "inbound" ||
+      !["applied", "removed"].includes(String(reaction.status)) ||
+      reaction.agent_identity_id !== identity.id ||
+      reaction.conversation_id !== message.conversation_id ||
+      reaction.target_message_id !== message.id ||
+      typeof reaction.id !== "string" ||
+      !Number.isInteger(reaction.revision) ||
+      Number(reaction.revision) < 1
+    )
+      return true;
+    message = {
+      ...message,
+      id: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`,
+      sender_number: reaction.remote_number,
+      remote_number: reaction.remote_number,
+      direction: "inbound",
+      media: [],
+      content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${reaction.target_message_id}. A reaction is context, not a new instruction. Reply only if warranted; otherwise return exactly ${SILENT}.`,
+    };
+  }
+  if (type !== "whatsapp.received" && !reaction) {
+    if (WHATSAPP_EVENTS.includes(type ?? ""))
+      recordWhatsAppStatus(message, identity.id, deps.state ?? createStateStore());
+    return true;
+  }
+  const from = str(message.sender_number),
+    conversationId = str(message.conversation_id),
+    messageId = str(message.id);
+  const participants = message.participants;
+  if (
+    !from ||
+    !conversationId ||
+    !messageId ||
+    message.direction !== "inbound" ||
+    typeof message.is_group !== "boolean" ||
+    !/^\+[1-9]\d{6,14}$/.test(from) ||
+    !Array.isArray(participants) ||
+    !participants.length ||
+    participants.some(
+      (number) => typeof number !== "string" || !/^\+[1-9]\d{6,14}$/.test(number),
+    ) ||
+    new Set(participants).size !== participants.length ||
+    !participants.includes(from) ||
+    (!message.is_group && participants.length !== 1) ||
+    (!message.is_group && from !== message.remote_number) ||
+    from === message.local_number
+  )
+    return true;
+  const resolved = await deps.contacts.resolve(from);
+  if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
+  const media = Array.isArray(message.media)
+    ? message.media.map(record).filter((item): item is Record<string, unknown> => Boolean(item))
+    : [];
+  if (media.length > 1) return true;
+  const paths: string[] = [];
+  let text = str(message.content) ?? "";
+  for (const item of media) {
+    try {
+      const current = await identity.getWhatsAppMedia(String(item.id));
+      if (current.status === "ready" && current.url)
+        paths.push(
+          ...(await downloadMedia([current.url], {
+            dir: mediaDir(deps.config),
+            maxBytes: WHATSAPP_MAX_MEDIA_BYTES,
+            logger: deps.logger,
+          })),
+        );
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "statusCode" in error &&
+        Number(error.statusCode) === 401
+      )
+        throw error;
+    }
+    if (!paths.length)
+      text += "\n[WhatsApp attachment unavailable; its owned media ID remains retained]";
+  }
+  if (!text.trim() && !paths.length) return true;
+  const contactMemories = deps.config.gateway.contactMemories
+    ? matchedContactMemories(event.body, {
+        channel: "whatsapp",
+        from,
+        contactId: resolved.contactId,
+        allowSoleContactFallback: true,
+      })
+    : [];
+  await deps.sessions.handleInbound({
+    channel: "whatsapp",
+    chatKey: messageChatKey(
+      deps,
+      {
+        channel: "whatsapp",
+        contactId: resolved.contactId,
+        conversationId,
+        from,
+      },
+      message.is_group ? Math.max(2, participants.length) : 1,
+    ),
+    from,
+    conversationId,
+    messageId,
+    ...resolved,
+    whatsappSource: {
+      ...(!reaction ? { autoReplyTarget: messageId } : {}),
+      messageId,
+      identityId: identity.id,
+      mediaIds: media.map((item) => String(item.id)),
+      ...(message.reply_to_message_id !== undefined
+        ? { parentMessageId: message.reply_to_message_id as string | null }
+        : {}),
+      ...(message.thread_id !== undefined ? { threadId: message.thread_id as string | null } : {}),
+      ...(message.thread_root_message_id !== undefined
+        ? { rootMessageId: message.thread_root_message_id as string | null }
+        : {}),
+      ...(reaction
+        ? {
+            reactionId: String(reaction.id),
+            targetMessageId: String(reaction.target_message_id),
+            reactionRevision: Number(reaction.revision),
+          }
+        : {}),
+    },
+    ...(resolved.contactId || message.is_group
+      ? {}
+      : { senderAgent: senderAgentIdentity("whatsapp", event.body, from) }),
+    ...(message.is_group
+      ? { group: { participantCount: participants.length, participants: participants as string[] } }
+      : {}),
+    ...(reaction ? { reaction: true } : {}),
+    contactMemories,
+    text,
+    rawText: str(message.content) ?? "",
+    mediaPaths: paths,
+  });
+  return true;
 }

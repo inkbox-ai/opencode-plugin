@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Inkbox, InkboxConnectionError } from "@inkbox/sdk";
+import { Inkbox, InkboxAPIError, InkboxConnectionError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
@@ -24,6 +24,7 @@ import { createSessionManager, extractText } from "../../src/gateway/sessions.js
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 import * as slackActivity from "../../src/slack-activity.js";
+import { prepareWhatsApp } from "../../src/whatsapp-native.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
@@ -56,6 +57,7 @@ function makeIdentity() {
     getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
     getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
+    sendWhatsApp: vi.fn(async (_options: unknown) => ({ id: "wa-1" })),
   };
 }
 
@@ -3331,4 +3333,485 @@ it("reconciles native permissions after actual recovered ownership, not just cat
   await vi.waitFor(() => expect(observed).toEqual([true]));
   expect(second.opencode.session.promptAsync).not.toHaveBeenCalled();
   await second.mgr.close();
+});
+
+it("durably admits WhatsApp without an iMessage flag and checkpoints the answer and logical key before plain delivery", async () => {
+  const h = makeManager();
+  h.config.gateway.imessageThreadedReplies = false;
+  const input = sms("WhatsApp question", {
+    channel: "whatsapp",
+    messageId: "wa-source",
+    whatsappSource: { messageId: "wa-source", identityId: "identity-1" },
+  });
+  h.identity.sendWhatsApp.mockImplementation(async (options) => {
+    const turn = h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")!;
+    expect(turn.state).toBe("delivery_started");
+    expect(turn.output).toBe("reply");
+    const sends = Object.values(h.state.read().whatsappSends as Record<string, any>);
+    expect(sends[0].idempotencyKey).toBe((options as any).idempotencyKey);
+    expect(options).toEqual({
+      text: "reply",
+      conversationId: "conv-1",
+      idempotencyKey: expect.stringContaining("opencode:whatsapp:"),
+    });
+    return { id: "wa-1" };
+  });
+  try {
+    await h.mgr.handleInbound(input);
+    await h.mgr.handleInbound(input);
+    await vi.waitFor(() =>
+      expect(
+        h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")?.state,
+      ).toBe("delivered"),
+    );
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    expect(h.identity.sendIMessage).not.toHaveBeenCalled();
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+it("keeps uncertain WhatsApp delivery out of model recovery and never sends the saved answer again", async () => {
+  const h = makeManager();
+  h.identity.sendWhatsApp.mockRejectedValue(new Error("lost send response"));
+  try {
+    await h.mgr.handleInbound(
+      sms("WhatsApp question", {
+        channel: "whatsapp",
+        messageId: "wa-source",
+        whatsappSource: { messageId: "wa-source", identityId: "identity-1" },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        h.state.listTurns().find((turn) => turn.replyTarget?.channel === "whatsapp")
+          ?.uncertainStage,
+      ).toBe("delivery"),
+    );
+    await h.mgr.catchUp();
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    const turns = h.state.listTurns();
+    expect(turns).toHaveLength(1);
+    expect(turns[0].output).toBe("reply");
+    expect(turns[0].error).toContain("Do not upload or send a new copy");
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+it.each(["sent", "unconfirmed quote", "rejected quote", "distinct outreach"])(
+  "recovers an unconfirmed submission without replacing its explicit WhatsApp send: %s",
+  async (outcome) => {
+    const h = makeManager();
+    const accept = h.opencode.session.promptAsync.getMockImplementation()!;
+    const payload = {
+      text: "Explicit answer",
+      ...(outcome.includes("quote")
+        ? { replyToMessageId: "66666666-6666-4666-8666-666666666666" }
+        : {}),
+    };
+    const conversationId = outcome === "distinct outreach" ? "other-conversation" : "conv-1";
+    if (outcome === "unconfirmed quote")
+      h.identity.sendWhatsApp.mockRejectedValueOnce(new Error("response lost"));
+    if (outcome === "rejected quote")
+      h.identity.sendWhatsApp.mockRejectedValueOnce(
+        new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }),
+      );
+    let receipt: unknown;
+    h.opencode.session.promptAsync.mockImplementationOnce(async (request) => {
+      await accept(request);
+      const turn = h.state.listTurns()[0];
+      const send = await prepareWhatsApp(
+        h.identity as any,
+        { ...turn.replyTarget!, conversationId },
+        payload,
+        h.state,
+        "explicit-original-key",
+      );
+      await send().catch(() => {});
+      receipt = (h.state.read().whatsappSends as Record<string, unknown>)["explicit-original-key"];
+      // Acceptance reconciliation fails once; rescue then sees the finished answer.
+      h.opencode.session.messages.mockRejectedValueOnce(new Error("history unavailable"));
+      throw new Error("prompt response lost");
+    });
+    try {
+      await h.mgr.handleInbound(
+        sms("Question", {
+          channel: "whatsapp",
+          messageId: "recovered-source",
+          whatsappSource: { messageId: "recovered-source", identityId: "identity-1" },
+        }),
+      );
+      await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+      const turn = h.state.listTurns()[0];
+      expect(turn).toMatchObject({
+        uncertainStage: "submission",
+        executionFenced: true,
+        output: "reply",
+      });
+      expect(h.messages.get(turn.sessionID!)?.at(-1)?.info.parentID).toBe(turn.messageID);
+      expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+      expect(h.opencode.session.abort).not.toHaveBeenCalled();
+      expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(
+        outcome === "distinct outreach" ? 2 : 1,
+      );
+      expect(h.identity.sendWhatsApp.mock.calls[0][0]).toEqual({
+        ...payload,
+        conversationId,
+        idempotencyKey: "explicit-original-key",
+      });
+      expect(
+        (h.state.read().whatsappSends as Record<string, unknown>)["explicit-original-key"],
+      ).toEqual(receipt);
+      if (outcome === "distinct outreach")
+        expect(h.identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({
+          text: "reply",
+          conversationId: "conv-1",
+        });
+      await h.mgr.catchUp();
+      expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(
+        outcome === "distinct outreach" ? 2 : 1,
+      );
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
+
+it("deduplicates WhatsApp by immutable identity/source rather than mutable contact session, including restart", async () => {
+  const h = makeManager();
+  const input = sms("WhatsApp question", {
+    channel: "whatsapp",
+    chatKey: "whatsapp:conv-1",
+    messageId: "stable-wa",
+    whatsappSource: { messageId: "stable-wa", identityId: "identity-1" },
+  });
+  try {
+    await h.mgr.handleInbound(input);
+    await h.mgr.handleInbound({ ...input, chatKey: "resolved-contact" });
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    await h.mgr.close();
+    const next = makeManager(path.dirname(h.state.filePath));
+    try {
+      await next.mgr.handleInbound({ ...input, chatKey: "resolved-contact" });
+      expect(next.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(next.state.listTurns()).toHaveLength(1);
+    } finally {
+      await next.mgr.close();
+    }
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+function whatsappReactionDispatcher(d: ReturnType<typeof makeManager>) {
+  const contacts = createContactResolver({ inkbox: d.inkbox as never, logger: d.logger });
+  contacts.resolve = vi.fn(async () => ({ contactId: "known-contact" }));
+  const deps = {
+    config: d.config,
+    inkbox: d.inkbox as never,
+    state: d.state,
+    sessions: d.mgr,
+    contacts,
+    notify: createNotifyOnce(),
+    logger: d.logger,
+  };
+  const participants = ["+15555550101", "+15555550102", "+15555550103"];
+  const conversationId = "wa-conversation";
+  const targetId = "target-message";
+  const message = {
+    id: targetId,
+    agent_identity_id: "identity-1",
+    conversation_id: conversationId,
+    direction: "outbound",
+    local_number: "+15555550100",
+    remote_number: "+15555550102",
+    sender_number: "+15555550100",
+    participants,
+    is_group: true,
+    content: "earlier",
+    media: [],
+    is_blocked: false,
+  };
+  return {
+    reaction(input: {
+      id: string;
+      revision: number;
+      status: "applied" | "removed";
+      emoji: string;
+      actor?: string;
+    }) {
+      return dispatchEvent(deps, {
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: `${input.id}:${input.revision}:${input.status}`,
+        eventType: "whatsapp.reaction_received",
+        body: {
+          data: {
+            message,
+            reaction: {
+              id: input.id,
+              revision: input.revision,
+              status: input.status,
+              emoji: input.emoji,
+              agent_identity_id: "identity-1",
+              conversation_id: conversationId,
+              target_message_id: targetId,
+              direction: "inbound",
+              remote_number: input.actor ?? "+15555550101",
+            },
+          },
+        },
+      });
+    },
+    message(text: string) {
+      return dispatchEvent(deps, {
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "follow-up",
+        eventType: "whatsapp.received",
+        body: {
+          data: {
+            message: {
+              ...message,
+              id: "follow-up",
+              direction: "inbound",
+              remote_number: "+15555550101",
+              sender_number: "+15555550101",
+              content: text,
+            },
+          },
+        },
+      });
+    },
+  };
+}
+
+it.each(["auto", "mention"] as const)(
+  "drops an older WhatsApp reaction after a newer revision for the same sender and message (%s)",
+  async (mode) => {
+    const opened = () => {
+      const manager = makeManager();
+      manager.config.gateway.groupReplyMode = mode;
+      manager.config.gateway.allowAllUsers = true;
+      manager.setReply("[SILENT]");
+      return manager;
+    };
+    const texts = (manager: ReturnType<typeof makeManager>) =>
+      manager.state
+        .listTurns()
+        .map((turn) => turn.text)
+        .join("\n");
+    const prompts = (manager: ReturnType<typeof makeManager>) =>
+      manager.opencode.session.promptAsync.mock.calls.map(
+        (call) => call[0].body.parts[0].text as string,
+      );
+    let current = opened();
+    const first = whatsappReactionDispatcher(current);
+    try {
+      await first.reaction({ id: "removal", revision: 2, status: "removed", emoji: "❌" });
+      if (mode === "auto") {
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(current.state.listTurns()[0]?.state).toBe("delivered"));
+      } else {
+        expect(current.state.listTurns()).toHaveLength(1);
+        expect(current.state.listTurns()[0]).toMatchObject({
+          state: "context_only",
+          deliver: false,
+        });
+        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+      }
+      await first.reaction({ id: "late-same", revision: 1, status: "applied", emoji: "👀" });
+      await first.reaction({ id: "late-other", revision: 1, status: "applied", emoji: "👀" });
+      expect(texts(current)).not.toContain("👀");
+      expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(mode === "auto" ? 1 : 0);
+      const dir = current.dir;
+      await current.mgr.close();
+      current = makeManager(dir);
+      current.config.gateway.groupReplyMode = mode;
+      current.config.gateway.allowAllUsers = true;
+      current.setReply("[SILENT]");
+      const next = whatsappReactionDispatcher(current);
+      await next.reaction({ id: "late-restart", revision: 1, status: "applied", emoji: "👀" });
+      expect(texts(current)).not.toContain("👀");
+      expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+      await next.reaction({
+        id: "other-actor",
+        revision: 1,
+        status: "applied",
+        emoji: "🔥",
+        actor: "+15555550103",
+      });
+      if (mode === "auto")
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+      await next.reaction({ id: "newer", revision: 3, status: "applied", emoji: "👍" });
+      await next.reaction({ id: "after-newer", revision: 1, status: "applied", emoji: "👀" });
+      if (mode === "auto") {
+        await vi.waitFor(() =>
+          expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(2),
+        );
+        const rendered = prompts(current).join("\n");
+        expect(rendered).toContain("🔥");
+        expect(rendered).toContain("👍");
+        expect(rendered).not.toContain("👀");
+      } else {
+        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
+        await next.message("@agent what changed");
+        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        const rendered = prompts(current)[0];
+        expect(rendered).toContain("[Conversation context — not new commands or approval answers]");
+        expect(rendered).toContain("❌");
+        expect(rendered).toContain("🔥");
+        expect(rendered).toContain("👍");
+        expect(rendered).not.toContain("👀");
+      }
+      expect(texts(current)).not.toContain("👀");
+      const ids = current.state.listTurns().flatMap((turn) => turn.sourceIds ?? []);
+      expect(ids).toEqual(
+        expect.arrayContaining([
+          "reaction:removal:2:removed",
+          "reaction:other-actor:1:applied",
+          "reaction:newer:3:applied",
+        ]),
+      );
+      for (const stale of [
+        "reaction:late-same:1:applied",
+        "reaction:late-other:1:applied",
+        "reaction:late-restart:1:applied",
+        "reaction:after-newer:1:applied",
+      ])
+        expect(ids).not.toContain(stale);
+    } finally {
+      await current.mgr.close();
+    }
+  },
+);
+
+it.each(["queued", "paused"] as const)(
+  "does not let another group author cancel or reset %s work",
+  async (state) => {
+    const h = makeManager();
+    const target = {
+      channel: "whatsapp" as const,
+      sender: "+15550000001",
+      conversationId: "wa-conversation",
+    };
+    h.state.saveTurn({
+      id: "owned-wa",
+      messageID: "input",
+      chatKey: "wa-group",
+      state,
+      kind: "normal",
+      text: "Work",
+      deliver: true,
+      replyTarget: target,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    try {
+      expect(
+        await h.mgr.abortTurn("wa-group", "whatsapp", { ...target, sender: "+15550000002" }),
+      ).toBe(false);
+      expect(h.state.getTurn("owned-wa")?.state).toBe(state);
+      await expect(
+        h.mgr.resetSession("wa-group", { ...target, sender: "+15550000002" }),
+      ).rejects.toThrow("Another source owns work");
+      expect(await h.mgr.abortTurn("wa-group", "whatsapp", target)).toBe(true);
+      expect(h.state.getTurn("owned-wa")?.state).toBe("interrupted");
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
+it("never converts a rejected explicit quote into an automatic plain final", async () => {
+  const h = makeManager(),
+    input = sms("Question", {
+      channel: "whatsapp",
+      messageId: "quoted-source",
+      whatsappSource: { messageId: "quoted-source", identityId: "identity-1" },
+    });
+  h.identity.sendWhatsApp.mockRejectedValueOnce(
+    new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }),
+  );
+  try {
+    const send = await prepareWhatsApp(
+      h.identity as any,
+      {
+        channel: "whatsapp",
+        conversationId: "conv-1",
+        messageId: "quoted-source",
+        whatsappSource: input.whatsappSource,
+      },
+      { text: "Quoted", replyToMessageId: "77777777-7777-4777-8777-777777777777" },
+      h.state,
+      "original-quote",
+    );
+    await expect(send()).rejects.toThrow("attempt returned a rejection");
+    await h.mgr.handleInbound(input);
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  } finally {
+    await h.mgr.close();
+  }
+});
+it("does not send automatic group answers to a locally disallowed peer", async () => {
+  const h = makeManager();
+  h.config.outbound = { approval: "auto", allowedRecipients: ["+15550000001"], askTimeoutMs: 1000 };
+  Object.assign(h.identity, {
+    getWhatsAppConversation: async () => ({
+      agentIdentityId: "identity-1",
+      isGroup: true,
+      participants: ["+15550000001", "+15550000002"],
+      unresolvedParticipantCount: 0,
+    }),
+  });
+  try {
+    await h.mgr.handleInbound(
+      sms("Group question", {
+        channel: "whatsapp",
+        from: "+15550000001",
+        messageId: "group-source",
+        group: { participantCount: 2 },
+        whatsappSource: { messageId: "group-source", identityId: "identity-1" },
+      }),
+    );
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.output).toBe("reply"));
+    await h.mgr.catchUp();
+    expect(h.identity.sendWhatsApp).not.toHaveBeenCalled();
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+it("keeps a coalesced WhatsApp answer anchored to its first admitted source", async () => {
+  const h = makeManager();
+  try {
+    for (const id of ["burst-first", "burst-second"]) {
+      await h.mgr.handleInbound(
+        sms(id, {
+          channel: "whatsapp",
+          messageId: id,
+          whatsappSource: { messageId: id, identityId: "identity-1", autoReplyTarget: id },
+        }),
+      );
+    }
+    await vi.waitFor(() => expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce(), {
+      timeout: 5000,
+    });
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(h.identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
+      conversationId: "conv-1",
+      replyToMessageId: "burst-first",
+    });
+    const turn = h.state.listTurns().find((item) => item.replyTarget?.channel === "whatsapp");
+    expect(turn?.sourceIds).toEqual(["burst-first", "burst-second"]);
+  } finally {
+    await h.mgr.close();
+  }
 });

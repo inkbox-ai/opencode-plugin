@@ -15,9 +15,10 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
       - run: npm run lint
       - run: npm run typecheck
@@ -34,9 +35,10 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
-            @inkbox/sdk@0.7.15 \
+            "$INKBOX_SDK_PATH" \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - name: Install minimum native host
         run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.15.0
@@ -57,7 +59,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: bash tests/ci/npm_with_retry.sh ci
+      - run: |
+          INKBOX_SDK_PATH="$(bash tests/ci/candidate_sdk.sh)"
+          bash tests/ci/npm_with_retry.sh ci
       - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@latest
       - run: npm run build
       - run: |

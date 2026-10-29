@@ -224,7 +224,7 @@ groups are enabled.
 
 ## Tools
 
-35 tools are enabled by default; 21 more are opt-in (see
+50 tools are enabled by default; 22 more are opt-in (see
 [Enabling more tools](#enabling-more-tools)). Names are stable — treat renames
 as breaking.
 
@@ -234,13 +234,26 @@ as breaking.
 | `email` | `inkbox_send_email`, `inkbox_list_unread_emails`, `inkbox_list_emails`, `inkbox_get_email`, `inkbox_get_email_thread` | `inkbox_forward_email`, `inkbox_mark_emails_read` |
 | `sms` | `inkbox_send_sms`, `inkbox_list_text_conversations`, `inkbox_get_text_conversation` | `inkbox_list_texts`, `inkbox_get_text`, `inkbox_mark_text_read`, `inkbox_mark_text_conversation_read` |
 | `imessage` | `inkbox_send_imessage`, `inkbox_list_imessage_conversations`, `inkbox_get_imessage_conversation` | `inkbox_imessage_triage_number`, `inkbox_list_imessage_assignments`, `inkbox_send_imessage_reaction`, `inkbox_mark_imessage_conversation_read` |
+| `whatsapp` | `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get_whatsapp_conversation`, `inkbox_list_whatsapp_messages`, `inkbox_get_whatsapp_message`, `inkbox_upload_whatsapp_media`, `inkbox_get_whatsapp_media`, `inkbox_mark_whatsapp_read`, `inkbox_get_whatsapp_status`, `inkbox_lookup_whatsapp_send`, `inkbox_get_whatsapp_thread`, `inkbox_get_whatsapp_conversation_thread`, `inkbox_send_whatsapp_reaction`, `inkbox_get_whatsapp_reaction`, `inkbox_remove_whatsapp_reaction` | — |
 | `calls` | `inkbox_list_calls`, `inkbox_list_call_transcripts` | `inkbox_place_call` |
 | `contacts` | `inkbox_lookup_contact`, `inkbox_get_contact`, `inkbox_list_contacts`, `inkbox_create_contact`, `inkbox_update_contact`, `inkbox_delete_contact` | — |
 | `notes` | `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note` | `inkbox_update_note`, `inkbox_delete_note` |
 | `contact-rules` | `inkbox_list_mail_contact_rules`, `inkbox_list_phone_contact_rules`, `inkbox_list_imessage_contact_rules` (read-only: rule changes are console-only) | — |
 | `access` | — | `inkbox_list_note_access`, `inkbox_grant_note_access`, `inkbox_revoke_note_access` |
-| `vault` | — | `inkbox_credentials_list`, and by exact name only: `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_totp_code` |
+| `vault` | — | `inkbox_credentials_list`, and by exact name only: `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, `inkbox_credentials_get_secret`, `inkbox_totp_code` |
 | `diagnostics` | `inkbox_whoami`, `inkbox_doctor` | — |
+
+### Dedicated WhatsApp
+
+WhatsApp is available after approval for identities that already have a dedicated iMessage number. Use **Request Access** in the Inkbox console; plugin configuration cannot enable or provision the channel. `inkbox_get_whatsapp_status` reads current readiness and, when supported, effective independent limits/usage. No local product-availability flag is required.
+
+Signed direct and group messages enter the native durable session queue, with group sessions scoped to their conversation instead of a contact DM. New ordinary final answers reply automatically on WhatsApp, quoting their triggering message; do not also send that same answer with a tool. Active-source tools default to that conversation and quote, while explicit different destinations remain separate outreach. Saved plain intents and caller-supplied recovery keys never acquire a new quote. An uncertain or rejected quoted send never creates a plain replacement. Contacts retain the existing shared contact session, while permission answers, Stop, and text bursts retain the exact channel, conversation, and author. Status callbacks never wake the model. Create groups with 2–8 unique E.164 recipients or use an existing conversation ID (including larger groups). Use explicit replyToMessageId with conversationId for quoted replies and the thread-read tools for history. Named/custom reaction tools require a stable idempotency key; queued or uncertain receipts are not applied. Peer reactions stay in their original conversation as context. Remote read receipts, calls, and WhatsApp Companion activation are not exposed.
+
+Tools: `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get_whatsapp_conversation`, `inkbox_list_whatsapp_messages`, `inkbox_get_whatsapp_message`, `inkbox_upload_whatsapp_media`, `inkbox_get_whatsapp_media`, `inkbox_mark_whatsapp_read`, `inkbox_get_whatsapp_status`, `inkbox_lookup_whatsapp_send`, `inkbox_get_whatsapp_thread`, `inkbox_get_whatsapp_conversation_thread`, `inkbox_send_whatsapp_reaction`, `inkbox_get_whatsapp_reaction`, and `inkbox_remove_whatsapp_reaction`. Text has a 4,000-character protocol ceiling and each message supports one owned attachment within a 20 MiB ceiling; effective server limits may be lower. Upload a local file with host approval, retain its media ID, then send that ID. Incoming download access is renewed by ID, not copied from an expired webhook URL. Mark-read updates local inbox state only.
+
+Completed answers and stable logical-send keys are checkpointed before delivery. Explicit sends return their key and media ID. After an ambiguous result, retain both and inspect `inkbox_lookup_whatsapp_send`; do not upload again or send a new copy. A confirmed send with unknown delivery is not a failed send.
+
+This draft requires SDK 0.7.24. Candidate checks build the exact reviewed public SDK commit before preparing an archive-aware npm lock and use that same real candidate in packed V1/V2 host installs. The normal dependency remains `^0.7.24`; after SDK publication, regenerate the registry lock before releasing this plugin. Candidate-source CI does not claim that the package is already published.
 
 ### Enabling more tools
 

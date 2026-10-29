@@ -15,6 +15,7 @@ import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js"
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
+import { hasExplicitWhatsAppReply } from "../whatsapp-native.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -37,7 +38,7 @@ import { prepareReply, ReplyPreparationError, sentEmailReply } from "./reply.js"
 import { companionWakes, mentionsAgent, sameAuthor } from "./response-policy.js";
 import { slackSenderAllowed } from "./slack.js";
 import type { DurableHostedCapture, DurableTurn, StateStore } from "./state.js";
-import { gatewayHome } from "./state.js";
+import { gatewayHome, staleWhatsAppReactionRevision } from "./state.js";
 import type {
   GatewayLogger,
   InboundMessage,
@@ -269,6 +270,8 @@ export function createSessionManager(
         emailAddress: id.emailAddress,
         dedicatedNumber: id.phoneNumber?.number,
         imessageEnabled: (id as { imessageEnabled?: boolean }).imessageEnabled,
+        whatsappEnabled: id.whatsappEnabled,
+        whatsappNumber: id.whatsappNumber,
       });
     } catch (err) {
       identityResolved = false;
@@ -330,12 +333,39 @@ export function createSessionManager(
       )
         throw new HostedCaptureDeferredError();
     };
-    const existing = deps.state.getSession(chatKey);
+    const snapshot = deps.state.read();
+    const existing = snapshot.sessions[chatKey];
     if (existing) {
       const usable = await sessionUsable(existing);
       check();
-      if (usable) return existing;
-      deps.state.clearSession(chatKey);
+      const expectedGeneration = snapshot.sessionGenerations?.[chatKey] ?? 0;
+      if (usable) {
+        // Reuse acquires this generation too; a captured reset cannot detach it.
+        if (
+          deps.state.setSession(
+            chatKey,
+            existing,
+            { turnId: turn.id, ownerId },
+            {
+              sessionID: existing,
+              generation: expectedGeneration,
+            },
+          )
+        )
+          return existing;
+        return ensureSession(chatKey, turn);
+      }
+      if (
+        !deps.state.clearSession(
+          chatKey,
+          { turnId: turn.id, ownerId },
+          {
+            generation: expectedGeneration,
+            contextIds: [],
+          },
+        )
+      )
+        return ensureSession(chatKey, turn);
     }
     const res = await deps.opencode.session.create({
       body: { title: `inkbox:${chatKey}` },
@@ -952,6 +982,7 @@ export function createSessionManager(
       current = completed;
     }
     if (channelDisabled(current)) return;
+    if (hasExplicitWhatsAppReply(current.replyTarget, deps.state)) output = SILENT;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
       await authorizeSlack(current);
@@ -963,6 +994,7 @@ export function createSessionManager(
           output,
           deps.logger,
           deps.state,
+          deps.config.outbound?.allowedRecipients,
         );
       } catch (error) {
         if (!(error instanceof ReplyPreparationError)) throw error;
@@ -972,6 +1004,7 @@ export function createSessionManager(
         });
         if (
           !current.companion &&
+          !current.replyTarget?.whatsappSource &&
           !current.replyTarget?.imessageSource &&
           !current.replyTarget?.slack
         )
@@ -1012,7 +1045,11 @@ export function createSessionManager(
           settle(current.id, output);
           return;
         }
-        if (!current.replyTarget?.imessageSource && !current.replyTarget?.slack)
+        if (
+          !current.replyTarget?.whatsappSource &&
+          !current.replyTarget?.imessageSource &&
+          !current.replyTarget?.slack
+        )
           recoverReply(current, err, output);
         settle(current.id, output);
         return;
@@ -1664,18 +1701,42 @@ export function createSessionManager(
     },
     async handleInbound(msg: InboundMessage) {
       if (closing) throw new Error("Gateway is closing; retry inbound delivery.");
-      const sourceId = msg.imessageSource?.messageId ?? (msg.slack ? msg.messageId : undefined);
+      const reactionSource = msg.whatsappSource;
+      const reactionRevision = reactionSource?.reactionRevision;
+      if (
+        msg.reaction &&
+        reactionSource?.reactionId &&
+        reactionSource.targetMessageId &&
+        Number.isInteger(reactionRevision) &&
+        staleWhatsAppReactionRevision(deps.state.read(), {
+          identityId: reactionSource.identityId,
+          actor: msg.from,
+          targetMessageId: reactionSource.targetMessageId,
+          revision: reactionRevision as number,
+        })
+      )
+        return;
+      const sourceId =
+        msg.whatsappSource?.messageId ??
+        msg.imessageSource?.messageId ??
+        (msg.slack ? msg.messageId : undefined);
       if (
         sourceId &&
         deps.state
           .listTurns()
-          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+          .some(
+            (turn) =>
+              (msg.whatsappSource
+                ? turn.replyTarget?.whatsappSource?.identityId === msg.whatsappSource.identityId
+                : turn.chatKey === msg.chatKey) && turn.sourceIds?.includes(sourceId),
+          )
       )
         return;
       const target: ReplyTarget = {
         channel: msg.channel,
         slack: msg.slack,
         imessageSource: msg.imessageSource,
+        whatsappSource: msg.whatsappSource,
         to: msg.from,
         conversationId: msg.conversationId,
         subject: msg.subject,
@@ -1697,7 +1758,39 @@ export function createSessionManager(
         target,
         {
           agent: overrideFor(g.channelAgents),
-          ...(msg.slack && sourceId ? { sourceIds: [sourceId] } : {}),
+          ...((msg.slack || msg.whatsappSource) && sourceId ? { sourceIds: [sourceId] } : {}),
+          ...(msg.whatsappSource
+            ? {
+                burstKey:
+                  !msg.reaction &&
+                  !msg.whatsappSource.mediaIds?.length &&
+                  !msg.text.trim().startsWith("/")
+                    ? JSON.stringify([
+                        "whatsapp",
+                        msg.from,
+                        msg.conversationId,
+                        ...(msg.whatsappSource.parentMessageId ||
+                        msg.whatsappSource.threadId ||
+                        msg.whatsappSource.rootMessageId
+                          ? [
+                              {
+                                parent: msg.whatsappSource.parentMessageId ?? null,
+                                thread: msg.whatsappSource.threadId ?? null,
+                                root: msg.whatsappSource.rootMessageId ?? null,
+                              },
+                            ]
+                          : []),
+                      ])
+                    : undefined,
+                burstTextChars: [...msg.text].length,
+                retryAt:
+                  !msg.reaction &&
+                  !msg.whatsappSource.mediaIds?.length &&
+                  !msg.text.trim().startsWith("/")
+                    ? Date.now() + 750
+                    : undefined,
+              }
+            : {}),
           ...(msg.imessageSource
             ? {
                 sourceIds: [msg.imessageSource.messageId],
@@ -1732,7 +1825,9 @@ export function createSessionManager(
             ? msg.slack.mentioned || msg.slack.direct
             : mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle))
         ) {
-          deps.state.saveTurn({ ...turn, state: "context_only", deliver: false });
+          if (msg.whatsappSource)
+            deps.state.reserveWhatsAppTurn({ ...turn, state: "context_only", deliver: false });
+          else deps.state.saveTurn({ ...turn, state: "context_only", deliver: false });
           return;
         }
       }
@@ -1740,7 +1835,12 @@ export function createSessionManager(
         sourceId &&
         deps.state
           .listTurns()
-          .some((turn) => turn.chatKey === msg.chatKey && turn.sourceIds?.includes(sourceId))
+          .some(
+            (turn) =>
+              (msg.whatsappSource
+                ? turn.replyTarget?.whatsappSource?.identityId === msg.whatsappSource.identityId
+                : turn.chatKey === msg.chatKey) && turn.sourceIds?.includes(sourceId),
+          )
       )
         return;
       if (turn.burstKey) {
@@ -1762,7 +1862,7 @@ export function createSessionManager(
         ) {
           const merged = deps.state.updateTurn(previous.id, {
             text: previous.text + "\n" + msg.text,
-            sourceIds: [...(previous.sourceIds ?? []), msg.imessageSource!.messageId],
+            sourceIds: [...(previous.sourceIds ?? []), sourceId!],
             burstTextChars: (previous.burstTextChars ?? 0) + msg.text.length,
             retryAt: Math.min(previous.createdAt + 2000, Date.now() + 750),
           });
@@ -1775,7 +1875,12 @@ export function createSessionManager(
         .listTurns()
         .filter(
           (candidate) =>
-            !(msg.slack || (msg.channel === "imessage" && g.imessageThreadedReplies)) &&
+            !candidate.replyTarget?.whatsappSource &&
+            !(
+              msg.slack ||
+              msg.whatsappSource ||
+              (msg.channel === "imessage" && g.imessageThreadedReplies)
+            ) &&
             candidate.chatKey === msg.chatKey &&
             candidate.kind === "normal" &&
             Boolean(candidate.ownerId) &&
@@ -1787,7 +1892,9 @@ export function createSessionManager(
           });
           return updated ? [updated] : [];
         });
-      deps.state.saveTurn(turn);
+      if (msg.whatsappSource) {
+        if (!deps.state.reserveWhatsAppTurn(turn)) return;
+      } else deps.state.saveTurn(turn);
       const sessionIDs = new Set(
         interrupted
           .map((candidate) => candidate.sessionID ?? deps.state.getSession(candidate.chatKey))
@@ -1798,7 +1905,7 @@ export function createSessionManager(
           .abort({ path: { id: sessionID }, query: { directory: deps.directory } })
           .catch(() => {});
       }
-      if (msg.slack || msg.imessageSource) {
+      if (msg.slack || msg.imessageSource || msg.whatsappSource) {
         enqueue(turn);
         return;
       }
@@ -1890,24 +1997,63 @@ export function createSessionManager(
       return turns.length > 0;
     },
 
-    async resetSession(chatKey) {
-      generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
-      await this.abortTurn(chatKey);
+    async resetSession(chatKey, source, targets) {
+      const currentGeneration = () => deps.state.read().sessionGenerations?.[chatKey] ?? 0;
+      if (targets && currentGeneration() !== targets.sessionGeneration) return false;
+      const foreign = () =>
+        deps.state
+          .listTurns()
+          .some(
+            (turn) =>
+              turn.chatKey === chatKey &&
+              ACTIVE.has(turn.state) &&
+              source &&
+              (turn.replyTarget?.channel !== source.channel ||
+                turn.replyTarget?.conversationId !== source.conversationId ||
+                !sameAuthor(source.channel, turn.replyTarget?.sender ?? "", source.sender ?? "")),
+          );
+      if (foreign()) throw new Error("Another source owns work in this conversation.");
+      if (!targets) generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
+      if (source) await this.abortTurn(chatKey, source.channel, source, targets?.turnIds);
+      else await this.abortTurn(chatKey);
+      if (foreign()) throw new Error("Another source owns work in this conversation.");
+      if (targets) {
+        return deps.state.clearSession(chatKey, undefined, {
+          generation: targets.sessionGeneration,
+          contextIds: targets.contextIds,
+        });
+      }
       deps.state.clearSession(chatKey);
       for (const context of deps.state.listTurns()) {
-        if (context.chatKey === chatKey && context.state === "context_only" && !context.consumedBy)
+        if (
+          context.chatKey === chatKey &&
+          context.state === "context_only" &&
+          !context.consumedBy &&
+          (!source ||
+            (context.replyTarget?.channel === source.channel &&
+              context.replyTarget?.conversationId === source.conversationId &&
+              sameAuthor(source.channel, context.replyTarget?.sender ?? "", source.sender ?? "")))
+        )
           deps.state.updateTurn(context.id, { consumedBy: "session-reset" });
       }
       deps.logger.info("session.reset", { chatKey });
+      return true;
     },
 
-    async abortTurn(chatKey, channel) {
+    async abortTurn(chatKey, channel, source, turnIds) {
+      const selected = (turn: DurableTurn) =>
+        !source ||
+        (turn.replyTarget?.channel === source.channel &&
+          turn.replyTarget?.conversationId === source.conversationId &&
+          sameAuthor(source.channel, turn.replyTarget?.sender ?? "", source.sender ?? ""));
       const turns = deps.state
         .listTurns()
         .filter(
           (turn) =>
             turn.chatKey === chatKey &&
+            (!turnIds || turnIds.includes(turn.id)) &&
             ACTIVE.has(turn.state) &&
+            selected(turn) &&
             (!channel ||
               (turn.replyTarget?.channel === channel &&
                 (turn.kind === "normal" || Boolean(turn.companion)))),
@@ -1915,7 +2061,7 @@ export function createSessionManager(
       let uncertain = false;
       for (const captured of turns) {
         const turn = deps.state.getTurn(captured.id);
-        if (!turn || !ACTIVE.has(turn.state)) continue;
+        if (!turn || !ACTIVE.has(turn.state) || !selected(turn)) continue;
         if (turn.state === "delivery_started" || turn.uncertainStage === "delivery") continue;
         const executing =
           ["submitting", "submitted"].includes(turn.state) ||
@@ -1935,6 +2081,7 @@ export function createSessionManager(
         if (
           !latest ||
           !ACTIVE.has(latest.state) ||
+          !selected(latest) ||
           latest.state === "delivery_started" ||
           latest.uncertainStage === "delivery"
         )

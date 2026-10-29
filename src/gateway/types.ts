@@ -28,7 +28,7 @@ export interface GatewayDeps {
   directory: string;
 }
 
-export type Channel = "email" | "sms" | "imessage" | "slack" | "voice";
+export type Channel = "email" | "sms" | "imessage" | "whatsapp" | "slack" | "voice";
 
 // A peer agent identity the backend resolved for an inbound sender. Webhooks
 // carry these under `data.agent_identities`; a sender with no contact match
@@ -43,6 +43,18 @@ export interface SenderAgentIdentity {
 export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
+  whatsappSource?: {
+    autoReplyTarget?: string;
+    messageId: string;
+    identityId: string;
+    mediaIds?: string[];
+    reactionId?: string;
+    targetMessageId?: string;
+    reactionRevision?: number;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
+  };
   imessageSource?: {
     messageId: string;
     conversationId: string;
@@ -90,6 +102,18 @@ export interface InboundMessage {
 export interface ReplyTarget {
   channel: Channel;
   slack?: SlackRoute;
+  whatsappSource?: {
+    autoReplyTarget?: string;
+    messageId: string;
+    identityId: string;
+    mediaIds?: string[];
+    reactionId?: string;
+    targetMessageId?: string;
+    reactionRevision?: number;
+    parentMessageId?: string | null;
+    threadId?: string | null;
+    rootMessageId?: string | null;
+  };
   imessageSource?: {
     messageId: string;
     conversationId: string;
@@ -98,6 +122,7 @@ export interface ReplyTarget {
     rootMessageId?: string | null;
   };
   to?: string;
+  whatsappRecipients?: string[];
   conversationId?: string;
   subject?: string;
   rfcMessageId?: string;
@@ -128,6 +153,12 @@ export interface TurnRequest {
   // Deliver the assistant's reply to replyTarget when true.
   deliver: boolean;
   replyTarget?: ReplyTarget;
+}
+
+export interface CommandTargets {
+  turnIds: string[];
+  contextIds: string[];
+  sessionGeneration: number;
 }
 
 export interface SessionManager {
@@ -169,8 +200,17 @@ export interface SessionManager {
   summarizeA2AProgress?(chatKey: string, taskId: string, previousUpdate: string): Promise<string>;
   abortA2A(chatKey: string, taskId: string): Promise<boolean>;
   // Control-command support.
-  resetSession(chatKey: string): Promise<void>;
-  abortTurn(chatKey: string, channel?: Channel): Promise<boolean>;
+  resetSession(
+    chatKey: string,
+    source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+    targets?: CommandTargets,
+  ): Promise<boolean | void>;
+  abortTurn(
+    chatKey: string,
+    channel?: Channel,
+    source?: Pick<ReplyTarget, "channel" | "conversationId" | "sender">,
+    turnIds?: string[],
+  ): Promise<boolean>;
   status(chatKey: string): { busy: boolean; sessionID?: string };
   // Resume durable accepted work after a gateway restart.
   catchUp(): Promise<void>;

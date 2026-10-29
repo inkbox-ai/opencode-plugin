@@ -60,6 +60,8 @@ export function whoamiTools(deps: ToolDeps): RegisteredTool[] {
                 emailAddress: identity.mailbox?.emailAddress ?? null,
                 sendingDomain: identity.mailbox?.sendingDomain ?? null,
                 mailboxFilterMode: identity.mailbox?.filterMode ?? null,
+                whatsappEnabled: identity.whatsappEnabled ?? false,
+                whatsappNumber: identity.whatsappNumber ?? null,
                 phoneNumber: dedicatedNumber,
                 phoneNumberId: identity.phoneNumber?.id ?? null,
                 phoneNumberType: identity.phoneNumber?.type ?? null,

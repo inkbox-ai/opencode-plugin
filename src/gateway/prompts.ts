@@ -22,7 +22,7 @@ export const SILENT = "[SILENT]";
 // details ride in on each turn's [inkbox:...] tag instead of placeholders.
 export const CHANNEL_PROMPT_BODY = `# Messaging channels
 
-You are reached over real messaging channels — Slack, email, SMS, iMessage, and
+You are reached over real messaging channels — Slack, email, SMS, iMessage, WhatsApp, and
 voice calls — not a terminal. Replies land on a phone or in an inbox, so
 write for the medium:
 
@@ -30,6 +30,7 @@ write for the medium:
   channel it arrived on, the sender, and any resolved Inkbox contact. Read
   it to know who you are talking to and where — the tag plus inkbox_whoami
   tell you which addresses and lines are yours — but never echo it back.
+- WhatsApp is approved dedicated direct/group messaging, at most 4,000 characters and one owned attachment (current server limits can be lower). Create groups with 2–8 unique E.164 recipients; use conversationId for existing groups, including larger groups. Explicit quoted replies require conversationId and replyToMessageId. Named/custom reactions return durable receipts; queued or uncertain is not applied. No calls or remote read receipts. New ordinary final answers quote their triggering message automatically. Active-source tools inherit the conversation and quote; explicit different destinations remain separate outreach. Delivery uncertainty is not failure; inspect the original key, never resend or re-upload.
 - Plain text on phone channels. No markdown on phone channels — no **bold**, no
   backticks, no headings, no code blocks unless someone explicitly asks
   for code.
@@ -66,7 +67,7 @@ write for the medium:
 
 # Outbound messaging
 
-Inkbox tools (inkbox_send_email, inkbox_send_sms, inkbox_send_imessage,
+Inkbox tools (inkbox_send_email, inkbox_send_sms, inkbox_send_imessage, inkbox_send_whatsapp,
 inkbox_place_call, ...) reach the human or third parties proactively —
 "email me the full report", a scheduled check-in. Replying to the current
 conversation is automatic; use these tools only for a different channel or
@@ -112,6 +113,8 @@ export interface ChannelIdentity {
   emailAddress?: string | null;
   dedicatedNumber?: string | null;
   imessageEnabled?: boolean;
+  whatsappEnabled?: boolean;
+  whatsappNumber?: string | null;
 }
 
 function reachableLine(identity: ChannelIdentity): string {
@@ -119,6 +122,10 @@ function reachableLine(identity: ChannelIdentity): string {
   if (identity.handle) reachable.push(identity.handle);
   if (identity.emailAddress) reachable.push(identity.emailAddress);
   if (identity.dedicatedNumber) reachable.push(identity.dedicatedNumber);
+  if (identity.whatsappEnabled)
+    reachable.push(
+      `WhatsApp (dedicated${identity.whatsappNumber ? ` ${identity.whatsappNumber}` : ""}; messaging only)`,
+    );
   if (identity.imessageEnabled) reachable.push("iMessage (shared line — texts and calls)");
   return reachable.join(" / ") || "not yet provisioned";
 }
@@ -188,6 +195,25 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   } else if (msg.conversationId) {
     fields.push(`conversation_id=${msg.conversationId}`);
   }
+  if (msg.whatsappSource)
+    fields.push(
+      `whatsapp_media_ids=${JSON.stringify(msg.whatsappSource.mediaIds ?? [])}`,
+      ...(msg.whatsappSource.parentMessageId !== undefined
+        ? [`whatsapp_reply_to_message_id=${JSON.stringify(msg.whatsappSource.parentMessageId)}`]
+        : []),
+      ...(msg.whatsappSource.threadId !== undefined
+        ? [`whatsapp_thread_id=${JSON.stringify(msg.whatsappSource.threadId)}`]
+        : []),
+      ...(msg.whatsappSource.rootMessageId !== undefined
+        ? [`whatsapp_thread_root_message_id=${JSON.stringify(msg.whatsappSource.rootMessageId)}`]
+        : []),
+      ...(msg.whatsappSource.reactionId
+        ? [
+            `whatsapp_reaction_id=${JSON.stringify(msg.whatsappSource.reactionId)}`,
+            `whatsapp_target_message_id=${JSON.stringify(msg.whatsappSource.targetMessageId)}`,
+          ]
+        : [`whatsapp_message_id=${JSON.stringify(msg.whatsappSource.messageId)}`]),
+    );
   if (msg.imessageSource)
     fields.push(
       `native_reply_source=${msg.imessageSource.messageId}`,

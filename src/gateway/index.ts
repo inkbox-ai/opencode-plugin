@@ -4,6 +4,7 @@ import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
+import { reserveWhatsAppIngress, type WhatsAppIngressDisposition } from "../whatsapp-native.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
@@ -19,7 +20,7 @@ import {
   type NativePermissionInventory,
 } from "./permission-inventory.js";
 import { queueReadiness } from "./readiness.js";
-import { deliverReply, prepareReply } from "./reply.js";
+import { deliverReply as deliverChannelReply, prepareReply } from "./reply.js";
 import {
   companionWakes,
   controlText,
@@ -60,6 +61,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   await opts.opencode.ready?.(opts.directory);
   const logger = opts.logger ?? consoleLogger;
   const g = opts.config.gateway;
+  const deliverReply: typeof deliverChannelReply = (runtime, target, raw, log) =>
+    deliverChannelReply(runtime, target, raw, log, opts.config.outbound.allowedRecipients);
   const state = createStateStore();
   if (opts.opencode.protocol !== 2) bindHostState(state, 1);
   // A prior process's successful inventory is not evidence for this attachment.
@@ -69,7 +72,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const dedup = createRequestDedup();
   const notify = createNotifyOnce();
   const pending = createPendingReplies();
-  const resumeCandidates = new Map<string, { ids: string[]; sender: string; channel: string }>();
+  const ingressRuns = new Map<string, Promise<void>>();
+  const resumeCandidates = new Map<
+    string,
+    { ids: string[]; sender: string; channel: string; route?: string }
+  >();
   let reconcilePermissions = async (_force?: boolean) => {};
 
   const deps: GatewayDeps = {
@@ -106,7 +113,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.cancelFor(chatKey, {
           sender: target.sender,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         });
     },
     companionSenderAllowed: async (from, requireReply) => {
@@ -124,7 +135,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.tryConsume(chatKey, raw, {
           sender: turn.from,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         })
       )
         return true;
@@ -132,7 +147,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         pending.cancelFor(chatKey, {
           sender: turn.from,
           channel: target.channel,
-          route: target.slack ? slackRouteKey(target.slack) : undefined,
+          route: target.slack
+            ? slackRouteKey(target.slack)
+            : target.channel === "whatsapp"
+              ? target.conversationId
+              : undefined,
         });
       if (!sameAuthor(target.channel, turn.from, target.companionSponsor ?? target.sender ?? ""))
         return false;
@@ -164,7 +183,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           pending.cancelFor(chatKey, {
             sender: turn.from,
             channel: target.channel,
-            route: target.slack ? slackRouteKey(target.slack) : undefined,
+            route: target.slack
+              ? slackRouteKey(target.slack)
+              : target.channel === "whatsapp"
+                ? target.conversationId
+                : undefined,
           });
           await sessions.stopSlack?.(target.slack, chatKey);
           await deliverReply(opts.inkbox, target, "Stopped your work in this thread.", logger);
@@ -183,7 +206,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       pending.cancelFor(chatKey, {
         sender: turn.from,
         channel: target.channel,
-        route: target.slack ? slackRouteKey(target.slack) : undefined,
+        route: target.slack
+          ? slackRouteKey(target.slack)
+          : target.channel === "whatsapp"
+            ? target.conversationId
+            : undefined,
       });
       resumeCandidates.delete(chatKey);
       const result = await handleCommand(
@@ -308,16 +335,30 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           return await pending.ask(
             chatKey,
             options?.timeoutMs ?? g.permissionTimeoutS * 1000,
-            target.group || target.companionMode || target.slack
+            target.group || target.companionMode || target.slack || target.channel === "whatsapp"
               ? {
                   sender: target.sender,
                   channel: target.channel,
-                  route: target.slack ? slackRouteKey(target.slack) : undefined,
+                  route: target.slack
+                    ? slackRouteKey(target.slack)
+                    : target.channel === "whatsapp"
+                      ? target.conversationId
+                      : undefined,
                 }
               : undefined,
             async () => {
               await sessions.authorizeReply?.(replyTarget);
-              const send = await prepareReply(opts.inkbox, replyTarget, prompt + hint, logger);
+              const send = await prepareReply(
+                opts.inkbox,
+                replyTarget,
+                prompt + hint,
+                logger,
+                undefined,
+                opts.config.outbound.allowedRecipients,
+                options?.requestId === null
+                  ? undefined
+                  : (options?.requestId ?? `permission:${pending.current(chatKey)}`),
+              );
               if (options?.signal.aborted || options?.current?.() === false)
                 throw new Error("Native permission owner is no longer current.");
               sessions.permissionActivity?.(replyTarget, true);
@@ -403,13 +444,85 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   // answer consumes the message; (2) a /resume selection; (3) a control
   // command replies directly.
   function wrapSessions() {
-    return {
+    const wrapped = {
       ...sessions,
-      handleInbound: async (msg: import("./types.js").InboundMessage) => {
+      handleInbound: async (msg: import("./types.js").InboundMessage): Promise<void> => {
+        let complete = () => {};
+        let disposition: WhatsAppIngressDisposition | undefined;
+        const author = {
+          sender: msg.from,
+          channel: msg.channel,
+          route: msg.slack
+            ? slackRouteKey(msg.slack)
+            : msg.channel === "whatsapp"
+              ? msg.conversationId
+              : undefined,
+        };
+        const originalRaw = msg.rawText ?? msg.text;
+        let raw = originalRaw;
+        if (msg.whatsappSource) {
+          raw = controlText(originalRaw, (await opts.inkbox.getIdentity()).agentHandle);
+          const receipt = reserveWhatsAppIngress(
+            msg,
+            !msg.reaction && (isPermissionReply(raw) || raw.trim().startsWith("/")),
+            state,
+            () => {
+              const waiterId = pending.current(msg.chatKey, author) ?? null;
+              if (!msg.reaction && isPermissionReply(raw) && waiterId)
+                return { kind: "permission", waiterId };
+              if (!msg.reaction && raw.trim().startsWith("/")) {
+                const snapshot = state.read();
+                const own = Object.values(snapshot.turns).filter(
+                  (turn) =>
+                    turn.chatKey === msg.chatKey &&
+                    turn.replyTarget?.channel === msg.channel &&
+                    turn.replyTarget?.conversationId === msg.conversationId &&
+                    sameAuthor(msg.channel, turn.replyTarget?.sender ?? "", msg.from),
+                );
+                return {
+                  kind: "command",
+                  waiterId,
+                  targets: {
+                    turnIds: own
+                      .filter((turn) => turn.state !== "context_only")
+                      .map((turn) => turn.id),
+                    contextIds: own
+                      .filter((turn) => turn.state === "context_only" && !turn.consumedBy)
+                      .map((turn) => turn.id),
+                    sessionGeneration: snapshot.sessionGenerations?.[msg.chatKey] ?? 0,
+                  },
+                };
+              }
+              return { kind: "normal", waiterId };
+            },
+          );
+          disposition = receipt.disposition;
+          msg = { ...msg, chatKey: receipt.chatKey };
+          complete = receipt.complete;
+          if (receipt.control && receipt.completed) return;
+          if (
+            !receipt.first &&
+            (!receipt.control ||
+              receipt.disposition?.kind === "normal" ||
+              state
+                .listTurns()
+                .some(
+                  (turn) =>
+                    turn.replyTarget?.whatsappSource?.identityId ===
+                      msg.whatsappSource?.identityId &&
+                    turn.sourceIds?.includes(msg.whatsappSource!.messageId),
+                ))
+          ) {
+            await sessions.handleInbound(msg);
+            complete();
+            return;
+          }
+        }
         const target = {
           channel: msg.channel,
           slack: msg.slack,
           imessageSource: msg.imessageSource,
+          whatsappSource: msg.whatsappSource,
           to: msg.from,
           sender: msg.from,
           conversationId: msg.conversationId,
@@ -418,29 +531,35 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           messageId: msg.messageId,
           group: Boolean(msg.group) && (msg.channel !== "email" || !msg.contactId),
         };
-        const raw = msg.rawText ?? msg.text;
         const admitted =
           !msg.reaction &&
           (!msg.group ||
+            (Boolean(msg.whatsappSource) && /^\/(?:stop|cancel)$/i.test(raw.trim())) ||
             msg.channel === "email" ||
             g.groupReplyMode !== "mention" ||
             (msg.slack
               ? msg.slack.direct || msg.slack.mentioned
-              : mentionsAgent(raw, (await opts.inkbox.getIdentity()).agentHandle)));
-        if (!admitted) {
-          await sessions.handleInbound(msg);
+              : mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle)));
+        if (disposition?.kind === "permission") {
+          // A stale answer stays an answer; it cannot become a new instruction.
+          if (!pending.tryConsume(msg.chatKey, raw, author, complete, disposition.waiterId))
+            complete();
           return;
         }
         if (
+          !disposition &&
           !msg.reaction &&
           isPermissionReply(raw) &&
-          pending.tryConsume(msg.chatKey, raw, {
-            sender: msg.from,
-            channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
-          })
+          admitted &&
+          pending.tryConsume(msg.chatKey, raw, author, complete)
         )
           return;
+
+        if (!admitted) {
+          await sessions.handleInbound(msg);
+          complete();
+          return;
+        }
 
         if (
           msg.slack &&
@@ -471,21 +590,67 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           }
         }
         if (/^\/(?:stop|cancel|clear|new)$/i.test(raw.trim()))
-          pending.cancelFor(msg.chatKey, {
-            sender: msg.from,
-            channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
-          });
+          pending.cancelFor(msg.chatKey, author, disposition?.waiterId);
 
+        // A shared contact session cannot broaden WhatsApp control authority.
+        const hasForeignWhatsAppWork = () =>
+          state
+            .listTurns()
+            .some(
+              (turn) =>
+                turn.chatKey === msg.chatKey &&
+                [
+                  "hydrating",
+                  "queued",
+                  "paused",
+                  "submitting",
+                  "submitted",
+                  "completed",
+                  "delivery_started",
+                ].includes(turn.state) &&
+                (turn.replyTarget?.channel === "whatsapp" || msg.channel === "whatsapp") &&
+                (turn.replyTarget?.channel !== msg.channel ||
+                  turn.replyTarget?.conversationId !== msg.conversationId ||
+                  !sameAuthor(msg.channel, turn.replyTarget?.sender ?? "", msg.from)),
+            );
+        if (/^\/(?:clear|new|resume)$/i.test(raw.trim()) && hasForeignWhatsAppWork()) {
+          await deliverReply(
+            opts.inkbox,
+            target,
+            "This request could not change the conversation. Try again after the current task finishes.",
+            logger,
+          );
+          complete();
+          return; // Session-wide controls cannot affect another source's work.
+        }
         // A bare number right after /resume selects a session to switch to.
         const candidates = resumeCandidates.get(msg.chatKey);
-        if (candidates && !msg.reaction && sameAuthor(msg.channel, candidates.sender, msg.from)) {
+        if (
+          candidates &&
+          candidates.channel === msg.channel &&
+          (candidates.route ?? undefined) ===
+            (msg.channel === "whatsapp" ? msg.conversationId : undefined) &&
+          !msg.reaction &&
+          sameAuthor(msg.channel, candidates.sender, msg.from)
+        ) {
           resumeCandidates.delete(msg.chatKey);
           const pick = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
           const chosen = Number.isInteger(pick) ? candidates.ids[pick - 1] : undefined;
           if (chosen) {
-            await sessions.resetSession(msg.chatKey);
+            if (hasForeignWhatsAppWork()) {
+              await deliverReply(
+                opts.inkbox,
+                target,
+                "This request could not change the conversation. Try again after the current task finishes.",
+                logger,
+              );
+              complete();
+              return;
+            }
+            if (msg.whatsappSource) await sessions.resetSession(msg.chatKey, target);
+            else await sessions.resetSession(msg.chatKey);
             state.setSession(msg.chatKey, chosen);
+            complete();
             await deliverReply(opts.inkbox, target, "Resumed that conversation. Go ahead.", logger);
             return;
           }
@@ -498,9 +663,27 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
               {
                 opencode: opts.opencode,
                 inkbox: opts.inkbox,
-                sessions: msg.imessageSource
-                  ? { ...sessions, abortTurn: (key) => sessions.abortTurn(key, "imessage") }
-                  : sessions,
+                sessions: msg.whatsappSource
+                  ? {
+                      ...sessions,
+                      abortTurn: (key) =>
+                        sessions.abortTurn(
+                          key,
+                          msg.channel,
+                          target,
+                          disposition?.kind === "command" ? disposition.targets.turnIds : undefined,
+                        ),
+                      resetSession: (key) =>
+                        sessions.resetSession(
+                          key,
+                          target,
+                          disposition?.kind === "command" ? disposition.targets : undefined,
+                        ),
+                    }
+                  : {
+                      ...sessions,
+                      abortTurn: (key) => sessions.abortTurn(key, msg.channel, target),
+                    },
                 logger,
                 directory: opts.directory,
                 health: () => health(opts, transport.publicUrl),
@@ -513,20 +696,33 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
           if (result.resume && result.resume.length > 0) {
             resumeCandidates.set(msg.chatKey, {
               ids: result.resume,
+              route: msg.channel === "whatsapp" ? msg.conversationId : undefined,
               sender: msg.from,
               channel: msg.channel,
             });
           }
+          complete();
           await deliverReply(opts.inkbox, target, result.reply, logger);
           return;
         }
-        if (admitted)
-          pending.cancelFor(msg.chatKey, {
-            sender: msg.from,
-            channel: msg.channel,
-            route: msg.slack ? slackRouteKey(msg.slack) : undefined,
-          });
+        if (admitted) pending.cancelFor(msg.chatKey, author, disposition?.waiterId);
         await sessions.handleInbound(msg);
+        complete();
+      },
+    };
+    return {
+      ...wrapped,
+      handleInbound: (msg: import("./types.js").InboundMessage) => {
+        if (!msg.whatsappSource) return wrapped.handleInbound(msg);
+        const key = JSON.stringify([msg.whatsappSource.identityId, msg.whatsappSource.messageId]);
+        const previous = ingressRuns.get(key);
+        const task = (previous ?? Promise.resolve())
+          .catch(() => {})
+          .then(() => wrapped.handleInbound(msg));
+        ingressRuns.set(key, task);
+        return task.finally(() => {
+          if (ingressRuns.get(key) === task) ingressRuns.delete(key);
+        });
       },
     };
   }
