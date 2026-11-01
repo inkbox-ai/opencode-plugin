@@ -429,8 +429,8 @@ export function hasWhatsAppGroupShape(value: unknown): boolean {
       ((key === "unresolvedParticipantCount" || key === "unresolved_participant_count") &&
         item != null &&
         item !== 0) ||
-      ((key === "participants" || key === "recipients") &&
-        (!Array.isArray(item) || item.length !== 1)),
+      (key === "participants" && (!Array.isArray(item) || item.length !== 1)) ||
+      (key === "recipients" && (!Array.isArray(item) || item.length > 1)),
   );
 }
 

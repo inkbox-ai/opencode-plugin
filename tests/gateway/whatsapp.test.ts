@@ -391,6 +391,7 @@ it("refreshes inbound owned media, preserves contact session convergence, and ig
     ...wire,
     direction: "inbound",
     sender_number: "+15555550101",
+    recipients: [],
     status: "received",
     media: [{ id: "owned-media", url: "https://media.test/expired" }],
   };
@@ -1109,6 +1110,7 @@ it("uses the canonical complete-target reaction webhook and ignores unresolved a
   await dispatchEvent(deps, e);
   expect(handleInbound).not.toHaveBeenCalled();
   raw.data.reaction.remote_number = shared.message.participants[0];
+  raw.data.message.recipients = [];
   await dispatchEvent(deps, e);
   expect(handleInbound).toHaveBeenCalledOnce();
   expect(handleInbound.mock.calls[0][0].text).toContain("context, not a new instruction");
