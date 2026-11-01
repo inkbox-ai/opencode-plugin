@@ -12,7 +12,9 @@
       "name": "direct_list",
       "valid": false,
       "body": {
-        "to": ["+14155550100"],
+        "to": [
+          "+14155550100"
+        ],
         "text": "Hello"
       }
     },
@@ -20,7 +22,10 @@
       "name": "group",
       "valid": false,
       "body": {
-        "to": ["+14155550101", "+14155550100"],
+        "to": [
+          "+14155550101",
+          "+14155550100"
+        ],
         "text": "Hello everyone"
       }
     },
@@ -28,7 +33,10 @@
       "name": "duplicate",
       "valid": false,
       "body": {
-        "to": ["+14155550100", "+14155550100"],
+        "to": [
+          "+14155550100",
+          "+14155550100"
+        ],
         "text": "Hello"
       }
     },
@@ -78,13 +86,13 @@
     }
   ],
   "named_emoji": {
-    "love": "❤️",
-    "like": "👍",
-    "dislike": "👎",
-    "laugh": "😂",
-    "emphasize": "‼️",
-    "question": "❓",
-    "eyes": "👀"
+    "love": "\u2764\ufe0f",
+    "like": "\ud83d\udc4d",
+    "dislike": "\ud83d\udc4e",
+    "laugh": "\ud83d\ude02",
+    "emphasize": "\u203c\ufe0f",
+    "question": "\u2753",
+    "eyes": "\ud83d\udc40"
   },
   "message": {
     "id": "30000000-0000-4000-8000-000000000003",
@@ -94,8 +102,10 @@
     "local_number": "+15555550100",
     "remote_number": "+15555550101",
     "sender_number": "+15555550100",
-    "participants": ["+15555550101"],
-    "content": "Hello 👋",
+    "participants": [
+      "+15555550101"
+    ],
+    "content": "Hello \ud83d\udc4b",
     "media": [],
     "status": "sent",
     "delivery_state": "unknown",
@@ -136,7 +146,7 @@
         "remote_number": "+15555550100",
         "reaction": "love",
         "custom_emoji": null,
-        "emoji": "❤️",
+        "emoji": "\u2764\ufe0f",
         "status": "applied",
         "revision": 1,
         "created_at": "2026-10-01T12:00:00Z",
@@ -154,7 +164,7 @@
     "remote_number": "+15555550100",
     "reaction": "love",
     "custom_emoji": null,
-    "emoji": "❤️",
+    "emoji": "\u2764\ufe0f",
     "status": "applied",
     "revision": 1,
     "created_at": "2026-10-01T12:00:00Z",
@@ -170,7 +180,7 @@
     "remote_number": "+15555550100",
     "reaction": "love",
     "custom_emoji": null,
-    "emoji": "❤️",
+    "emoji": "\u2764\ufe0f",
     "status": "uncertain",
     "revision": 2,
     "created_at": "2026-10-01T12:00:00Z",
@@ -186,7 +196,7 @@
     "remote_number": "+15555550100",
     "reaction": "love",
     "custom_emoji": null,
-    "emoji": "❤️",
+    "emoji": "\u2764\ufe0f",
     "status": "removed",
     "revision": 2,
     "created_at": "2026-10-01T12:00:00Z",
@@ -206,17 +216,14 @@
         "local_number": "+15555550100",
         "remote_number": "+15555550101",
         "sender_number": "+15555550101",
-        "participants": ["+15555550101"],
+        "participants": [
+          "+15555550101"
+        ],
         "content": "Original question",
         "media": [],
         "status": "received",
         "delivery_state": null,
-        "recipients": [
-          {
-            "remote_number": "+15555550101",
-            "status": "received"
-          }
-        ],
+        "recipients": [],
         "is_read": false,
         "is_blocked": false,
         "error_code": null,
@@ -242,8 +249,10 @@
         "local_number": "+15555550100",
         "remote_number": "+15555550101",
         "sender_number": "+15555550100",
-        "participants": ["+15555550101"],
-        "content": "Hello 👋",
+        "participants": [
+          "+15555550101"
+        ],
+        "content": "Hello \ud83d\udc4b",
         "media": [],
         "status": "sent",
         "delivery_state": "unknown",
@@ -284,7 +293,7 @@
             "remote_number": "+15555550100",
             "reaction": "love",
             "custom_emoji": null,
-            "emoji": "❤️",
+            "emoji": "\u2764\ufe0f",
             "status": "applied",
             "revision": 1,
             "created_at": "2026-10-01T12:00:00Z",
@@ -310,7 +319,7 @@
         "remote_number": null,
         "reaction": "love",
         "custom_emoji": null,
-        "emoji": "❤️",
+        "emoji": "\u2764\ufe0f",
         "status": "applied",
         "revision": 1,
         "created_at": "2026-10-01T12:00:00Z",
@@ -327,8 +336,10 @@
         "local_number": "+15555550100",
         "remote_number": "+15555550101",
         "sender_number": "+15555550100",
-        "participants": ["+15555550101"],
-        "content": "Hello 👋",
+        "participants": [
+          "+15555550101"
+        ],
+        "content": "Hello \ud83d\udc4b",
         "media": [],
         "status": "sent",
         "delivery_state": "unknown",
@@ -367,7 +378,7 @@
             "remote_number": "+15555550100",
             "reaction": "love",
             "custom_emoji": null,
-            "emoji": "❤️",
+            "emoji": "\u2764\ufe0f",
             "status": "applied",
             "revision": 1,
             "created_at": "2026-10-01T12:00:00Z",
@@ -382,7 +393,9 @@
     "agent_identity_id": "10000000-0000-4000-8000-000000000001",
     "local_number": "+15555550100",
     "remote_number": "+15555550101",
-    "participants": ["+15555550101"],
+    "participants": [
+      "+15555550101"
+    ],
     "created_at": "2026-10-01T12:00:00Z",
     "updated_at": "2026-10-01T12:00:00Z",
     "id": "20000000-0000-4000-8000-000000000002"
