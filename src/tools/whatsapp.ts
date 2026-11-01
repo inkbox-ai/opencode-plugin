@@ -8,10 +8,11 @@ import { approveOutbound } from "../permissions.js";
 import {
   assertWhatsAppOwner,
   assertWhatsAppText,
+  hasWhatsAppGroupShape,
   prepareWhatsApp,
   publicWhatsAppPolicy,
   WHATSAPP_MAX_MEDIA_BYTES,
-  whatsappRecipients,
+  whatsappRecipient,
   whatsappToolOwner,
 } from "../whatsapp-native.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -59,8 +60,8 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "list_whatsapp_conversations",
-      "List direct and group WhatsApp conversations and local unread counts.",
-      { ...page, includeGroups: z.boolean().optional() },
+      "List direct WhatsApp conversations and local unread counts.",
+      { ...page },
       read("listWhatsAppConversations"),
     ],
     [
@@ -75,7 +76,6 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       {
         ...page,
         conversationId: z.string().optional(),
-        includeGroups: z.boolean().optional(),
         threadId: z.string().optional(),
       },
       read("listWhatsAppMessages"),
@@ -176,11 +176,13 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "send_whatsapp",
-      "Send WhatsApp text/media to one recipient, 2–8 recipients for a group, or an existing direct/group conversation. Active-source replies inherit their conversation and quote target; explicit destinations remain authoritative. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
+      "Send WhatsApp text/media to one E.164 recipient string or an existing direct conversation. Active-source replies inherit their conversation and quote target; explicit destinations remain authoritative. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
       {
-        to: z.union([z.string(), z.array(z.string()).min(1).max(8)]).optional(),
+        to: z
+          .string()
+          .regex(/^\+[1-9]\d{6,14}$/)
+          .optional(),
         replyToMessageId: z.string().min(1).optional(),
-        groupName: z.string().min(1).max(100).optional(),
         conversationId: z.string().optional(),
         text: z.string().optional(),
         mediaId: z.string().optional(),
@@ -204,20 +206,18 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           (typeof args.replyToMessageId !== "string" || !args.replyToMessageId.trim())
         )
           throw new Error("replyToMessageId must be a nonempty message ID.");
-        const explicitRecipients = args.to === undefined ? undefined : whatsappRecipients(args.to);
+        const recipient = args.to === undefined ? undefined : whatsappRecipient(args.to);
         if (args.replyToMessageId && !conversationId)
           throw new Error("replyToMessageId requires conversationId.");
-        if (args.groupName && (!explicitRecipients || explicitRecipients.length < 2))
-          throw new Error("groupName is only a group creation hint.");
         if (
           conversation &&
           (conversation.agentIdentityId !== identity.id ||
-            !conversation.participants.length ||
-            (conversation.unresolvedParticipantCount ?? 0) > 0 ||
+            conversation.participants.length !== 1 ||
+            hasWhatsAppGroupShape(conversation) ||
             conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number)))
         )
           throw new Error("A resolved conversation owned by this identity is required.");
-        const recipients = explicitRecipients ?? conversation?.participants ?? [];
+        const recipients = recipient ? [recipient] : (conversation?.participants ?? []);
         await approveOutbound(ctx, deps.config, {
           tool: "inkbox_send_whatsapp",
           recipients,
@@ -231,7 +231,6 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           ...(args.text !== undefined ? { text: args.text } : {}),
           ...(args.mediaId ? { mediaIds: [args.mediaId] } : {}),
           ...(args.replyToMessageId ? { replyToMessageId: args.replyToMessageId } : {}),
-          ...(args.groupName ? { groupName: args.groupName } : {}),
         };
         const source = owner?.nativeOwner?.turnId ?? ctx.messageID;
         const key =
@@ -239,21 +238,15 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
           `opencode:whatsapp-tool:${createHash("sha256")
             .update(JSON.stringify([identity.id, source, args.to, args.conversationId, payload]))
             .digest("hex")}`;
-        const recipient = explicitRecipients?.length === 1 ? explicitRecipients[0] : "";
         const sameConversation =
           owner?.channel === "whatsapp" &&
           (conversationId?.toLowerCase() === owner.conversationId?.toLowerCase() ||
-            (!owner.group && /^\+[1-9]\d{6,14}$/.test(recipient) && recipient === owner.sender));
+            (!owner.group && recipient !== undefined && recipient === owner.sender));
         const target = {
           ...(owner ?? {}),
           channel: "whatsapp" as const,
-          to: sameConversation
-            ? undefined
-            : typeof args.to === "string"
-              ? explicitRecipients?.[0]
-              : undefined,
-          whatsappRecipients:
-            !sameConversation && Array.isArray(args.to) ? explicitRecipients : undefined,
+          group: owner?.channel === "whatsapp" ? owner.group : undefined,
+          to: sameConversation ? undefined : recipient,
           // Source ownership does not rewrite a retained request selector.
           conversationId: sameConversation
             ? (conversationId ?? owner.conversationId)
@@ -327,10 +320,12 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
         );
         const conversation = await identity.getWhatsAppConversation(message.conversationId);
         if (
+          hasWhatsAppGroupShape(message) ||
+          hasWhatsAppGroupShape(receipt) ||
           message.agentIdentityId !== identity.id ||
           conversation.agentIdentityId !== identity.id ||
-          !conversation.participants.length ||
-          (conversation.unresolvedParticipantCount ?? 0) > 0 ||
+          conversation.participants.length !== 1 ||
+          hasWhatsAppGroupShape(conversation) ||
           conversation.participants.some((number: string) => !/^\+[1-9]\d{6,14}$/.test(number))
         )
           throw new Error("The reaction target must belong to a resolved owned conversation.");
@@ -396,6 +391,8 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
       description,
       args,
       async execute(input, ctx) {
+        if (hasWhatsAppGroupShape(input) || "includeGroups" in input)
+          throw new Error("WhatsApp supports direct messages only.");
         const owner = await whatsappToolOwner(ctx.sessionID, ctx, deps.opencode);
         assertWhatsAppOwner(owner);
         if (ctx.abort?.aborted) throw new Error("The originating tool was cancelled.");

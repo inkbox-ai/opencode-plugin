@@ -25,6 +25,9 @@ import {
 const owner = "10000000-0000-4000-8000-000000000001",
   conversation = "20000000-0000-4000-8000-000000000001",
   source = "30000000-0000-4000-8000-000000000001";
+const dmIdentity = {
+  getWhatsAppConversation: async () => ({ agentIdentityId: owner, participants: ["+15555550101"] }),
+};
 const time = "2026-10-01T12:00:00Z";
 const wire = {
   id: source,
@@ -35,12 +38,11 @@ const wire = {
   remote_number: "+15555550101",
   sender_number: "+15555550100",
   participants: ["+15555550101"],
-  is_group: false,
   content: "Saved answer",
   media: [],
   status: "sent",
   delivery_state: "unknown",
-  recipients: [],
+  recipients: [{ remote_number: "+15555550101" }],
   is_read: false,
   is_blocked: false,
   error_code: null,
@@ -76,6 +78,7 @@ async function realIdentity() {
   return { sdk, identity };
 }
 const identityWire = {
+  ...dmIdentity,
   id: owner,
   organization_id: "org_example",
   agent_handle: "sample-agent",
@@ -94,6 +97,7 @@ it("uses the real SDK for stable source-anchored replies without unsupported fal
     "fetch",
     vi.fn(async (url, init) => {
       calls.push({ url: new URL(String(url)), init });
+      if (String(url).includes("/conversations/")) return ok(conversationWire);
       return ok(
         String(url).includes("/identities/") ? identityWire : { message: wire },
         init?.method === "POST" ? 201 : 200,
@@ -127,8 +131,6 @@ const conversationWire = {
   local_number: "+15555550100",
   remote_number: "+15555550101",
   participants: ["+15555550101"],
-  is_group: false,
-  unresolved_participant_count: 0,
   created_at: time,
   updated_at: time,
 };
@@ -281,6 +283,7 @@ it.each([
 it("retains the original owned attachment and logical key after ambiguity; never uploads or sends twice", async () => {
   const store = state();
   const identity: any = {
+    ...dmIdentity,
     id: owner,
     sendWhatsApp: vi.fn(async () => {
       throw new Error("lost response");
@@ -322,7 +325,7 @@ it("rejects revoked source leases before any send and never converts a cancelled
     updatedAt: 1,
   });
   const owned = { ...target, nativeOwner: { turnId: "turn", ownerId: "owner" } };
-  const identity: any = { id: owner, sendWhatsApp: vi.fn() };
+  const identity: any = { ...dmIdentity, id: owner, sendWhatsApp: vi.fn() };
   const send = await prepareWhatsApp(identity, owned, { text: "answer" }, store);
   store.updateTurn("turn", { state: "interrupted" });
   expect(() => assertWhatsAppOwner(owned, store)).toThrow("no longer owns");
@@ -354,6 +357,7 @@ it("refreshes inbound owned media, preserves contact session convergence, and ig
   const store = state(),
     handleInbound = vi.fn(async (_message: unknown) => {});
   const identity: any = {
+    ...dmIdentity,
     id: owner,
     getWhatsAppMedia: vi.fn(async () => ({
       id: "owned-media",
@@ -534,6 +538,7 @@ it("preserves only public quota fields and permits the original key after a know
     status_code: 429,
   });
   const identity: any = {
+    ...dmIdentity,
     id: owner,
     sendWhatsApp: vi.fn().mockRejectedValueOnce(error).mockResolvedValueOnce({ id: "accepted" }),
   };
@@ -569,7 +574,7 @@ it.each([
       .fn()
       .mockRejectedValueOnce(error)
       .mockResolvedValue({ id: "must-not-repeat" });
-    const identity: any = { id: owner, sendWhatsApp };
+    const identity: any = { ...dmIdentity, id: owner, sendWhatsApp };
     await expect(
       (await prepareWhatsApp(identity, target, { text: "answer" }, store, "original-key"))(),
     ).rejects.toThrow("not confirmed");
@@ -597,7 +602,7 @@ it("curates email policy rejection and recovers only the original send key", asy
     .fn()
     .mockRejectedValueOnce(error)
     .mockResolvedValue({ id: "accepted-original" });
-  const identity: any = { id: owner, sendWhatsApp };
+  const identity: any = { ...dmIdentity, id: owner, sendWhatsApp };
   const send = () =>
     prepareWhatsApp(
       identity,
@@ -637,7 +642,7 @@ it("rechecks source authority after delayed identity resolution before uploading
     runtime: {
       getIdentity: async () => {
         store.updateTurn("turn", { state: "interrupted" });
-        return { id: owner, uploadWhatsAppMedia: upload };
+        return { ...dmIdentity, id: owner, uploadWhatsAppMedia: upload };
       },
     },
     opencode: {
@@ -666,10 +671,6 @@ it("rechecks source authority after delayed identity resolution before uploading
 it.each([
   ["+15555550101", false],
   ["+15555550101", true],
-  [" +1 (555) 555-0101 ", false],
-  [" +1 (555) 555-0101 ", true],
-  [["+15555550101"], false],
-  [["+15555550101"], true],
   ["+15555550102", false],
 ])(
   "keeps explicit same-recipient delivery bound to the original final (%s, uncertain=%s)",
@@ -696,7 +697,7 @@ it.each([
       return { id: source, conversationId: conversation };
     });
     const deps: any = {
-      runtime: { getIdentity: async () => ({ id: owner, sendWhatsApp: send }) },
+      runtime: { getIdentity: async () => ({ ...dmIdentity, id: owner, sendWhatsApp: send }) },
       config: { outbound: { approval: "auto", allowedRecipients: [] } },
       opencode: {
         session: {
@@ -722,12 +723,11 @@ function v2Tools(allowedRecipients: string[] = []) {
   state();
   vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
   const identity: any = {
+    ...dmIdentity,
     id: owner,
     getWhatsAppConversation: vi.fn(async () => ({
       agentIdentityId: owner,
-      isGroup: true,
-      participants: ["+15555550101", "+15555550102"],
-      unresolvedParticipantCount: 0,
+      participants: ["+15555550101"],
     })),
     getWhatsAppMessage: vi.fn(async () => ({
       agentIdentityId: owner,
@@ -772,58 +772,42 @@ function v2Tools(allowedRecipients: string[] = []) {
       tools.find((tool) => tool.name === `inkbox_${name}`)!.definition.execute(args, ctx),
   };
 }
-it("supports group creation and explicit quotes while enforcing every participant permission", async () => {
-  const f = v2Tools(["+15555550101", "+15555550102"]);
+it("rejects every recipient array and list while retaining DM quotes", async () => {
+  const f = v2Tools(["+15555550101"]);
   expect(f.tools).toHaveLength(15);
-  await f.execute("send_whatsapp", {
-    to: ["+1 (555)555-0101", "+15555550102"],
-    groupName: "Team",
-    text: "Hello",
-    idempotencyKey: "group-key",
-  });
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({
-    to: ["+15555550101", "+15555550102"],
-    groupName: "Team",
-    text: "Hello",
-    idempotencyKey: "group-key",
-  });
-  await f.execute("send_whatsapp", {
-    conversationId: conversation,
-    replyToMessageId: source,
-    text: "Quoted",
-    idempotencyKey: "quote-key",
-  });
-  expect(f.identity.sendWhatsApp.mock.calls[1][0]).toEqual({
-    conversationId: conversation,
-    replyToMessageId: source,
-    text: "Quoted",
-    idempotencyKey: "quote-key",
-  });
   for (const to of [
-    ["+15555550101", "+15555550103"],
-    ["+15555550101", "+1 (555)555-0101"],
-    ["123@g.us"],
+    [],
+    ["+15555550101"],
+    ["+15555550101", "+15555550102"],
+    "+15555550101,+15555550102",
+    "123@g.us",
   ])
     await expect(f.execute("send_whatsapp", { to, text: "Blocked" })).rejects.toThrow();
   await expect(
-    f.execute("send_whatsapp", { to: "+15555550101", replyToMessageId: source, text: "Bad" }),
-  ).rejects.toThrow("requires conversationId");
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
-});
-it("addresses larger existing groups by ID and rejects unresolved or foreign conversation targets", async () => {
-  const f = v2Tools();
-  f.identity.getWhatsAppConversation.mockResolvedValue({
-    agentIdentityId: owner,
-    isGroup: true,
-    participants: Array.from({ length: 10 }, (_, i) => `+15555550${String(120 + i)}`),
-  });
+    f.execute("send_whatsapp", { to: "+15555550101", groupName: "Team", text: "Blocked" }),
+  ).rejects.toThrow();
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
   await f.execute("send_whatsapp", {
     conversationId: conversation,
-    text: "All",
-    idempotencyKey: "large-group",
+    replyToMessageId: source,
+    text: "Quoted",
+    idempotencyKey: "quote-key",
   });
-  expect(f.identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("to");
-  for (const change of [{ agentIdentityId: "foreign" }, { unresolvedParticipantCount: 1 }]) {
+  expect(f.identity.sendWhatsApp).toHaveBeenCalledWith({
+    conversationId: conversation,
+    replyToMessageId: source,
+    text: "Quoted",
+    idempotencyKey: "quote-key",
+  });
+});
+it("rejects group and foreign conversation targets", async () => {
+  const f = v2Tools();
+  for (const change of [
+    { participants: ["+15555550101", "+15555550102"] },
+    { isGroup: true },
+    { groupName: "Group" },
+    { agentIdentityId: "foreign" },
+  ]) {
     f.identity.getWhatsAppConversation.mockResolvedValue({
       agentIdentityId: owner,
       participants: ["+15555550101"],
@@ -835,14 +819,14 @@ it("addresses larger existing groups by ID and rejects unresolved or foreign con
         text: "Blocked",
         idempotencyKey: "blocked",
       }),
-    ).rejects.toThrow("resolved conversation");
+    ).rejects.toThrow();
   }
-  expect(f.identity.sendWhatsApp).toHaveBeenCalledOnce();
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
 });
 it("retains explicit quote and destination identity across lost-response retries instead of issuing a new send", async () => {
   const store = state(),
     sendWhatsApp = vi.fn().mockRejectedValue(new TypeError("timeout")),
-    identity: any = { id: owner, sendWhatsApp };
+    identity: any = { ...dmIdentity, id: owner, sendWhatsApp };
   const payload = { text: "Quoted", replyToMessageId: source };
   await expect(
     (await prepareWhatsApp(identity, target, payload, store, "original-quote"))(),
@@ -1030,120 +1014,73 @@ it("reads nullable unthreaded envelopes without inventing thread IDs", async () 
     cursor: undefined,
   });
 });
-it("routes group messages and peer reactions by conversation while checking the actual author", async () => {
-  const handleInbound = vi.fn(),
-    chatKeyFor = vi.fn((input) => input.contactId ?? `group:${input.conversationId}`);
+it("never routes group-shaped messages or reactions to an agent", async () => {
+  const handleInbound = vi.fn();
   const deps: any = {
     config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true } },
     inkbox: { getIdentity: async () => ({ id: owner }) },
-    contacts: { resolve: vi.fn(async () => ({ contactId: "same-contact" })), chatKeyFor },
+    contacts: {
+      resolve: vi.fn(async () => ({ contactId: "same-contact" })),
+      chatKeyFor: () => "contact",
+    },
     sessions: { handleInbound },
     state: state(),
     notify: createNotifyOnce(),
     logger,
   };
-  const message = {
-    ...wire,
-    remote_number: null,
-    reply_to_message_id: "quote-parent",
-    thread_id: "quote-thread",
-    thread_root_message_id: "quote-root",
-    is_group: true,
-    direction: "inbound",
-    sender_number: "+15555550101",
-    participants: ["+15555550101", "+15555550102"],
-  };
-  const e: any = {
-    provider: "inkbox",
-    verified: true,
-    eventType: "whatsapp.received",
-    body: { data: { message } },
-    headers: {},
-  };
-  await dispatchEvent(deps, e);
-  expect(handleInbound.mock.calls[0][0]).toMatchObject({
-    chatKey: `group:${conversation}`,
-    group: { participantCount: 2 },
-    whatsappSource: {
-      parentMessageId: "quote-parent",
-      threadId: "quote-thread",
-      rootMessageId: "quote-root",
-    },
-    from: "+15555550101",
-  });
-  const reaction = {
-    id: "reaction-1",
-    revision: 1,
-    agent_identity_id: owner,
-    conversation_id: conversation,
-    target_message_id: source,
-    direction: "inbound",
-    remote_number: "+15555550102",
-    status: "applied",
-    emoji: "👀",
-  };
-  await dispatchEvent(deps, {
-    ...e,
-    eventType: "whatsapp.reaction_received",
-    body: { data: { message: { ...message, direction: "outbound" }, reaction } },
-  });
-  expect(handleInbound.mock.calls[1][0]).toMatchObject({
-    messageId: "reaction:reaction-1:1:applied",
-    chatKey: `group:${conversation}`,
-    reaction: true,
-    from: "+15555550102",
-  });
-  expect(handleInbound.mock.calls[1][0].text).toContain("context, not a new instruction");
-  await dispatchEvent(deps, {
-    ...e,
-    eventType: "whatsapp.reaction_received",
-    body: { data: { message, reaction: { ...reaction, direction: "outbound" } } },
-  });
-  await dispatchEvent(deps, {
-    ...e,
-    body: { data: { message: { ...message, sender_number: null } } },
-  });
-  await dispatchEvent(deps, {
-    ...e,
-    eventType: "whatsapp.reaction_received",
-    body: { data: { message: { ...message, is_blocked: true }, reaction } },
-  });
-  expect(handleInbound).toHaveBeenCalledTimes(2);
-  await dispatchEvent(deps, {
-    ...e,
-    eventType: "whatsapp.reaction_received",
-    body: { data: { message, reaction: { ...reaction, revision: 2, status: "removed" } } },
-  });
-  expect(handleInbound.mock.calls[2][0]).toMatchObject({
-    messageId: "reaction:reaction-1:2:removed",
-    reaction: true,
-  });
+  for (const shape of [
+    { remote_number: null },
+    { is_group: true },
+    { group_name: "Group" },
+    { participants: ["+15555550101", "+15555550102"] },
+    { recipients: [{}, {}] },
+  ]) {
+    const message = { ...wire, direction: "inbound", sender_number: "+15555550101", ...shape };
+    const event: any = {
+      provider: "inkbox",
+      verified: true,
+      eventType: "whatsapp.received",
+      body: { data: { message } },
+      headers: {},
+    };
+    await dispatchEvent(deps, event);
+    await dispatchEvent(deps, {
+      ...event,
+      eventType: "whatsapp.reaction_received",
+      body: {
+        data: {
+          message,
+          reaction: {
+            id: "reaction",
+            revision: 1,
+            agent_identity_id: owner,
+            conversation_id: conversation,
+            target_message_id: source,
+            direction: "inbound",
+            remote_number: "+15555550101",
+            status: "applied",
+            emoji: "👀",
+          },
+        },
+      },
+    });
+  }
+  expect(handleInbound).not.toHaveBeenCalled();
+  expect(deps.contacts.resolve).not.toHaveBeenCalled();
 });
-
-it.each(["whatsapp_new_group_limit", "whatsapp_group_unanswered_limit"])(
-  "curates the exact server group-policy rejection %s",
-  (code) => {
-    expect(
-      publicWhatsAppPolicy(
-        new InkboxAPIError(429, {
-          error: code,
-          quota: "whatsapp.groups_per_24h",
-          limit: 5,
-          private_detail: "not-public",
-        }),
-      ),
-    ).toEqual({ error: code, quota: "whatsapp.groups_per_24h", limit: 5, status_code: 429 });
-  },
-);
-it("checks every group peer before a reaction write", async () => {
-  const f = v2Tools(["+15555550101"]);
+it("rejects reactions to group conversations before writing", async () => {
+  const f = v2Tools();
+  f.identity.getWhatsAppConversation.mockResolvedValue({
+    agentIdentityId: owner,
+    participants: ["+15555550101", "+15555550102"],
+  });
   await expect(
     f.execute("send_whatsapp_reaction", {
       messageId: source,
       reaction: "eyes",
       idempotencyKey: "blocked-key",
     }),
-  ).rejects.toThrow("not on the outbound allowlist");
+  ).rejects.toThrow();
   expect(f.identity.sendWhatsAppReaction).not.toHaveBeenCalled();
 });
 
@@ -1212,7 +1149,11 @@ it.each(["started", "sent", "rejected"])(
       ...(status === "sent" ? { messageId: "accepted" } : {}),
     };
     store.updateWhatsAppSend(key, () => saved);
-    const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+    const identity: any = {
+      ...dmIdentity,
+      id: owner,
+      sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+    };
     const restarted = createStateStore(directories.at(-1)!);
     const send = await prepareReply(
       { getIdentity: async () => identity } as any,
@@ -1236,44 +1177,44 @@ it.each(["started", "sent", "rejected"])(
   },
 );
 
-it.each([false, true])(
-  "anchors a new ordinary reply to its source, not its quoted parent (group=%s)",
-  async (group) => {
-    const store = state();
-    const identity: any = {
-      id: owner,
-      sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
-      getWhatsAppConversation: vi.fn(async () => ({
-        agentIdentityId: owner,
-        isGroup: true,
-        participants: ["+15555550101", "+15555550102"],
-      })),
-    };
-    const route = {
-      ...target,
-      group,
-      whatsappSource: { ...target.whatsappSource, parentMessageId: "earlier-parent" },
-    };
-    await (
-      await prepareReply(
-        { getIdentity: async () => identity } as any,
-        route,
-        "New answer",
-        logger,
-        store,
-      )
-    )();
-    expect(identity.sendWhatsApp).toHaveBeenCalledWith({
-      text: "New answer",
-      conversationId: conversation,
-      replyToMessageId: source,
-      idempotencyKey: expect.any(String),
-    });
-  },
-);
+it("anchors a new ordinary reply to its source, not its quoted parent", async () => {
+  const store = state();
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+    getWhatsAppConversation: vi.fn(async () => ({
+      agentIdentityId: owner,
+      participants: ["+15555550101"],
+    })),
+  };
+  const route = {
+    ...target,
+    whatsappSource: { ...target.whatsappSource, parentMessageId: "earlier-parent" },
+  };
+  await (
+    await prepareReply(
+      { getIdentity: async () => identity } as any,
+      route,
+      "New answer",
+      logger,
+      store,
+    )
+  )();
+  expect(identity.sendWhatsApp).toHaveBeenCalledWith({
+    text: "New answer",
+    conversationId: conversation,
+    replyToMessageId: source,
+    idempotencyKey: expect.any(String),
+  });
+});
 
 it("never treats a reaction receipt or unproven reaction target as a quote", async () => {
-  const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+  };
   await (
     await prepareWhatsApp(
       identity,
@@ -1298,6 +1239,7 @@ it.each([false, true])(
   async (rejected) => {
     const store = state(),
       identity: any = {
+        ...dmIdentity,
         id: owner,
         sendWhatsApp: vi.fn(async () => {
           if (rejected) throw new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" });
@@ -1325,96 +1267,98 @@ it.each([false, true])(
 
 it("keeps an old persisted source without quote admission plain", async () => {
   const old = { ...target, whatsappSource: { messageId: source, identityId: owner } };
-  const identity: any = { id: owner, sendWhatsApp: vi.fn(async () => ({ id: "accepted" })) };
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+  };
   await (await prepareWhatsApp(identity, old, { text: "Saved answer" }, state()))();
   expect(identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
 });
 
-it.each([false, true])(
-  "defaults source-owned tools without retargeting explicit outreach (group=%s)",
-  async (group) => {
-    const store = state();
-    vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
-    store.saveTurn({
-      id: "owned-turn",
-      messageID: "input",
-      sessionID: "session",
-      chatKey: "contact",
-      state: "submitted",
-      kind: "normal",
-      text: "question",
-      deliver: true,
-      replyTarget: { ...target, group },
-      ownerId: "owner",
-      leaseUntil: Date.now() + 60000,
-      createdAt: 1,
-      updatedAt: 1,
-    });
-    const identity: any = {
-      id: owner,
-      sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
-      getWhatsAppConversation: vi.fn(async () => ({
-        agentIdentityId: owner,
-        isGroup: group,
-        participants: group ? ["+15555550101", "+15555550102"] : ["+15555550101"],
-      })),
-    };
-    const tool = whatsappTools({
-      runtime: { getIdentity: async () => identity },
-      config: { outbound: { approval: "auto", allowedRecipients: [] } },
-      opencode: {
-        session: {
-          message: async () => ({
-            data: {
-              info: {
-                role: "assistant",
-                parentID: "input",
-              },
+it("defaults source-owned tools without retargeting explicit outreach", async () => {
+  const store = state();
+  vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
+  store.saveTurn({
+    id: "owned-turn",
+    messageID: "input",
+    sessionID: "session",
+    chatKey: "contact",
+    state: "submitted",
+    kind: "normal",
+    text: "question",
+    deliver: true,
+    replyTarget: { ...target },
+    ownerId: "owner",
+    leaseUntil: Date.now() + 60000,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
+    getWhatsAppConversation: vi.fn(async () => ({
+      agentIdentityId: owner,
+      participants: ["+15555550101"],
+    })),
+  };
+  const tool = whatsappTools({
+    runtime: { getIdentity: async () => identity },
+    config: { outbound: { approval: "auto", allowedRecipients: [] } },
+    opencode: {
+      session: {
+        message: async () => ({
+          data: {
+            info: {
+              role: "assistant",
+              parentID: "input",
             },
-          }),
-        },
+          },
+        }),
       },
-    } as any).find((item) => item.name === "inkbox_send_whatsapp")!;
-    const ctx: any = {
-      sessionID: "session",
-      messageID: "assistant",
-      directory: "/tmp",
-      abort: new AbortController().signal,
-    };
-    await tool.definition.execute({ text: "Source answer" }, ctx);
-    expect(identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
-      conversationId: conversation,
-      replyToMessageId: source,
-      text: "Source answer",
-    });
-    expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
-    await tool.definition.execute({ to: "+15555550103", text: "Outreach" }, ctx);
-    expect(identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ to: "+15555550103" });
-    expect(identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
-    await tool.definition.execute(
-      { conversationId: "another-conversation", text: "Other room" },
-      ctx,
-    );
-    expect(identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({
-      conversationId: "another-conversation",
-    });
-    expect(identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("replyToMessageId");
-    await tool.definition.execute(
-      { text: "Legacy recovery", idempotencyKey: "unknown-old-key" },
-      ctx,
-    );
-    expect(identity.sendWhatsApp.mock.calls[3][0]).not.toHaveProperty("replyToMessageId");
-    store.updateTurn("owned-turn", { state: "interrupted" });
-    await expect(tool.definition.execute({ text: "Cancelled" }, ctx)).rejects.toThrow(
-      "no longer owns",
-    );
-    expect(identity.sendWhatsApp).toHaveBeenCalledTimes(4);
-  },
-);
+    },
+  } as any).find((item) => item.name === "inkbox_send_whatsapp")!;
+  const ctx: any = {
+    sessionID: "session",
+    messageID: "assistant",
+    directory: "/tmp",
+    abort: new AbortController().signal,
+  };
+  await tool.definition.execute({ text: "Source answer" }, ctx);
+  expect(identity.sendWhatsApp.mock.calls[0][0]).toMatchObject({
+    conversationId: conversation,
+    replyToMessageId: source,
+    text: "Source answer",
+  });
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
+  await tool.definition.execute({ to: "+15555550103", text: "Outreach" }, ctx);
+  expect(identity.sendWhatsApp.mock.calls[1][0]).toMatchObject({ to: "+15555550103" });
+  expect(identity.sendWhatsApp.mock.calls[1][0]).not.toHaveProperty("replyToMessageId");
+  await tool.definition.execute(
+    { conversationId: "another-conversation", text: "Other room" },
+    ctx,
+  );
+  expect(identity.sendWhatsApp.mock.calls[2][0]).toMatchObject({
+    conversationId: "another-conversation",
+  });
+  expect(identity.sendWhatsApp.mock.calls[2][0]).not.toHaveProperty("replyToMessageId");
+  await tool.definition.execute(
+    { text: "Legacy recovery", idempotencyKey: "unknown-old-key" },
+    ctx,
+  );
+  expect(identity.sendWhatsApp.mock.calls[3][0]).not.toHaveProperty("replyToMessageId");
+  store.updateTurn("owned-turn", { state: "interrupted" });
+  await expect(tool.definition.execute({ text: "Cancelled" }, ctx)).rejects.toThrow(
+    "no longer owns",
+  );
+  expect(identity.sendWhatsApp).toHaveBeenCalledTimes(4);
+});
 
 it("restores an exact saved explicit quote on key-only retry without replacing its target", async () => {
   const store = state();
   const identity: any = {
+    ...dmIdentity,
     id: owner,
     sendWhatsApp: vi
       .fn()
@@ -1543,6 +1487,7 @@ it.each([401, 403, 404, 410])(
       config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true } },
       inkbox: {
         getIdentity: async () => ({
+          ...dmIdentity,
           id: owner,
           getWhatsAppMedia: async () => {
             throw failure;
@@ -1588,34 +1533,28 @@ it.each([401, 403, 404, 410])(
 );
 
 const alphabeticConversation = "abcdefab-0000-4000-8000-000000000001";
-it.each([false, true])(
-  "keeps case-variant source tool replies quoted and source-owned (group=%s)",
-  async (group) => {
-    const calls = stubSdkFetch({
-        ...conversationWire,
-        id: alphabeticConversation,
-        is_group: group,
-        participants: group ? ["+15555550101", "+15555550102"] : ["+15555550101"],
-      }),
-      { identity } = await realIdentity();
-    const replyTarget = { ...target, conversationId: alphabeticConversation, group };
-    const tool = ownedSendTool(identity, replyTarget);
-    await tool.execute({
-      conversationId: alphabeticConversation.toUpperCase(),
-      text: "Source answer",
-    });
-    expect(posted(calls)).toHaveLength(1);
-    expect(JSON.parse(String(posted(calls)[0].init?.body))).toMatchObject({
-      conversation_id: alphabeticConversation.toUpperCase(),
-      reply_to_message_id: source,
-    });
-    expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(true);
-  },
-);
+it("keeps case-variant source tool replies quoted and source-owned", async () => {
+  const calls = stubSdkFetch({
+      ...conversationWire,
+      id: alphabeticConversation,
+      participants: ["+15555550101"],
+    }),
+    { identity } = await realIdentity();
+  const replyTarget = { ...target, conversationId: alphabeticConversation };
+  const tool = ownedSendTool(identity, replyTarget);
+  await tool.execute({
+    conversationId: alphabeticConversation.toUpperCase(),
+    text: "Source answer",
+  });
+  expect(posted(calls)).toHaveLength(1);
+  expect(JSON.parse(String(posted(calls)[0].init?.body))).toMatchObject({
+    conversation_id: alphabeticConversation.toUpperCase(),
+    reply_to_message_id: source,
+  });
+  expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(true);
+});
 
-it.each(
-  [false, true].flatMap((group) => ["rejected", "unknown"].map((outcome) => ({ group, outcome }))),
-)(
+it.each([false].flatMap((group) => ["rejected", "unknown"].map((outcome) => ({ group, outcome }))))(
   "fences alternate-case quote replacements and automatic finals (%j)",
   async ({ group, outcome }) => {
     const store = state(),
@@ -1628,7 +1567,7 @@ it.each(
           : new Error("response lost"),
       )
       .mockResolvedValue({ id: "must-not-send" });
-    const identity: any = { id: owner, sendWhatsApp };
+    const identity: any = { ...dmIdentity, id: owner, sendWhatsApp };
     await expect(
       (
         await prepareWhatsApp(
@@ -1711,6 +1650,7 @@ it("reports final SDK rejection without claiming an earlier timeout was never ac
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url, init) => {
+      if (String(url).includes("/conversations/")) return ok(conversationWire);
       if (String(url).includes("/identities/")) return ok(identityWire);
       requests.push({ body: init?.body, key: new Headers(init?.headers).get("Idempotency-Key") });
       posts++;
@@ -1758,4 +1698,63 @@ it("does not classify an unrelated selector as source-owned from returned conver
   expect(request.conversation_id).toBe(other);
   expect(request).not.toHaveProperty("reply_to_message_id");
   expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(false);
+});
+
+it.each(["started", "rejected", "sent"])(
+  "never converts saved group intent %s into a DM send",
+  async (stateName) => {
+    const store = state();
+    const identity: any = { ...dmIdentity, id: owner, sendWhatsApp: vi.fn() };
+    for (const saved of [
+      { to: ["+15555550101"], payload: JSON.stringify({ text: "Saved answer" }) },
+      { to: ["+15555550101", "+15555550102"], payload: JSON.stringify({ text: "Saved answer" }) },
+      {
+        conversationId: conversation,
+        payload: JSON.stringify({ text: "Saved answer", groupName: "Group" }),
+      },
+    ]) {
+      store.updateWhatsAppSend("old-key", () => ({
+        ...saved,
+        identityId: owner,
+        state: stateName,
+        messageId: "old-message",
+        idempotencyKey: "old-key",
+      }));
+      await expect(
+        prepareWhatsApp(identity, target, { text: "Saved answer" }, store, "old-key"),
+      ).rejects.toThrow("Stored WhatsApp group intents");
+    }
+    expect(identity.sendWhatsApp).not.toHaveBeenCalled();
+  },
+);
+it("rejects removed group selectors and exposes only scalar recipients", async () => {
+  const f = v2Tools();
+  const send = f.tools.find((tool) => tool.name === "inkbox_send_whatsapp")!;
+  const schema = z.object(send.definition.args);
+  expect(schema.safeParse({ to: ["+15555550101"], text: "No" }).success).toBe(false);
+  expect(send.definition.args).not.toHaveProperty("groupName");
+  for (const name of ["list_whatsapp_conversations", "list_whatsapp_messages"]) {
+    const tool = f.tools.find((tool) => tool.name === `inkbox_${name}`)!;
+    expect(tool.definition.args).not.toHaveProperty("includeGroups");
+    await expect(f.execute(name, { includeGroups: true })).rejects.toThrow("direct messages only");
+  }
+});
+
+it("allows explicit WhatsApp DM outreach from an unrelated channel group", async () => {
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi.fn(async () => ({ id: "sent" })),
+  };
+  const tool = ownedSendTool(identity, {
+    ...target,
+    channel: "imessage",
+    group: true,
+    whatsappSource: undefined,
+    imessageSource: { messageId: source, identityId: owner },
+  } as any);
+  await tool.execute({ to: "+15555550102", text: "Direct outreach" });
+  expect(identity.sendWhatsApp).toHaveBeenCalledWith(
+    expect.objectContaining({ to: "+15555550102", text: "Direct outreach" }),
+  );
 });

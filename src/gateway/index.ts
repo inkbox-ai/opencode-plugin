@@ -29,7 +29,7 @@ import {
   sameAuthor,
 } from "./response-policy.js";
 import { createWebhookServer } from "./server.js";
-import { createSessionManager } from "./sessions.js";
+import { createSessionManager, unsupportedWhatsAppTarget } from "./sessions.js";
 import { createStateStore } from "./state.js";
 import { reconcileSubscriptions } from "./subscriptions.js";
 import { openTransport } from "./transport.js";
@@ -447,6 +447,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     const wrapped = {
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage): Promise<void> => {
+        if (unsupportedWhatsAppTarget(msg)) return;
         let complete = () => {};
         let disposition: WhatsAppIngressDisposition | undefined;
         const author = {

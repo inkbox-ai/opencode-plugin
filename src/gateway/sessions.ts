@@ -15,7 +15,7 @@ import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js"
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
-import { hasExplicitWhatsAppReply } from "../whatsapp-native.js";
+import { hasExplicitWhatsAppReply, hasWhatsAppGroupShape } from "../whatsapp-native.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -146,6 +146,20 @@ function createMessageID(after?: string): string {
   const timestamp = sequence.toString(16).padStart(12, "0");
   const random = [...randomBytes(14)].map((byte) => BASE62[byte % BASE62.length]).join("");
   return `msg_${timestamp}${random}`;
+}
+
+export function unsupportedWhatsAppTarget(target: unknown): boolean {
+  if (!target || typeof target !== "object") return false;
+  const row = target as Record<string, unknown>;
+  return (
+    row.channel === "whatsapp" &&
+    Boolean(
+      row.group ||
+        hasWhatsAppGroupShape(row) ||
+        "whatsappRecipients" in row ||
+        Array.isArray(row.to),
+    )
+  );
 }
 
 export function createSessionManager(
@@ -1073,6 +1087,15 @@ export function createSessionManager(
       return;
     }
     if (TERMINAL.has(turn.state)) return;
+    if (unsupportedWhatsAppTarget(turn.replyTarget)) {
+      deps.state.updateTurn(id, {
+        state: "failed",
+        executionFenced: true,
+        error: "WhatsApp supports direct messages only.",
+      });
+      settle(id, undefined);
+      return;
+    }
     const renewal = setInterval(() => {
       try {
         deps.state.claimTurn(id, ownerId, LEASE_MS);
@@ -1291,6 +1314,15 @@ export function createSessionManager(
 
   function enqueue(turn: DurableTurn): void {
     if (!deps.state.getTurn(turn.id)) deps.state.saveTurn(turn);
+    if (unsupportedWhatsAppTarget(turn.replyTarget)) {
+      deps.state.updateTurn(turn.id, {
+        state: "failed",
+        executionFenced: true,
+        error: "WhatsApp supports direct messages only.",
+      });
+      settle(turn.id, undefined);
+      return;
+    }
     if (!turn.companion || (turn.companion.hydrated && turn.wake)) activityEvent(turn, "accepted");
     const entry = per(turn.chatKey);
     if (entry.runningId !== turn.id && !entry.queue.includes(turn.id)) entry.queue.push(turn.id);
@@ -1700,6 +1732,7 @@ export function createSessionManager(
         );
     },
     async handleInbound(msg: InboundMessage) {
+      if (unsupportedWhatsAppTarget(msg)) return;
       if (closing) throw new Error("Gateway is closing; retry inbound delivery.");
       const reactionSource = msg.whatsappSource;
       const reactionRevision = reactionSource?.reactionRevision;

@@ -10,7 +10,7 @@
     },
     {
       "name": "direct_list",
-      "valid": true,
+      "valid": false,
       "body": {
         "to": ["+14155550100"],
         "text": "Hello"
@@ -18,10 +18,9 @@
     },
     {
       "name": "group",
-      "valid": true,
+      "valid": false,
       "body": {
         "to": ["+14155550101", "+14155550100"],
-        "group_name": "Team",
         "text": "Hello everyone"
       }
     },
@@ -70,12 +69,11 @@
       }
     },
     {
-      "name": "group_name_with_conversation",
+      "name": "comma_list",
       "valid": false,
       "body": {
-        "conversation_id": "11111111-1111-4111-8111-111111111111",
-        "group_name": "Rename",
-        "text": "Reply"
+        "to": "+14155550100,+14155550101",
+        "text": "Hello"
       }
     }
   ],
@@ -97,7 +95,6 @@
     "remote_number": "+15555550101",
     "sender_number": "+15555550100",
     "participants": ["+15555550101"],
-    "is_group": false,
     "content": "Hello 👋",
     "media": [],
     "status": "sent",
@@ -147,19 +144,6 @@
         "removed_at": null
       }
     ]
-  },
-  "conversation": {
-    "agent_identity_id": "10000000-0000-4000-8000-000000000001",
-    "local_number": "+15555550100",
-    "remote_number": null,
-    "participants": ["+15555550101", "+15555550102"],
-    "is_group": true,
-    "created_at": "2026-10-01T12:00:00Z",
-    "updated_at": "2026-10-01T12:00:00Z",
-    "id": "20000000-0000-4000-8000-000000000002",
-    "group_name": "Example group",
-    "group_creation_status": "uncertain",
-    "unresolved_participant_count": 1
   },
   "reaction": {
     "id": "55555555-5555-4555-8555-555555555555",
@@ -223,12 +207,16 @@
         "remote_number": "+15555550101",
         "sender_number": "+15555550101",
         "participants": ["+15555550101"],
-        "is_group": false,
-        "content": "Original group question",
+        "content": "Original question",
         "media": [],
         "status": "received",
         "delivery_state": null,
-        "recipients": [],
+        "recipients": [
+          {
+            "remote_number": "+15555550101",
+            "status": "received"
+          }
+        ],
         "is_read": false,
         "is_blocked": false,
         "error_code": null,
@@ -255,7 +243,6 @@
         "remote_number": "+15555550101",
         "sender_number": "+15555550100",
         "participants": ["+15555550101"],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",
@@ -341,7 +328,6 @@
         "remote_number": "+15555550101",
         "sender_number": "+15555550100",
         "participants": ["+15555550101"],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",
@@ -391,5 +377,14 @@
         ]
       }
     }
+  },
+  "conversation": {
+    "agent_identity_id": "10000000-0000-4000-8000-000000000001",
+    "local_number": "+15555550100",
+    "remote_number": "+15555550101",
+    "participants": ["+15555550101"],
+    "created_at": "2026-10-01T12:00:00Z",
+    "updated_at": "2026-10-01T12:00:00Z",
+    "id": "20000000-0000-4000-8000-000000000002"
   }
 }

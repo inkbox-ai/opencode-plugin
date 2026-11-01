@@ -23,8 +23,6 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
   409: [
     "whatsapp_capability_not_ready",
     "whatsapp_quote_unavailable",
-    "whatsapp_membership_unresolved",
-    "whatsapp_group_unavailable",
     "whatsapp_reaction_pending",
     "whatsapp_reaction_target_unavailable",
   ],
@@ -42,8 +40,6 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
   ],
   429: [
     "whatsapp_daily_limit_exceeded",
-    "whatsapp_new_group_limit",
-    "whatsapp_group_unanswered_limit",
     "whatsapp_unanswered_message_limit",
     "whatsapp_conversation_rate_limited",
     "whatsapp_new_contact_rate_limited",
@@ -57,6 +53,11 @@ export function assertWhatsAppOwner(
   target: WhatsAppOwner | undefined,
   store = createStateStore(),
 ): void {
+  if (
+    target?.channel === "whatsapp" &&
+    (target.group || hasWhatsAppGroupShape(target) || Array.isArray(target.to))
+  )
+    throw new Error("WhatsApp supports direct messages only.");
   if (!target?.nativeOwner) return;
   const turn = store.getTurn(target.nativeOwner.turnId);
   if (
@@ -117,10 +118,9 @@ export function assertWhatsAppText(text: string): void {
 // A caller-supplied quote or key that cannot be sent is not an unknown delivery.
 function assertSendableWhatsAppRequest(
   input: {
-    to?: string | string[];
+    to?: string;
     conversationId?: string;
     replyToMessageId?: string;
-    groupName?: string;
     text?: string;
     mediaIds?: string[];
     idempotencyKey: string;
@@ -129,17 +129,7 @@ function assertSendableWhatsAppRequest(
 ): void {
   if ((input.to == null) === (input.conversationId == null))
     throw new Error("Specify exactly one of to or conversationId");
-  const recipients = input.to == null ? [] : typeof input.to === "string" ? [input.to] : input.to;
-  if (
-    input.to != null &&
-    (recipients.length < 1 ||
-      recipients.length > 8 ||
-      recipients.some(
-        (value) => typeof value !== "string" || !/^\+[1-9][0-9]{6,14}$/.test(value),
-      ) ||
-      new Set(recipients).size !== recipients.length)
-  )
-    throw new Error("Provide 1–8 unique E.164 recipients");
+  if (input.to != null) whatsappRecipient(input.to);
   if (
     explicitQuote &&
     input.replyToMessageId != null &&
@@ -147,14 +137,6 @@ function assertSendableWhatsAppRequest(
       !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(input.replyToMessageId))
   )
     throw new Error("replyToMessageId requires conversationId and a valid message UUID");
-  if (
-    input.groupName != null &&
-    (!Array.isArray(input.to) ||
-      input.to.length < 2 ||
-      !input.groupName.trim() ||
-      Array.from(input.groupName).length > 100)
-  )
-    throw new Error("groupName requires a new recipient-list group and 1–100 characters");
   if ((input.mediaIds?.length ?? 0) > 1)
     throw new Error("WhatsApp supports at most one attachment");
   if (!input.text?.trim() && !input.mediaIds?.length)
@@ -172,7 +154,7 @@ function assertSendableWhatsAppRequest(
 export async function prepareWhatsApp(
   identity: AgentIdentity,
   target: WhatsAppOwner,
-  payload: { text?: string; mediaIds?: string[]; replyToMessageId?: string; groupName?: string },
+  payload: { text?: string; mediaIds?: string[]; replyToMessageId?: string },
   store = createStateStore(),
   originalKey?: string,
   inheritSourceQuote = true,
@@ -183,11 +165,28 @@ export async function prepareWhatsApp(
   assertWhatsAppText(payload.text ?? "");
   const suppliedQuote = payload.replyToMessageId;
   const source = target.whatsappSource;
-  const destination =
-    (target as WhatsAppOwner & { whatsappRecipients?: string[] }).whatsappRecipients ?? target.to;
+  if (
+    target.group ||
+    "whatsappRecipients" in target ||
+    hasWhatsAppGroupShape(target) ||
+    hasWhatsAppGroupShape(payload)
+  )
+    throw new Error("WhatsApp supports direct messages only.");
+  const destination = target.to;
+  if (destination !== undefined) whatsappRecipient(destination);
   if (!(target.conversationId || destination) || (source && source.identityId !== identity.id))
     throw new Error("The original WhatsApp identity or conversation changed.");
   assertWhatsAppOwner(target, store);
+  if (target.conversationId) {
+    const conversation = await identity.getWhatsAppConversation(target.conversationId);
+    if (
+      conversation.agentIdentityId !== identity.id ||
+      hasWhatsAppGroupShape(conversation) ||
+      conversation.participants.length !== 1
+    )
+      throw new Error("An owned direct WhatsApp conversation is required.");
+    whatsappRecipient(conversation.participants[0]);
+  }
   const keyFor = (body: typeof payload) =>
     `opencode:whatsapp:${createHash("sha256")
       .update(
@@ -208,6 +207,11 @@ export async function prepareWhatsApp(
     saved && typeof saved.payload === "string"
       ? (JSON.parse(saved.payload) as typeof payload)
       : undefined;
+  if (
+    saved &&
+    (Array.isArray(saved.to) || hasWhatsAppGroupShape(saved) || hasWhatsAppGroupShape(savedPayload))
+  )
+    throw new Error("Stored WhatsApp group intents cannot be sent as direct messages.");
   if (!payload.replyToMessageId && originalKey && savedPayload?.replyToMessageId) {
     payload = { ...payload, replyToMessageId: savedPayload.replyToMessageId };
   } else if (
@@ -248,7 +252,6 @@ export async function prepareWhatsApp(
           text: payload.text,
           mediaIds: payload.mediaIds,
           replyToMessageId: payload.replyToMessageId,
-          groupName: payload.groupName,
           idempotencyKey,
         },
         Boolean(originalKey && suppliedQuote),
@@ -411,23 +414,32 @@ export function publicWhatsAppPolicy(error: unknown): Record<string, unknown> | 
   return result;
 }
 
-/** Normalize human phone inputs only. Group identifiers are never phone numbers. */
-export function whatsappRecipients(value: unknown): string[] {
-  const raw = typeof value === "string" ? [value] : value;
-  if (
-    !Array.isArray(raw) ||
-    raw.length < 1 ||
-    raw.length > 8 ||
-    raw.some((number) => typeof number !== "string")
-  )
-    throw new Error("Use one to eight unique E.164 recipients.");
-  const numbers = raw.map((number: string) => number.replace(/[\s().-]/g, ""));
-  if (
-    numbers.some((number) => !/^\+[1-9]\d{6,14}$/.test(number)) ||
-    new Set(numbers).size !== numbers.length
-  )
-    throw new Error("Use one to eight unique E.164 recipients.");
-  return numbers;
+/** Reject unsupported event and persisted request shapes before routing or sending. */
+export function hasWhatsAppGroupShape(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(
+    ([key, item]) =>
+      (key === "group" && Boolean(item)) ||
+      key === "whatsappRecipients" ||
+      ((key === "is_group" || key === "isGroup") && item !== false && item != null) ||
+      ((key.startsWith("group_") ||
+        key.startsWith("groupName") ||
+        key.startsWith("groupCreation")) &&
+        item != null) ||
+      ((key === "unresolvedParticipantCount" || key === "unresolved_participant_count") &&
+        item != null &&
+        item !== 0) ||
+      ((key === "participants" || key === "recipients") &&
+        (!Array.isArray(item) || item.length !== 1)),
+  );
+}
+
+export function whatsappRecipient(value: unknown): string {
+  if (typeof value !== "string" || !/^\+[1-9]\d{6,14}$/.test(value))
+    throw new Error(
+      "Use one E.164 recipient string; recipient arrays and lists are not supported.",
+    );
+  return value;
 }
 
 export type WhatsAppIngressDisposition =

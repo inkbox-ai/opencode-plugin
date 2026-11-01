@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Inkbox } from "@inkbox/sdk";
 import { afterEach, expect, it, vi } from "vitest";
-import { whatsappRecipients } from "../src/whatsapp-native.js";
+import { whatsappRecipient } from "../src/whatsapp-native.js";
 
 const fixture = JSON.parse(
   readFileSync(new URL("./fixtures/whatsapp-v2.json", import.meta.url), "utf8"),
@@ -11,8 +11,8 @@ it("uses the shared recipient matrix without accepting group identifiers as phon
   for (const test of fixture.send_cases.filter(
     (item: any) => item.body.to && !item.body.reply_to_message_id && !item.body.conversation_id,
   )) {
-    if (test.valid) expect(whatsappRecipients(test.body.to).length).toBeGreaterThan(0);
-    else expect(() => whatsappRecipients(test.body.to)).toThrow();
+    if (test.valid) expect(whatsappRecipient(test.body.to).length).toBeGreaterThan(0);
+    else expect(() => whatsappRecipient(test.body.to)).toThrow();
   }
 });
 it("retains the real SDK wire contract for quoted sends, threads, and uncertain reactions", async () => {

@@ -20,6 +20,7 @@ const hooks = vi.hoisted(() => ({
 vi.mock("../../src/gateway/sessions.js", async (load) => {
   const actual = await load<typeof import("../../src/gateway/sessions.js")>();
   return {
+    unsupportedWhatsAppTarget: actual.unsupportedWhatsAppTarget,
     createSessionManager: (deps: any) => {
       hooks.manager = deps;
       if (hooks.realSessions) return actual.createSessionManager(deps);
@@ -487,28 +488,19 @@ function enableWhatsApp(fixture: Awaited<ReturnType<typeof start>>) {
     sendWhatsApp: vi.fn(async () => ({ id: "wa-sent" })),
     getWhatsAppConversation: vi.fn(async () => ({
       agentIdentityId: "wa-identity",
-      isGroup: true,
-      participants: ["+15550000001", "+15550000002"],
-      unresolvedParticipantCount: 0,
+      participants: ["+15550000001"],
     })),
   });
 }
-it.each(["/stop", "/cancel"])(
-  "does not disclose or interrupt another group sender's work on %s",
-  async (command) => {
-    hooks.realSessions = true;
+it.each(["/stop", "/cancel", "allow", "@agent allow", "@agent /status"])(
+  "ignores unsupported WhatsApp group input: %s",
+  async (text) => {
     const f = await start();
     enableWhatsApp(f);
-    await waInput("Other participant's task", "+15550000002", "other-participant-task", true);
-    const state = hooks.manager.state;
-    await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
-    const other = state.listTurns()[0];
-    await waInput(command, "+15550000001", "scoped-stop", true);
-    expect((f.identity as any).sendWhatsApp).toHaveBeenLastCalledWith(
-      expect.objectContaining({ text: "No matching work was stopped." }),
-    );
-    expect(state.getTurn(other.id)?.state).toBe("submitted");
-    expect(f.opencode.session.abort).not.toHaveBeenCalled();
+    await waInput(text, "+15550000001", "group-input", true);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    expect(hooks.abort).not.toHaveBeenCalled();
+    expect((f.identity as any).sendWhatsApp).not.toHaveBeenCalled();
   },
 );
 it("never lets a replayed WhatsApp approval approve a later permission, even across restart", async () => {
@@ -556,66 +548,6 @@ it("does not consume or cancel a legacy SMS/email permission from WhatsApp", asy
   await inbound("allow", "+15550000001", "sms");
   expect(await answer).toBe("allow");
 });
-it.each(["allow", "@agent allow"])(
-  "accepts source-matched WhatsApp group permission answers before mention gating: %s",
-  async (text) => {
-    const f = await start();
-    enableWhatsApp(f);
-    f.config.gateway.groupReplyMode = "mention";
-    let settled = false;
-    const target: ReplyTarget = {
-      channel: "whatsapp",
-      sender: "+15550000001",
-      conversationId: "wa-conversation",
-      group: true,
-    };
-    const answer = hooks.escalation.relay
-      .ask("contact-1", "Group approval", target)
-      .then((value: string) => {
-        settled = true;
-        return value;
-      });
-    await waInput(text, "+15550000002", "foreign-author", true);
-    expect(settled).toBe(false);
-    await waInput(text, target.sender!, "asked-author", true);
-    expect(await answer).toBe("allow");
-  },
-);
-it("fences queued group controls by author and never repeats a consumed Stop", async () => {
-  const f = await start();
-  enableWhatsApp(f);
-  hooks.manager.state.saveTurn({
-    id: "queued-wa",
-    messageID: "input",
-    chatKey: "contact-1",
-    state: "queued",
-    kind: "normal",
-    text: "Work",
-    deliver: true,
-    replyTarget: { channel: "whatsapp", sender: "+15550000001", conversationId: "wa-conversation" },
-    createdAt: 1,
-    updatedAt: 1,
-  });
-  await waInput("/stop", "+15550000002", "foreign-stop", true);
-  expect(hooks.abort).toHaveBeenCalledExactlyOnceWith(
-    "contact-1",
-    "whatsapp",
-    expect.objectContaining({ sender: "+15550000002", conversationId: "wa-conversation" }),
-    [],
-  );
-  hooks.abort.mockClear();
-  await waInput("@agent /stop", "+15550000001", "original-stop", true);
-  expect(hooks.abort).toHaveBeenCalledOnce();
-  expect(hooks.abort).toHaveBeenCalledWith(
-    "contact-1",
-    "whatsapp",
-    expect.objectContaining({ sender: "+15550000001", conversationId: "wa-conversation" }),
-    ["queued-wa"],
-  );
-  await waInput("@agent /stop", "+15550000001", "original-stop", true);
-  expect(hooks.abort).toHaveBeenCalledOnce();
-});
-
 it("revalidates an SMS resume selection after WhatsApp work starts in the shared session", async () => {
   hooks.realSessions = true;
   const f = await start();
@@ -656,13 +588,13 @@ it.each(["/stop", "/cancel"])(
     enableWhatsApp(f);
     const author = "+15550000001";
     const other = "+15550000002";
-    await waInput("First task", author, "running-source", true);
+    await waInput("First task", author, "running-source");
     const state = hooks.manager.state;
     await vi.waitFor(() => expect(state.listTurns()[0]?.state).toBe("submitted"));
     const running = state.listTurns()[0];
     const sessionID = state.getSession("contact-1");
-    await waInput("Other task", other, "other-source", true);
-    await waInput("My queued task", author, "own-queued-source", true);
+    await waInput("Other task", other, "other-source");
+    await waInput("My queued task", author, "own-queued-source");
     const otherTurn = state.listTurns().find((turn: any) => turn.replyTarget?.sender === other)!;
     const ownQueued = state
       .listTurns()
@@ -681,12 +613,12 @@ it.each(["/stop", "/cancel"])(
       });
 
     for (const reset of ["/clear", "/new", "/resume"])
-      await waInput(reset, author, `reset-${reset}`, true);
+      await waInput(reset, author, `reset-${reset}`);
     expect(state.getTurn(running.id)?.state).toBe("submitted");
     expect(state.getSession("contact-1")).toBe(sessionID);
     expect(f.opencode.session.abort).not.toHaveBeenCalled();
 
-    await waInput(command, author, "stop-source", true);
+    await waInput(command, author, "stop-source");
 
     expect(state.getTurn(running.id)).toMatchObject({
       state: "interrupted",
@@ -707,7 +639,7 @@ it.each(["/stop", "/cancel"])(
     expect(f.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
     expect(state.getSession("contact-1")).toBe(sessionID);
     expect(f.statuses[sessionID]).toEqual({ type: "busy" });
-    await waInput(command, author, "stop-source", true);
+    await waInput(command, author, "stop-source");
     expect(f.opencode.session.abort).toHaveBeenCalledOnce();
     expect(state.getTurn(otherTurn.id)?.state).toBe("submitted");
   },
@@ -1276,55 +1208,17 @@ it("delivers identical permission prompts separately while retaining each reques
   ).toEqual([]);
 });
 it.each(["/clear", "/new", "/resume", "/status", "/health", "/usage"])(
-  "requires a mention for WhatsApp group command %s",
+  "ignores WhatsApp group commands with or without a mention: %s",
   async (command) => {
     const f = await start();
     enableWhatsApp(f);
-    f.config.gateway.groupReplyMode = "mention";
-    await waInput(command, "+15550000001", "unmentioned-command", true);
+    for (const text of [command, `@agent ${command}`])
+      await waInput(text, "+15550000001", text, true);
     expect((f.identity as any).sendWhatsApp).not.toHaveBeenCalled();
     expect(hooks.reset).not.toHaveBeenCalled();
-    expect(hooks.inbound).toHaveBeenCalledOnce();
+    expect(hooks.inbound).not.toHaveBeenCalled();
   },
 );
-
-it("does not send group command replies when a participant is outside the outbound allowlist", async () => {
-  hooks.realSessions = true;
-  const f = await start();
-  enableWhatsApp(f);
-  f.config.gateway.groupReplyMode = "mention";
-  f.config.outbound.allowedRecipients = ["+15550000001"];
-  const send = () => (f.identity as any).sendWhatsApp;
-  for (const [command, id] of [
-    ["@agent /resume", "blocked-resume"],
-    ["@agent 1", "blocked-resume-pick"],
-    ["@agent /health", "blocked-health"],
-    ["@agent /usage", "blocked-usage"],
-  ]) {
-    await expect(waInput(command, "+15550000001", id, true)).rejects.toThrow(/allowlist/);
-    expect(send()).not.toHaveBeenCalled();
-  }
-  hooks.manager.state.saveTurn({
-    id: "foreign",
-    messageID: "foreign",
-    chatKey: "contact-1",
-    state: "submitted",
-    kind: "normal",
-    text: "private",
-    deliver: true,
-    replyTarget: { channel: "email", sender: "other@example.com", messageId: "foreign" },
-    createdAt: 1,
-    updatedAt: 1,
-  });
-  await expect(waInput("@agent /clear", "+15550000001", "blocked-denial", true)).rejects.toThrow(
-    /allowlist/,
-  );
-  expect(send()).not.toHaveBeenCalled();
-  expect(hooks.manager.state.getTurn("foreign").state).toBe("submitted");
-  f.config.outbound.allowedRecipients = [];
-  await waInput("@agent /status", "+15550000001", "open-status", true);
-  expect(send()).toHaveBeenCalledOnce();
-});
 
 it.each(["/clear", "/new", "/resume"])(
   "explains rejected %s without exposing or stopping another source",

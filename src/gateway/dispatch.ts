@@ -3,6 +3,7 @@ import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
 import {
+  hasWhatsAppGroupShape,
   recordWhatsAppStatus,
   WHATSAPP_EVENTS,
   WHATSAPP_MAX_MEDIA_BYTES,
@@ -741,7 +742,7 @@ async function conversationParticipants(
 async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (!event.verified || event.body.companion != null) return false;
   let message = resourceOf(event.body, "message");
-  if (!message) return true;
+  if (!message || hasWhatsAppGroupShape(message)) return true;
   const identity = await deps.inkbox.getIdentity();
   if (message.agent_identity_id !== identity.id || message.is_blocked === true) return true;
   const type = event.eventType ?? inferType(event.body);
@@ -749,6 +750,10 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     type === "whatsapp.reaction_received" ? resourceOf(event.body, "reaction") : undefined;
   if (reaction) {
     if (
+      !Array.isArray(message.participants) ||
+      message.participants.length !== 1 ||
+      message.remote_number !== message.participants[0] ||
+      hasWhatsAppGroupShape(reaction) ||
       reaction.direction !== "inbound" ||
       !["applied", "removed"].includes(String(reaction.status)) ||
       reaction.agent_identity_id !== identity.id ||
@@ -783,17 +788,16 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     !conversationId ||
     !messageId ||
     message.direction !== "inbound" ||
-    typeof message.is_group !== "boolean" ||
+    hasWhatsAppGroupShape(message) ||
     !/^\+[1-9]\d{6,14}$/.test(from) ||
     !Array.isArray(participants) ||
-    !participants.length ||
+    participants.length !== 1 ||
     participants.some(
       (number) => typeof number !== "string" || !/^\+[1-9]\d{6,14}$/.test(number),
     ) ||
     new Set(participants).size !== participants.length ||
     !participants.includes(from) ||
-    (!message.is_group && participants.length !== 1) ||
-    (!message.is_group && from !== message.remote_number) ||
+    from !== message.remote_number ||
     from === message.local_number
   )
     return true;
@@ -847,7 +851,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
         conversationId,
         from,
       },
-      message.is_group ? Math.max(2, participants.length) : 1,
+      1,
     ),
     from,
     conversationId,
@@ -873,12 +877,9 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
           }
         : {}),
     },
-    ...(resolved.contactId || message.is_group
+    ...(resolved.contactId
       ? {}
       : { senderAgent: senderAgentIdentity("whatsapp", event.body, from) }),
-    ...(message.is_group
-      ? { group: { participantCount: participants.length, participants: participants as string[] } }
-      : {}),
     ...(reaction ? { reaction: true } : {}),
     contactMemories,
     text,

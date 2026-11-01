@@ -122,7 +122,6 @@ export interface ReplyTarget {
     rootMessageId?: string | null;
   };
   to?: string;
-  whatsappRecipients?: string[];
   conversationId?: string;
   subject?: string;
   rfcMessageId?: string;

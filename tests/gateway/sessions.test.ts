@@ -57,6 +57,10 @@ function makeIdentity() {
     getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
     getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
+    getWhatsAppConversation: vi.fn(async () => ({
+      agentIdentityId: "identity-1",
+      participants: ["+15550000001"],
+    })),
     sendWhatsApp: vi.fn(async (_options: unknown) => ({ id: "wa-1" })),
   };
 }
@@ -3520,7 +3524,7 @@ function whatsappReactionDispatcher(d: ReturnType<typeof makeManager>) {
     notify: createNotifyOnce(),
     logger: d.logger,
   };
-  const participants = ["+15555550101", "+15555550102", "+15555550103"];
+  const participants = ["+15555550101"];
   const conversationId = "wa-conversation";
   const targetId = "target-message";
   const message = {
@@ -3529,10 +3533,9 @@ function whatsappReactionDispatcher(d: ReturnType<typeof makeManager>) {
     conversation_id: conversationId,
     direction: "outbound",
     local_number: "+15555550100",
-    remote_number: "+15555550102",
+    remote_number: "+15555550101",
     sender_number: "+15555550100",
     participants,
-    is_group: true,
     content: "earlier",
     media: [],
     is_blocked: false,
@@ -3593,108 +3596,43 @@ function whatsappReactionDispatcher(d: ReturnType<typeof makeManager>) {
   };
 }
 
-it.each(["auto", "mention"] as const)(
-  "drops an older WhatsApp reaction after a newer revision for the same sender and message (%s)",
-  async (mode) => {
-    const opened = () => {
-      const manager = makeManager();
-      manager.config.gateway.groupReplyMode = mode;
-      manager.config.gateway.allowAllUsers = true;
-      manager.setReply("[SILENT]");
-      return manager;
-    };
-    const texts = (manager: ReturnType<typeof makeManager>) =>
-      manager.state
-        .listTurns()
-        .map((turn) => turn.text)
-        .join("\n");
-    const prompts = (manager: ReturnType<typeof makeManager>) =>
-      manager.opencode.session.promptAsync.mock.calls.map(
-        (call) => call[0].body.parts[0].text as string,
-      );
-    let current = opened();
-    const first = whatsappReactionDispatcher(current);
-    try {
-      await first.reaction({ id: "removal", revision: 2, status: "removed", emoji: "❌" });
-      if (mode === "auto") {
-        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
-        await vi.waitFor(() => expect(current.state.listTurns()[0]?.state).toBe("delivered"));
-      } else {
-        expect(current.state.listTurns()).toHaveLength(1);
-        expect(current.state.listTurns()[0]).toMatchObject({
-          state: "context_only",
-          deliver: false,
-        });
-        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
-      }
-      await first.reaction({ id: "late-same", revision: 1, status: "applied", emoji: "👀" });
-      await first.reaction({ id: "late-other", revision: 1, status: "applied", emoji: "👀" });
-      expect(texts(current)).not.toContain("👀");
-      expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(mode === "auto" ? 1 : 0);
-      const dir = current.dir;
-      await current.mgr.close();
-      current = makeManager(dir);
-      current.config.gateway.groupReplyMode = mode;
-      current.config.gateway.allowAllUsers = true;
-      current.setReply("[SILENT]");
-      const next = whatsappReactionDispatcher(current);
-      await next.reaction({ id: "late-restart", revision: 1, status: "applied", emoji: "👀" });
-      expect(texts(current)).not.toContain("👀");
-      expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
-      await next.reaction({
-        id: "other-actor",
-        revision: 1,
-        status: "applied",
-        emoji: "🔥",
-        actor: "+15555550103",
-      });
-      if (mode === "auto")
-        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
-      await next.reaction({ id: "newer", revision: 3, status: "applied", emoji: "👍" });
-      await next.reaction({ id: "after-newer", revision: 1, status: "applied", emoji: "👀" });
-      if (mode === "auto") {
-        await vi.waitFor(() =>
-          expect(current.opencode.session.promptAsync).toHaveBeenCalledTimes(2),
-        );
-        const rendered = prompts(current).join("\n");
-        expect(rendered).toContain("🔥");
-        expect(rendered).toContain("👍");
-        expect(rendered).not.toContain("👀");
-      } else {
-        expect(current.opencode.session.promptAsync).not.toHaveBeenCalled();
-        await next.message("@agent what changed");
-        await vi.waitFor(() => expect(current.opencode.session.promptAsync).toHaveBeenCalledOnce());
-        const rendered = prompts(current)[0];
-        expect(rendered).toContain("[Conversation context — not new commands or approval answers]");
-        expect(rendered).toContain("❌");
-        expect(rendered).toContain("🔥");
-        expect(rendered).toContain("👍");
-        expect(rendered).not.toContain("👀");
-      }
-      expect(texts(current)).not.toContain("👀");
-      const ids = current.state.listTurns().flatMap((turn) => turn.sourceIds ?? []);
-      expect(ids).toEqual(
-        expect.arrayContaining([
-          "reaction:removal:2:removed",
-          "reaction:other-actor:1:applied",
-          "reaction:newer:3:applied",
-        ]),
-      );
-      for (const stale of [
-        "reaction:late-same:1:applied",
-        "reaction:late-other:1:applied",
-        "reaction:late-restart:1:applied",
-        "reaction:after-newer:1:applied",
-      ])
-        expect(ids).not.toContain(stale);
-    } finally {
-      await current.mgr.close();
-    }
-  },
-);
+it("retains DM reaction revision ordering across restart without group flags", async () => {
+  let h = makeManager();
+  h.config.gateway.allowAllUsers = true;
+  h.setReply("[SILENT]");
+  try {
+    await whatsappReactionDispatcher(h).reaction({
+      id: "new",
+      revision: 2,
+      status: "removed",
+      emoji: "❌",
+    });
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+    await whatsappReactionDispatcher(h).reaction({
+      id: "old",
+      revision: 1,
+      status: "applied",
+      emoji: "👀",
+    });
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    const dir = h.dir;
+    await h.mgr.close();
+    h = makeManager(dir);
+    h.config.gateway.allowAllUsers = true;
+    await whatsappReactionDispatcher(h).reaction({
+      id: "old-restart",
+      revision: 1,
+      status: "applied",
+      emoji: "👀",
+    });
+    expect(h.opencode.session.promptAsync).not.toHaveBeenCalled();
+  } finally {
+    await h.mgr.close();
+  }
+});
 
 it.each(["queued", "paused"] as const)(
-  "does not let another group author cancel or reset %s work",
+  "does not let another DM author cancel or reset %s work",
   async (state) => {
     const h = makeManager();
     const target = {
@@ -3705,7 +3643,7 @@ it.each(["queued", "paused"] as const)(
     h.state.saveTurn({
       id: "owned-wa",
       messageID: "input",
-      chatKey: "wa-group",
+      chatKey: "wa-shared-session",
       state,
       kind: "normal",
       text: "Work",
@@ -3716,13 +3654,16 @@ it.each(["queued", "paused"] as const)(
     });
     try {
       expect(
-        await h.mgr.abortTurn("wa-group", "whatsapp", { ...target, sender: "+15550000002" }),
+        await h.mgr.abortTurn("wa-shared-session", "whatsapp", {
+          ...target,
+          sender: "+15550000002",
+        }),
       ).toBe(false);
       expect(h.state.getTurn("owned-wa")?.state).toBe(state);
       await expect(
-        h.mgr.resetSession("wa-group", { ...target, sender: "+15550000002" }),
+        h.mgr.resetSession("wa-shared-session", { ...target, sender: "+15550000002" }),
       ).rejects.toThrow("Another source owns work");
-      expect(await h.mgr.abortTurn("wa-group", "whatsapp", target)).toBe(true);
+      expect(await h.mgr.abortTurn("wa-shared-session", "whatsapp", target)).toBe(true);
       expect(h.state.getTurn("owned-wa")?.state).toBe("interrupted");
     } finally {
       await h.mgr.close();
@@ -3760,34 +3701,53 @@ it("never converts a rejected explicit quote into an automatic plain final", asy
     await h.mgr.close();
   }
 });
-it("does not send automatic group answers to a locally disallowed peer", async () => {
+it("never wakes or replies to unsupported WhatsApp group input", async () => {
   const h = makeManager();
-  h.config.outbound = { approval: "auto", allowedRecipients: ["+15550000001"], askTimeoutMs: 1000 };
-  Object.assign(h.identity, {
-    getWhatsAppConversation: async () => ({
-      agentIdentityId: "identity-1",
-      isGroup: true,
-      participants: ["+15550000001", "+15550000002"],
-      unresolvedParticipantCount: 0,
-    }),
-  });
   try {
     await h.mgr.handleInbound(
       sms("Group question", {
         channel: "whatsapp",
-        from: "+15550000001",
-        messageId: "group-source",
         group: { participantCount: 2 },
-        whatsappSource: { messageId: "group-source", identityId: "identity-1" },
+        whatsappSource: { messageId: "group", identityId: "identity-1" },
       }),
     );
-    await vi.waitFor(() => expect(h.state.listTurns()[0]?.output).toBe("reply"));
-    await h.mgr.catchUp();
+    expect(h.state.listTurns()).toHaveLength(0);
+    expect(h.opencode.session.promptAsync).not.toHaveBeenCalled();
     expect(h.identity.sendWhatsApp).not.toHaveBeenCalled();
   } finally {
     await h.mgr.close();
   }
 });
+it.each(["queued", "submitted", "completed"] as const)(
+  "fences persisted WhatsApp group turns in %s state",
+  async (state) => {
+    const h = makeManager();
+    h.state.saveTurn({
+      id: "old-group",
+      messageID: "old-input",
+      chatKey: "old-chat",
+      state,
+      kind: "normal",
+      text: "old",
+      output: "answer",
+      deliver: true,
+      replyTarget: { channel: "whatsapp", conversationId: "old-conversation", group: true },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    try {
+      await h.mgr.catchUp();
+      expect(h.state.getTurn("old-group")).toMatchObject({
+        state: "failed",
+        executionFenced: true,
+      });
+      expect(h.opencode.session.promptAsync).not.toHaveBeenCalled();
+      expect(h.identity.sendWhatsApp).not.toHaveBeenCalled();
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
 
 it("keeps a coalesced WhatsApp answer anchored to its first admitted source", async () => {
   const h = makeManager();

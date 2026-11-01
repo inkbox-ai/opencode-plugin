@@ -10,8 +10,8 @@
 - Scope Stop and Cancel to the requesting conversation and sender; other group commands honor mention mode. Rejected session changes receive an explicit response.
 - Preserve incoming text when an attachment is unavailable, and reject oversized replies before delivery.
 
-- Add approved dedicated direct/group WhatsApp with signed ingress, durable native final replies, original-source permissions, owned media, and stable send recovery.
-- Add fifteen WhatsApp tools for direct/group sends, explicit quoted replies, paginated threads, named/custom reactions and exact reaction receipts; retain, fresh effective-limit reporting, local mark-read, and status-only callbacks without model wakeups.
+- Add approved dedicated direct WhatsApp with signed ingress, durable native final replies, original-source permissions, owned media, and stable send recovery.
+- Add fifteen WhatsApp tools for direct sends, explicit quoted replies, paginated threads, named/custom reactions and exact reaction receipts; retain, fresh effective-limit reporting, local mark-read, and status-only callbacks without model wakeups.
 - Require SDK 0.7.24 and test the real public candidate in current-feature and packed native V1/V2 host checks, retaining a historical compatibility lane.
 
 ## 0.2.18 (unreleased)
