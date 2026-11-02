@@ -1,12 +1,8 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
+## 0.2.18 (unreleased)
 
 - iMessage tapback results report the resolved message ID and part index so follow-up reads address the correct message.
-
-## 0.2.18 (unreleased)
 
 - Updates the SDK to 0.7.19.
 - Prevents duplicate automatic email replies after a successful threaded tool send, including recovered turns.
