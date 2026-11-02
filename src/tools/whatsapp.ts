@@ -32,7 +32,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     const identity = await deps.runtime.getIdentity();
     const call = (identity as any)[method];
     if (typeof call !== "function")
-      throw new Error("WhatsApp requires Inkbox SDK 0.7.24 or newer.");
+      throw new Error("WhatsApp requires Inkbox SDK 0.7.26 or newer.");
     if (method === "getWhatsAppStatus") {
       const status = await call.call(identity);
       let limits = null;
