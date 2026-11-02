@@ -253,7 +253,7 @@ Tools: `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get
 
 Completed answers and stable logical-send keys are checkpointed before delivery. Explicit sends return their key and media ID. After an ambiguous result, retain both and inspect `inkbox_lookup_whatsapp_send`; do not upload again or send a new copy. A confirmed send with unknown delivery is not a failed send.
 
-This draft requires SDK 0.7.24. Candidate checks build the exact reviewed public SDK commit before preparing an archive-aware npm lock and use that same real candidate in packed V1/V2 host installs. The normal dependency remains `^0.7.24`; after SDK publication, regenerate the registry lock before releasing this plugin. Candidate-source CI does not claim that the package is already published.
+The dependency floor is SDK 0.7.24; WhatsApp additionally requires the reviewed source candidate until a WhatsApp-capable SDK release is published. Candidate checks build the exact reviewed public SDK commit before preparing an archive-aware npm lock and use that same real candidate in packed V1/V2 host installs. The normal dependency remains `^0.7.24`; after a WhatsApp-capable SDK release is published, update the dependency floor and regenerate the registry lock before releasing this plugin. Candidate-source CI does not claim that the package is already published.
 
 ### Enabling more tools
 
