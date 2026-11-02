@@ -40,7 +40,12 @@ function makeIdentity() {
     listIMessageAssignments: vi.fn(async () => [
       { id: "assign-1", recipientNumber: "+15551230000" },
     ]),
-    sendIMessageReaction: vi.fn(async () => ({ id: "react-1", reaction: "love", targetMessageId: "primary-1", partIndex: 2 })),
+    sendIMessageReaction: vi.fn(async () => ({
+      id: "react-1",
+      reaction: "love",
+      targetMessageId: "primary-1",
+      partIndex: 2,
+    })),
     markIMessageConversationRead: vi.fn(async () => ({
       conversationId: "conv-1",
       updatedCount: 4,
