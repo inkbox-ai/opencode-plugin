@@ -13,6 +13,7 @@ import { createPendingReplies } from "../../src/gateway/pending.js";
 import { prepareReply } from "../../src/gateway/reply.js";
 import { createWebhookServer } from "../../src/gateway/server.js";
 import { createStateStore } from "../../src/gateway/state.js";
+import type { ReplyTarget } from "../../src/gateway/types.js";
 import { whatsappTools } from "../../src/tools/whatsapp.js";
 import {
   assertWhatsAppOwner,
@@ -150,7 +151,7 @@ function stubSdkFetch(conversationData = conversationWire) {
 }
 function ownedSendTool(
   identity: Awaited<ReturnType<typeof realIdentity>>["identity"],
-  replyTarget = target,
+  replyTarget: ReplyTarget = target,
 ) {
   const store = state();
   vi.stubEnv("INKBOX_OPENCODE_HOME", directories.at(-1)!);
@@ -1760,3 +1761,112 @@ it("allows explicit WhatsApp DM outreach from an unrelated channel group", async
     expect.objectContaining({ to: "+15555550102", text: "Direct outreach" }),
   );
 });
+
+it.each([false, true])(
+  "sends a new source reply without a quote unless explicitly selected (tool=%s)",
+  async (useTool) => {
+    const calls = stubSdkFetch();
+    const { identity, sdk } = await realIdentity();
+    const route = {
+      ...target,
+      whatsappSource: { messageId: source, identityId: owner, parentMessageId: quote },
+    };
+    if (useTool) {
+      const tool = ownedSendTool(identity, route);
+      await tool.execute({ text: "Plain answer" });
+      expect(hasExplicitWhatsAppReply(route, tool.store)).toBe(true);
+    } else {
+      const store = state();
+      const runtime = { getIdentity: async () => identity, getClient: async () => sdk };
+      await (await prepareReply(runtime, route, "Plain answer", logger, store))();
+    }
+    expect(posted(calls)).toHaveLength(1);
+    expect(JSON.parse(String(posted(calls)[0].init?.body))).toEqual({
+      conversation_id: conversation,
+      text: "Plain answer",
+    });
+  },
+);
+
+it("quotes an explicitly selected older message without repeating the automatic final", async () => {
+  const calls = stubSdkFetch();
+  const { identity } = await realIdentity();
+  const route = { ...target, whatsappSource: { messageId: source, identityId: owner } };
+  const tool = ownedSendTool(identity, route);
+  await tool.execute({ text: "About that image", replyToMessageId: quote });
+  expect(JSON.parse(String(posted(calls)[0].init?.body))).toEqual({
+    conversation_id: conversation,
+    text: "About that image",
+    reply_to_message_id: quote,
+  });
+  expect(hasExplicitWhatsAppReply(route, tool.store)).toBe(true);
+});
+
+it.each([
+  ["image/png", ".png"],
+  ["audio/ogg", ".ogg"],
+])(
+  "retains consecutive captionless %s attachments with their owned type and plain reply route",
+  async (contentType, extension) => {
+    const store = state();
+    const handleInbound = vi.fn();
+    const dir = directories.at(-1)!;
+    const getWhatsAppMedia = vi.fn(async (id: string) => ({
+      id,
+      status: "ready",
+      url: `https://media.test/${id}.bin`,
+      contentType,
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (url: string) =>
+          new Response(url, {
+            headers: { "content-type": "application/octet-stream" },
+          }),
+      ),
+    );
+    const deps: any = {
+      config: { gateway: { ...defaultGatewayConfig(), allowAllUsers: true, mediaDir: dir } },
+      inkbox: { getIdentity: async () => ({ id: owner, getWhatsAppMedia }) },
+      contacts: { resolve: async () => ({ contactId: "contact" }), chatKeyFor: () => "contact" },
+      sessions: { handleInbound },
+      state: store,
+      notify: createNotifyOnce(),
+      logger,
+    };
+    for (const id of ["first", "second"]) {
+      await dispatchEvent(deps, {
+        provider: "inkbox",
+        verified: true,
+        eventType: "whatsapp.received",
+        headers: {},
+        body: {
+          data: {
+            message: {
+              ...wire,
+              id,
+              direction: "inbound",
+              sender_number: "+15555550101",
+              content: "",
+              media: [{ id, url: "https://media.test/stale" }],
+            },
+          },
+        },
+      });
+    }
+    expect(handleInbound).toHaveBeenCalledTimes(2);
+    for (const [index, id] of ["first", "second"].entries()) {
+      const received = handleInbound.mock.calls[index][0];
+      expect(received.text).toBe("");
+      expect(received.whatsappSource).not.toHaveProperty("autoReplyTarget");
+      expect(received.whatsappSource.mediaIds).toEqual([id]);
+      expect(received.mediaPaths).toHaveLength(1);
+      expect(received.mediaPaths[0]).toMatch(new RegExp(`\\${extension}$`));
+      expect(readFileSync(received.mediaPaths[0], "utf8")).toBe(`https://media.test/${id}.bin`);
+    }
+    expect(handleInbound.mock.calls[0][0].mediaPaths).not.toEqual(
+      handleInbound.mock.calls[1][0].mediaPaths,
+    );
+  },
+);

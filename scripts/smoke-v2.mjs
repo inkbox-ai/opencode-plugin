@@ -130,8 +130,8 @@ try {
   );
   const packed = join(root, "node_modules/@inkbox/opencode-plugin/dist");
   const load = (file) => import(pathToFileURL(join(packed, file)).href);
-  if (sdkArchive) {
-    const probe = join(packed, "sdk-candidate-probe.mjs");
+  {
+    const probe = join(packed, "sdk-capability-probe.mjs");
     writeFileSync(
       probe,
       'import { AgentIdentity } from "@inkbox/sdk"; export const supported = typeof AgentIdentity.prototype.getWhatsAppLimits === "function";',

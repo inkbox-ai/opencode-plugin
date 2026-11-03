@@ -817,6 +817,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
           ...(await downloadMedia([current.url], {
             dir: mediaDir(deps.config),
             maxBytes: WHATSAPP_MAX_MEDIA_BYTES,
+            contentType: current.contentType,
             logger: deps.logger,
           })),
         );
@@ -858,7 +859,6 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     messageId,
     ...resolved,
     whatsappSource: {
-      ...(!reaction ? { autoReplyTarget: messageId } : {}),
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),

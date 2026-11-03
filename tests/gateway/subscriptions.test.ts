@@ -553,3 +553,50 @@ describe("mixed identity subscription preservation", () => {
     );
   });
 });
+
+it.each([false, true])(
+  "retains WhatsApp message subscriptions when reaction events are unsupported (existing=%s)",
+  async (existing) => {
+    const directEvents = WHATSAPP_EVENTS.filter((type) => type !== "whatsapp.reaction_received");
+    const subs = makeSubscriptions(
+      existing
+        ? [
+            {
+              id: "wa-sub",
+              agentIdentityId: "ident-1",
+              url: WEBHOOK_URL,
+              eventTypes: directEvents,
+            },
+          ]
+        : [],
+    );
+    const create = subs.create.getMockImplementation()!;
+    subs.create.mockImplementation(async (options) => {
+      if (options.eventTypes.includes("whatsapp.reaction_received"))
+        throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+      return create(options);
+    });
+    subs.update.mockImplementation(async (id, options) => {
+      if (options.eventTypes?.includes("whatsapp.reaction_received"))
+        throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+      return { id, ...options };
+    });
+    const deps = makeDeps(
+      makeIdentity({ mailbox: null, phoneNumber: null, imessageEnabled: false }),
+      subs,
+    );
+    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
+    if (existing) {
+      expect(subs.update).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ unchanged: 1 });
+    } else {
+      expect(subs.create).toHaveBeenCalledWith({
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL,
+        eventTypes: directEvents,
+      });
+      expect(result).toMatchObject({ created: 2 });
+    }
+    expect(subs.delete).not.toHaveBeenCalled();
+  },
+);

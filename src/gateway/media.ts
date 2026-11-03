@@ -31,6 +31,8 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
   ".mp3": "audio/mpeg",
   ".mp4": "video/mp4",
   ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg",
+  ".wav": "audio/wav",
   ".heic": "image/heic",
 };
 
@@ -74,7 +76,11 @@ function pickExtension(segment: string, contentType: string | null): string {
 // extension. The hash (over the full URL, query included) keeps distinct
 // URLs that share a basename from colliding, while re-downloads of the
 // same URL reuse one file.
-function downloadFilename(url: string, contentType: string | null): string {
+function downloadFilename(
+  url: string,
+  contentType: string | null,
+  preferContentType = false,
+): string {
   const pathname = url.split(/[?#]/, 1)[0];
   let segment = pathname.slice(pathname.lastIndexOf("/") + 1);
   try {
@@ -82,7 +88,10 @@ function downloadFilename(url: string, contentType: string | null): string {
   } catch {
     // Keep the raw segment when percent-decoding fails.
   }
-  const ext = pickExtension(segment, contentType);
+  const knownType = contentType?.split(";", 1)[0].trim().toLowerCase();
+  const ext =
+    (preferContentType && knownType && EXTENSION_BY_CONTENT_TYPE[knownType]) ||
+    pickExtension(segment, contentType);
   const stem = segment.toLowerCase().endsWith(ext)
     ? segment.slice(0, segment.length - ext.length)
     : segment;
@@ -100,6 +109,7 @@ export interface DownloadMediaOptions {
   dir: string;
   fetchImpl?: typeof fetch;
   maxBytes?: number;
+  contentType?: string;
   logger: GatewayLogger;
 }
 
@@ -142,7 +152,14 @@ export async function downloadMedia(urls: string[], opts: DownloadMediaOptions):
         });
         continue;
       }
-      const target = path.join(dir, downloadFilename(url, res.headers.get("content-type")));
+      const target = path.join(
+        dir,
+        downloadFilename(
+          url,
+          opts.contentType ?? res.headers.get("content-type"),
+          Boolean(opts.contentType),
+        ),
+      );
       await fsp.writeFile(target, content);
       saved.push(target);
     } catch (err) {

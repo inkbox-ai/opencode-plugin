@@ -128,6 +128,7 @@ export async function reconcileSubscriptions(
     owner: SubscriptionOwner,
     eventTypes: string[],
     subscriptionUrl = webhookUrl,
+    allowReactionFallback = true,
   ): Promise<void> {
     try {
       const existing = await client.webhooks.subscriptions.list({
@@ -196,6 +197,19 @@ export async function reconcileSubscriptions(
         "statusCode" in err &&
         [400, 422].includes(Number(err.statusCode))
       ) {
+        if (
+          allowReactionFallback &&
+          inkboxErrorMessage(err).includes("whatsapp.reaction_received")
+        ) {
+          await reconcileOwner(
+            kind,
+            owner,
+            eventTypes.filter((type) => type !== "whatsapp.reaction_received"),
+            subscriptionUrl,
+            false,
+          );
+          return;
+        }
         deps.logger.warn("WhatsApp event subscription unavailable on this API version");
         return;
       }

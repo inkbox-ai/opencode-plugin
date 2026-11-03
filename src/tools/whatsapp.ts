@@ -176,7 +176,7 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
     ],
     [
       "send_whatsapp",
-      "Send WhatsApp text/media to one E.164 recipient string or an existing direct conversation. Active-source replies inherit their conversation and quote target; explicit destinations remain authoritative. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
+      "Send WhatsApp text/media to one E.164 recipient string or an existing direct conversation. Active-source replies inherit their conversation and are plain unless replyToMessageId is explicit; explicit destinations remain authoritative. Explicit quoted replies require conversationId. Normal final answers reply automatically; do not duplicate them. Keep the original key/media ID after uncertainty.",
       {
         to: z
           .string()

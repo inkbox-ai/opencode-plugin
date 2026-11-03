@@ -3775,3 +3775,35 @@ it("keeps a coalesced WhatsApp answer anchored to its first admitted source", as
     await h.mgr.close();
   }
 });
+
+it("submits each captionless WhatsApp attachment to the host and sends plain final replies", async () => {
+  const h = makeManager();
+  try {
+    for (const id of ["image-first", "image-second"]) {
+      await h.mgr.handleInbound(
+        sms("", {
+          channel: "whatsapp",
+          messageId: id,
+          whatsappSource: { messageId: id, identityId: "identity-1", mediaIds: [id] },
+          mediaPaths: [`/synthetic/${id}.png`],
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(h.state.listTurns().find((turn) => turn.sourceIds?.includes(id))?.state).toBe(
+          "delivered",
+        ),
+      );
+    }
+    expect(h.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    for (const [index, id] of ["image-first", "image-second"].entries()) {
+      const submitted = h.opencode.session.promptAsync.mock.calls[index][0].body.parts;
+      expect(submitted).toEqual([
+        { type: "text", text: expect.stringContaining(`/synthetic/${id}.png`) },
+      ]);
+      expect(h.identity.sendWhatsApp.mock.calls[index][0]).not.toHaveProperty("replyToMessageId");
+    }
+    expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+  } finally {
+    await h.mgr.close();
+  }
+});
