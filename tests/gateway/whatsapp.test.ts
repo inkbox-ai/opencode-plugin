@@ -1262,7 +1262,7 @@ it.each([false, true])(
     ).rejects.toThrow();
     await expect(
       (await prepareWhatsApp(identity, target, { text: "Replacement" }, store, "new-key", false))(),
-    ).rejects.toThrow("unresolved quoted send");
+    ).rejects.toThrow("unresolved explicit send");
     expect(identity.sendWhatsApp).toHaveBeenCalledOnce();
     expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   },
@@ -1592,11 +1592,11 @@ it.each([false].flatMap((group) => ["rejected", "unknown"].map((outcome) => ({ g
           "different-key",
         )
       )(),
-    ).rejects.toThrow("unresolved quoted send");
+    ).rejects.toThrow("unresolved explicit send");
     expect(hasExplicitWhatsAppReply(replyTarget, store)).toBe(true);
     await expect(
       (await prepareWhatsApp(identity, replyTarget, { text: "Automatic replacement" }, store))(),
-    ).rejects.toThrow("unresolved quoted send");
+    ).rejects.toThrow("unresolved explicit send");
     expect(sendWhatsApp).toHaveBeenCalledOnce();
   },
 );
@@ -1685,7 +1685,7 @@ it("reports final SDK rejection without claiming an earlier timeout was never ac
   expect(hasExplicitWhatsAppReply(target, store)).toBe(true);
   await expect(
     (await prepareWhatsApp(identity, target, { text: "Replacement" }, store))(),
-  ).rejects.toThrow("unresolved quoted send");
+  ).rejects.toThrow("unresolved explicit send");
   expect(posts).toBe(2);
 });
 
@@ -1870,3 +1870,51 @@ it.each([
     );
   },
 );
+
+it("fences rejected plain source sends while preserving the exact original retry", async () => {
+  const store = state();
+  const plain = { ...target, whatsappSource: { messageId: source, identityId: owner } };
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi
+      .fn()
+      .mockRejectedValueOnce(new InkboxAPIError(429, { error: "whatsapp_daily_limit_exceeded" }))
+      .mockResolvedValue({ id: "accepted", conversationId: target.conversationId }),
+  };
+  const send = () => prepareWhatsApp(identity, plain, { text: "Answer" }, store, "original-plain");
+  await expect((await send())()).rejects.toThrow("attempt returned a rejection");
+  expect(hasExplicitWhatsAppReply(plain, store)).toBe(true);
+  await expect(
+    (await prepareWhatsApp(identity, plain, { text: "Answer" }, store, "replacement"))(),
+  ).rejects.toThrow("original key and payload");
+  await expect(
+    (await prepareWhatsApp(identity, plain, { text: "Different" }, store, "original-plain"))(),
+  ).rejects.toThrow("different payload");
+  expect(identity.sendWhatsApp).toHaveBeenCalledOnce();
+  await expect((await send())()).resolves.toMatchObject({ id: "accepted" });
+  expect(identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+  expect(identity.sendWhatsApp.mock.calls[0][0]).toEqual(identity.sendWhatsApp.mock.calls[1][0]);
+  expect(identity.sendWhatsApp.mock.calls[0][0]).not.toHaveProperty("replyToMessageId");
+});
+
+it("does not suppress a source final because an outreach send was rejected", async () => {
+  const store = state();
+  const outreach = {
+    ...target,
+    whatsappSource: undefined,
+    conversationId: undefined,
+    to: "+15555550125",
+  };
+  const identity: any = {
+    ...dmIdentity,
+    id: owner,
+    sendWhatsApp: vi
+      .fn()
+      .mockRejectedValue(new InkboxAPIError(429, { error: "whatsapp_daily_limit_exceeded" })),
+  };
+  await expect(
+    (await prepareWhatsApp(identity, outreach, { text: "Outreach" }, store, "outreach-key"))(),
+  ).rejects.toThrow("attempt returned a rejection");
+  expect(hasExplicitWhatsAppReply(target, store)).toBe(false);
+});

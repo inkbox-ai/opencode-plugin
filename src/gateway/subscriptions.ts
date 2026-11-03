@@ -225,6 +225,9 @@ export async function reconcileSubscriptions(
           allowReactionFallback &&
           inkboxErrorMessage(err).includes("whatsapp.reaction_received")
         ) {
+          deps.logger.warn(
+            "WhatsApp reaction events are unavailable on this API version; direct message subscriptions remain enabled",
+          );
           await reconcileOwner(
             kind,
             owner,

@@ -598,6 +598,9 @@ it.each([false, true])(
       expect(result).toMatchObject({ created: 2 });
     }
     expect(subs.delete).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      "WhatsApp reaction events are unavailable on this API version; direct message subscriptions remain enabled",
+    );
   },
 );
 

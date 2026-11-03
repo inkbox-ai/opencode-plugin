@@ -228,19 +228,19 @@ export async function prepareWhatsApp(
   const idempotencyKey = saved ? legacyKey : (originalKey ?? keyFor(payload));
   return async () => {
     assertWhatsAppOwner(target, store);
-    const priorQuote = Object.values(store.read().whatsappSends ?? {}).find(
+    const priorAttempt = Object.values(store.read().whatsappSends ?? {}).find(
       (send: any) =>
         source &&
         send.sourceId === source.messageId &&
         send.identityId === identity.id &&
         send.conversationId?.toLowerCase() === target.conversationId?.toLowerCase() &&
-        send.quoteAttempt &&
+        (send.quoteAttempt || send.explicit) &&
         ["started", "rejected"].includes(send.state) &&
         send.idempotencyKey !== idempotencyKey,
     );
-    if (priorQuote)
+    if (priorAttempt)
       throw new Error(
-        "The source has an unresolved quoted send; retain its original key and payload.",
+        "The source has an unresolved explicit send; retain its original key and payload.",
       );
     const existingSends = (store.read().whatsappSends ?? {}) as Record<string, unknown>;
     if (!(idempotencyKey in existingSends)) {
@@ -373,7 +373,7 @@ export function hasExplicitWhatsAppReply(
       send.sourceId === target.whatsappSource!.messageId &&
       send.identityId === target.whatsappSource!.identityId &&
       send.conversationId?.toLowerCase() === target.conversationId?.toLowerCase() &&
-      (["started", "sent"].includes(send.state) || send.quoteAttempt === true),
+      (["started", "sent", "rejected"].includes(send.state) || send.quoteAttempt === true),
   );
 }
 

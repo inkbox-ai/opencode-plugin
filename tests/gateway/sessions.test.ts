@@ -3670,37 +3670,45 @@ it.each(["queued", "paused"] as const)(
     }
   },
 );
-it("never converts a rejected explicit quote into an automatic plain final", async () => {
-  const h = makeManager(),
-    input = sms("Question", {
-      channel: "whatsapp",
-      messageId: "quoted-source",
-      whatsappSource: { messageId: "quoted-source", identityId: "identity-1" },
-    });
-  h.identity.sendWhatsApp.mockRejectedValueOnce(
-    new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" }),
-  );
-  try {
-    const send = await prepareWhatsApp(
-      h.identity as any,
-      {
+it.each([false, true])(
+  "never converts a rejected explicit source send into an automatic final (quoted=%s)",
+  async (quoted) => {
+    const h = makeManager(),
+      input = sms("Question", {
         channel: "whatsapp",
-        conversationId: "conv-1",
         messageId: "quoted-source",
-        whatsappSource: input.whatsappSource,
-      },
-      { text: "Quoted", replyToMessageId: "77777777-7777-4777-8777-777777777777" },
-      h.state,
-      "original-quote",
+        whatsappSource: { messageId: "quoted-source", identityId: "identity-1" },
+      });
+    h.identity.sendWhatsApp.mockRejectedValueOnce(
+      quoted
+        ? new InkboxAPIError(409, { error: "whatsapp_quote_unavailable" })
+        : new InkboxAPIError(429, { error: "whatsapp_daily_limit_exceeded" }),
     );
-    await expect(send()).rejects.toThrow("attempt returned a rejection");
-    await h.mgr.handleInbound(input);
-    await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
-    expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
-  } finally {
-    await h.mgr.close();
-  }
-});
+    try {
+      const send = await prepareWhatsApp(
+        h.identity as any,
+        {
+          channel: "whatsapp",
+          conversationId: "conv-1",
+          messageId: "quoted-source",
+          whatsappSource: input.whatsappSource,
+        },
+        {
+          text: "Answer",
+          ...(quoted ? { replyToMessageId: "77777777-7777-4777-8777-777777777777" } : {}),
+        },
+        h.state,
+        "original-quote",
+      );
+      await expect(send()).rejects.toThrow("attempt returned a rejection");
+      await h.mgr.handleInbound(input);
+      await vi.waitFor(() => expect(h.state.listTurns()[0]?.state).toBe("delivered"));
+      expect(h.identity.sendWhatsApp).toHaveBeenCalledOnce();
+    } finally {
+      await h.mgr.close();
+    }
+  },
+);
 it("never wakes or replies to unsupported WhatsApp group input", async () => {
   const h = makeManager();
   try {
