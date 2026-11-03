@@ -672,3 +672,64 @@ it.each([true, false])(
     expect(subscriptions.list).toHaveBeenCalledTimes(3);
   },
 );
+
+it("preserves query-distinct WhatsApp receivers while creating this receiver", async () => {
+  const subscriptions = makeSubscriptions([
+    {
+      id: "other-wa",
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL + "?receiver=other",
+      eventTypes: WHATSAPP_EVENTS,
+    },
+  ]);
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(subscriptions.delete).not.toHaveBeenCalled();
+  expect(subscriptions.create).toHaveBeenCalledWith(
+    expect.objectContaining({ url: WEBHOOK_URL, eventTypes: WHATSAPP_EVENTS }),
+  );
+});
+
+it("keeps query-distinct A2A receivers when mixed WhatsApp reaction registration falls back", async () => {
+  const mixed = {
+    id: "mixed",
+    agentIdentityId: "ident-1",
+    url: WEBHOOK_URL,
+    eventTypes: ["a2a.task.created", "whatsapp.received"],
+  };
+  const subscriptions = makeSubscriptions([
+    mixed,
+    {
+      id: "other-a2a",
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL + "?receiver=other",
+      eventTypes: A2A_EVENT_TYPES,
+    },
+  ]);
+  subscriptions.update.mockImplementation(async (id, options) => {
+    if (options.eventTypes?.includes("whatsapp.reaction_received"))
+      throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+    mixed.eventTypes = options.eventTypes!;
+    return { id, ...options };
+  });
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(subscriptions.delete).not.toHaveBeenCalled();
+  expect(new Set(mixed.eventTypes)).toEqual(
+    new Set([
+      ...A2A_EVENT_TYPES,
+      ...WHATSAPP_EVENTS.filter((type) => type !== "whatsapp.reaction_received"),
+    ]),
+  );
+  expect(subscriptions.create).not.toHaveBeenCalled();
+});

@@ -131,6 +131,7 @@ export async function reconcileSubscriptions(
     allowReactionFallback = true,
     allowCreateConflictRetry = true,
   ): Promise<void> {
+    const requestedEventTypes = eventTypes;
     try {
       const existing = await client.webhooks.subscriptions.list({
         ...owner,
@@ -144,6 +145,7 @@ export async function reconcileSubscriptions(
       );
       const staleOurs = existing.filter(
         (sub) =>
+          !("agentIdentityId" in owner) &&
           sub.url !== subscriptionUrl &&
           sameWebhookPath(sub.url, subscriptionUrl) &&
           [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
@@ -231,7 +233,7 @@ export async function reconcileSubscriptions(
           await reconcileOwner(
             kind,
             owner,
-            eventTypes.filter((type) => type !== "whatsapp.reaction_received"),
+            requestedEventTypes.filter((type) => type !== "whatsapp.reaction_received"),
             subscriptionUrl,
             false,
           );
