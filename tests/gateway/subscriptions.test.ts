@@ -600,3 +600,72 @@ it.each([false, true])(
     expect(subs.delete).not.toHaveBeenCalled();
   },
 );
+
+it("preserves mixed WhatsApp and A2A events across each identity reconciliation", async () => {
+  const row = {
+    id: "mixed-wa",
+    agentIdentityId: "ident-1",
+    url: WEBHOOK_URL,
+    eventTypes: ["whatsapp.received", "a2a.task.created"],
+  };
+  const subscriptions = makeSubscriptions([row]);
+  subscriptions.update.mockImplementation(async (id, options) => {
+    row.eventTypes = options.eventTypes!;
+    return { id, ...options };
+  });
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(new Set(row.eventTypes)).toEqual(new Set([...A2A_EVENT_TYPES, ...WHATSAPP_EVENTS]));
+  expect(subscriptions.create).not.toHaveBeenCalled();
+  expect(subscriptions.update).toHaveBeenCalledWith(
+    "mixed-wa",
+    expect.objectContaining({ scope: "identity" }),
+  );
+});
+
+it.each([true, false])(
+  "re-lists once after a concurrent WhatsApp registration conflict (visible=%s)",
+  async (visible) => {
+    const subscriptions = makeSubscriptions([
+      { id: "a2a", agentIdentityId: "ident-1", url: WEBHOOK_URL, eventTypes: A2A_EVENT_TYPES },
+    ]);
+    const originalList = subscriptions.list.getMockImplementation()!;
+    let conflicted = false;
+    subscriptions.list.mockImplementation(async (filters) => {
+      expect(filters).toEqual({ agentIdentityId: "ident-1", scope: "identity" });
+      return [
+        ...(await originalList(filters)),
+        ...(conflicted && visible
+          ? [
+              {
+                id: "concurrent-wa",
+                agentIdentityId: "ident-1",
+                url: WEBHOOK_URL,
+                eventTypes: WHATSAPP_EVENTS,
+              },
+            ]
+          : []),
+      ];
+    });
+    subscriptions.create.mockImplementation(async () => {
+      conflicted = true;
+      throw new InkboxAPIError(409, "Subscription already exists");
+    });
+    const run = reconcileSubscriptions(
+      makeDeps(
+        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+        subscriptions,
+      ),
+      PUBLIC_URL,
+    );
+    if (visible) await expect(run).resolves.toMatchObject({ created: 0, unchanged: 2 });
+    else await expect(run).rejects.toThrow("Conflict (409)");
+    expect(subscriptions.create).toHaveBeenCalledTimes(visible ? 1 : 2);
+    expect(subscriptions.list).toHaveBeenCalledTimes(3);
+  },
+);

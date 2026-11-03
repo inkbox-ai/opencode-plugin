@@ -129,6 +129,7 @@ export async function reconcileSubscriptions(
     eventTypes: string[],
     subscriptionUrl = webhookUrl,
     allowReactionFallback = true,
+    allowCreateConflictRetry = true,
   ): Promise<void> {
     try {
       const existing = await client.webhooks.subscriptions.list({
@@ -147,14 +148,35 @@ export async function reconcileSubscriptions(
           sameWebhookPath(sub.url, subscriptionUrl) &&
           [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
       );
-      if (ours?.eventTypes.some((type) => type.startsWith("slack.")))
+      if (ours && "agentIdentityId" in owner)
         eventTypes = [...new Set([...ours.eventTypes, ...eventTypes])];
       if (!ours) {
-        const created = await client.webhooks.subscriptions.create({
-          ...owner,
-          url: subscriptionUrl,
-          eventTypes,
-        });
+        const created = await client.webhooks.subscriptions
+          .create({
+            ...owner,
+            url: subscriptionUrl,
+            eventTypes,
+          })
+          .catch(async (error: unknown) => {
+            if (
+              allowCreateConflictRetry &&
+              error instanceof Error &&
+              "statusCode" in error &&
+              Number(error.statusCode) === 409
+            ) {
+              await reconcileOwner(
+                kind,
+                owner,
+                eventTypes,
+                subscriptionUrl,
+                allowReactionFallback,
+                false,
+              );
+              return undefined;
+            }
+            throw error;
+          });
+        if (!created) return;
         result.created += 1;
         if (created.signingKey) {
           result.signingKey ??= created.signingKey;
@@ -170,9 +192,7 @@ export async function reconcileSubscriptions(
       } else {
         await client.webhooks.subscriptions.update(ours.id, {
           eventTypes,
-          ...(ours.eventTypes.some((type) => type.startsWith("slack."))
-            ? { scope: "identity" as const }
-            : {}),
+          ...("agentIdentityId" in owner ? { scope: "identity" as const } : {}),
         });
         result.updated += 1;
         deps.logger.info("updated webhook subscription event types", {
@@ -181,7 +201,11 @@ export async function reconcileSubscriptions(
         });
       }
       for (const stale of staleOurs) {
-        if (stale.eventTypes.some((type) => type.startsWith("slack."))) continue;
+        if (
+          stale.eventTypes.some((type) => type.startsWith("slack.")) ||
+          eventFamilies(stale.eventTypes).size > 1
+        )
+          continue;
         await client.webhooks.subscriptions.delete(stale.id);
         deps.logger.info("removed stale webhook subscription", {
           kind,
