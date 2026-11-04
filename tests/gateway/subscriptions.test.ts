@@ -10,6 +10,7 @@ import {
   reconcileSubscriptions,
 } from "../../src/gateway/subscriptions.js";
 import type { GatewayDeps, GatewayLogger } from "../../src/gateway/types.js";
+import { WHATSAPP_EVENTS } from "../../src/whatsapp-native.js";
 
 const PUBLIC_URL = "https://scout.tunnel.inkbox.ai";
 const WEBHOOK_URL = `${PUBLIC_URL}/webhook`;
@@ -142,8 +143,8 @@ describe("reconcileSubscriptions", () => {
     const subs = makeSubscriptions();
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
-    expect(subs.create).toHaveBeenCalledTimes(5);
+    expect(result).toEqual({ created: 6, updated: 0, unchanged: 0 });
+    expect(subs.create).toHaveBeenCalledTimes(6);
     expect(subs.create).toHaveBeenCalledWith({
       mailboxId: "mb-1",
       url: WEBHOOK_URL,
@@ -168,6 +169,11 @@ describe("reconcileSubscriptions", () => {
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
       eventTypes: CALL_EVENT_TYPES,
+    });
+    expect(subs.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: WHATSAPP_EVENTS,
     });
     expect(subs.update).not.toHaveBeenCalled();
   });
@@ -200,10 +206,10 @@ describe("reconcileSubscriptions", () => {
     ]);
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 1, updated: 1, unchanged: 3 });
+    expect(result).toEqual({ created: 2, updated: 1, unchanged: 3 });
     expect(subs.update).toHaveBeenCalledTimes(1);
     expect(subs.update).toHaveBeenCalledWith("sub-mb", { eventTypes: MAILBOX_EVENT_TYPES });
-    expect(subs.create).toHaveBeenCalledOnce();
+    expect(subs.create).toHaveBeenCalledTimes(2);
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
@@ -223,7 +229,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ phoneNumber: null, imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 1, updated: 0, unchanged: 1 });
+    expect(result).toEqual({ created: 2, updated: 0, unchanged: 1 });
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
@@ -250,7 +256,7 @@ describe("reconcileSubscriptions", () => {
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
 
     // Foreign subscriptions are ignored entirely; ours are created alongside.
-    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 6, updated: 0, unchanged: 0 });
     expect(subs.update).not.toHaveBeenCalled();
     expect(subs.delete).not.toHaveBeenCalled();
   });
@@ -260,7 +266,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ phoneNumber: null });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners.some((o: Record<string, unknown>) => "phoneNumberId" in o)).toBe(false);
     expect(subs.list).not.toHaveBeenCalledWith(
@@ -273,7 +279,7 @@ describe("reconcileSubscriptions", () => {
     const identity = makeIdentity({ imessageEnabled: false });
     const result = await reconcileSubscriptions(makeDeps(identity, subs), PUBLIC_URL);
 
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
     const owners = subs.create.mock.calls.map(([options]) => options);
     expect(owners).toContainEqual({
       agentIdentityId: "ident-1",
@@ -299,7 +305,7 @@ describe("reconcileSubscriptions", () => {
 
     const result = await reconcileSubscriptions(deps, PUBLIC_URL);
 
-    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 5, updated: 0, unchanged: 0 });
     expect(subs.create).toHaveBeenCalledWith({
       agentIdentityId: "ident-1",
       url: WEBHOOK_URL,
@@ -332,7 +338,7 @@ describe("reconcileSubscriptions", () => {
 
     const result = await reconcileSubscriptions(deps, PUBLIC_URL);
 
-    expect(result).toEqual({ created: 3, updated: 0, unchanged: 0 });
+    expect(result).toEqual({ created: 4, updated: 0, unchanged: 0 });
     expect(deps.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("skipping the A2A subscription"),
     );
@@ -546,4 +552,184 @@ describe("mixed identity subscription preservation", () => {
       }),
     );
   });
+});
+
+it.each([false, true])(
+  "retains WhatsApp message subscriptions when reaction events are unsupported (existing=%s)",
+  async (existing) => {
+    const directEvents = WHATSAPP_EVENTS.filter((type) => type !== "whatsapp.reaction_received");
+    const subs = makeSubscriptions(
+      existing
+        ? [
+            {
+              id: "wa-sub",
+              agentIdentityId: "ident-1",
+              url: WEBHOOK_URL,
+              eventTypes: directEvents,
+            },
+          ]
+        : [],
+    );
+    const create = subs.create.getMockImplementation()!;
+    subs.create.mockImplementation(async (options) => {
+      if (options.eventTypes.includes("whatsapp.reaction_received"))
+        throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+      return create(options);
+    });
+    subs.update.mockImplementation(async (id, options) => {
+      if (options.eventTypes?.includes("whatsapp.reaction_received"))
+        throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+      return { id, ...options };
+    });
+    const deps = makeDeps(
+      makeIdentity({ mailbox: null, phoneNumber: null, imessageEnabled: false }),
+      subs,
+    );
+    const result = await reconcileSubscriptions(deps, PUBLIC_URL);
+    if (existing) {
+      expect(subs.update).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ unchanged: 1 });
+    } else {
+      expect(subs.create).toHaveBeenCalledWith({
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL,
+        eventTypes: directEvents,
+      });
+      expect(result).toMatchObject({ created: 2 });
+    }
+    expect(subs.delete).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      "WhatsApp reaction events are unavailable on this API version; direct message subscriptions remain enabled",
+    );
+  },
+);
+
+it("preserves mixed WhatsApp and A2A events across each identity reconciliation", async () => {
+  const row = {
+    id: "mixed-wa",
+    agentIdentityId: "ident-1",
+    url: WEBHOOK_URL,
+    eventTypes: ["whatsapp.received", "a2a.task.created"],
+  };
+  const subscriptions = makeSubscriptions([row]);
+  subscriptions.update.mockImplementation(async (id, options) => {
+    row.eventTypes = options.eventTypes!;
+    return { id, ...options };
+  });
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(new Set(row.eventTypes)).toEqual(new Set([...A2A_EVENT_TYPES, ...WHATSAPP_EVENTS]));
+  expect(subscriptions.create).not.toHaveBeenCalled();
+  expect(subscriptions.update).toHaveBeenCalledWith(
+    "mixed-wa",
+    expect.objectContaining({ scope: "identity" }),
+  );
+});
+
+it.each([true, false])(
+  "re-lists once after a concurrent WhatsApp registration conflict (visible=%s)",
+  async (visible) => {
+    const subscriptions = makeSubscriptions([
+      { id: "a2a", agentIdentityId: "ident-1", url: WEBHOOK_URL, eventTypes: A2A_EVENT_TYPES },
+    ]);
+    const originalList = subscriptions.list.getMockImplementation()!;
+    let conflicted = false;
+    subscriptions.list.mockImplementation(async (filters) => {
+      expect(filters).toEqual({ agentIdentityId: "ident-1", scope: "identity" });
+      return [
+        ...(await originalList(filters)),
+        ...(conflicted && visible
+          ? [
+              {
+                id: "concurrent-wa",
+                agentIdentityId: "ident-1",
+                url: WEBHOOK_URL,
+                eventTypes: WHATSAPP_EVENTS,
+              },
+            ]
+          : []),
+      ];
+    });
+    subscriptions.create.mockImplementation(async () => {
+      conflicted = true;
+      throw new InkboxAPIError(409, "Subscription already exists");
+    });
+    const run = reconcileSubscriptions(
+      makeDeps(
+        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+        subscriptions,
+      ),
+      PUBLIC_URL,
+    );
+    if (visible) await expect(run).resolves.toMatchObject({ created: 0, unchanged: 2 });
+    else await expect(run).rejects.toThrow("Conflict (409)");
+    expect(subscriptions.create).toHaveBeenCalledTimes(visible ? 1 : 2);
+    expect(subscriptions.list).toHaveBeenCalledTimes(3);
+  },
+);
+
+it("preserves query-distinct WhatsApp receivers while creating this receiver", async () => {
+  const subscriptions = makeSubscriptions([
+    {
+      id: "other-wa",
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL + "?receiver=other",
+      eventTypes: WHATSAPP_EVENTS,
+    },
+  ]);
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(subscriptions.delete).not.toHaveBeenCalled();
+  expect(subscriptions.create).toHaveBeenCalledWith(
+    expect.objectContaining({ url: WEBHOOK_URL, eventTypes: WHATSAPP_EVENTS }),
+  );
+});
+
+it("keeps query-distinct A2A receivers when mixed WhatsApp reaction registration falls back", async () => {
+  const mixed = {
+    id: "mixed",
+    agentIdentityId: "ident-1",
+    url: WEBHOOK_URL,
+    eventTypes: ["a2a.task.created", "whatsapp.received"],
+  };
+  const subscriptions = makeSubscriptions([
+    mixed,
+    {
+      id: "other-a2a",
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL + "?receiver=other",
+      eventTypes: A2A_EVENT_TYPES,
+    },
+  ]);
+  subscriptions.update.mockImplementation(async (id, options) => {
+    if (options.eventTypes?.includes("whatsapp.reaction_received"))
+      throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+    mixed.eventTypes = options.eventTypes!;
+    return { id, ...options };
+  });
+  await reconcileSubscriptions(
+    makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      subscriptions,
+    ),
+    PUBLIC_URL,
+  );
+  expect(subscriptions.delete).not.toHaveBeenCalled();
+  expect(new Set(mixed.eventTypes)).toEqual(
+    new Set([
+      ...A2A_EVENT_TYPES,
+      ...WHATSAPP_EVENTS.filter((type) => type !== "whatsapp.reaction_received"),
+    ]),
+  );
+  expect(subscriptions.create).not.toHaveBeenCalled();
 });

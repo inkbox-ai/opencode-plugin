@@ -2,7 +2,12 @@
 // email subject threading, markdown stripping, and length caps.
 import { describe, expect, it, vi } from "vitest";
 import type { InkboxRuntime } from "../../src/client.js";
-import { deliverReply, prepareReply, sentEmailReply } from "../../src/gateway/reply.js";
+import {
+  deliverReply,
+  prepareReply,
+  ReplyPreparationError,
+  sentEmailReply,
+} from "../../src/gateway/reply.js";
 import type { GatewayLogger, ReplyTarget } from "../../src/gateway/types.js";
 import { IMESSAGE_MAX_TEXT_CHARS, SMS_MAX_TEXT_CHARS } from "../../src/limits.js";
 
@@ -211,4 +216,17 @@ describe("deliverReply imessage", () => {
     const long = "a".repeat(IMESSAGE_MAX_TEXT_CHARS + 1);
     await expect(deliver(target, long).result).rejects.toThrow(String(IMESSAGE_MAX_TEXT_CHARS));
   });
+});
+
+it("classifies an overlong WhatsApp reply as a preparation error before identity reads", async () => {
+  const runtime = makeRuntime(makeIdentity());
+  await expect(
+    prepareReply(
+      runtime,
+      { channel: "whatsapp", conversationId: "conversation" },
+      "x".repeat(4001),
+      makeLogger(),
+    ),
+  ).rejects.toBeInstanceOf(ReplyPreparationError);
+  expect(runtime.getIdentity).not.toHaveBeenCalled();
 });

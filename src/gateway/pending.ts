@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isPermissionReply, sameAuthor } from "./response-policy.js";
 
 export interface ReplyAuthor {
@@ -14,13 +15,21 @@ export interface PendingReplies {
     send: () => Promise<unknown>,
     signal?: AbortSignal,
   ): Promise<string | undefined>;
-  tryConsume(chatKey: string, text: string, author?: ReplyAuthor): boolean;
+  current(chatKey: string, author?: ReplyAuthor): string | undefined;
+  tryConsume(
+    chatKey: string,
+    text: string,
+    author?: ReplyAuthor,
+    beforeConsume?: () => void,
+    waiterId?: string,
+  ): boolean;
   pending(chatKey: string): boolean;
   cancel(chatKey: string): void;
-  cancelFor(chatKey: string, author: ReplyAuthor): boolean;
+  cancelFor(chatKey: string, author: ReplyAuthor, waiterId?: string | null): boolean;
   close(): void;
 }
 interface Waiter {
+  id: string;
   author?: ReplyAuthor;
   done(text?: string): void;
 }
@@ -34,6 +43,7 @@ export function createPendingReplies(): PendingReplies {
     return new Promise<string | undefined>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const entry: Waiter = {
+        id: randomUUID(),
         author,
         done(text) {
           if (timer) clearTimeout(timer);
@@ -51,6 +61,21 @@ export function createPendingReplies(): PendingReplies {
   function cancel(chatKey: string) {
     generations.set(chatKey, (generations.get(chatKey) ?? 0) + 1);
     waiters.get(chatKey)?.done();
+  }
+  function current(chatKey: string, author?: ReplyAuthor): string | undefined {
+    const entry = waiters.get(chatKey);
+    if (!entry) return;
+    const expected = entry.author;
+    if (!expected && author?.channel === "whatsapp") return;
+    if (
+      expected &&
+      (!author ||
+        author.channel !== expected.channel ||
+        author.route !== expected.route ||
+        !sameAuthor(expected.channel, expected.sender, author.sender))
+    )
+      return;
+    return entry.id;
   }
   return {
     await: wait,
@@ -88,26 +113,23 @@ export function createPendingReplies(): PendingReplies {
         if (queues.get(chatKey) === task) queues.delete(chatKey);
       }
     },
-    tryConsume(chatKey, text, author) {
+    current,
+    tryConsume(chatKey, text, author, beforeConsume, waiterId) {
       if (!isPermissionReply(text)) return false;
+      const id = current(chatKey, author);
+      if (!id || (waiterId !== undefined && id !== waiterId)) return false;
       const entry = waiters.get(chatKey);
       if (!entry) return false;
-      const expected = entry.author;
-      if (
-        expected &&
-        (!author ||
-          author.channel !== expected.channel ||
-          author.route !== expected.route ||
-          !sameAuthor(expected.channel, expected.sender, author.sender))
-      )
-        return false;
+      beforeConsume?.();
       entry.done(text);
       return true;
     },
     pending: (chatKey) => waiters.has(chatKey),
     cancel,
-    cancelFor(chatKey, author) {
+    cancelFor(chatKey, author, waiterId) {
+      if (waiterId !== undefined && current(chatKey, author) !== waiterId) return false;
       const expected = waiters.get(chatKey)?.author;
+      if (!expected && author.channel === "whatsapp") return false;
       if (
         !waiters.has(chatKey) ||
         (expected &&

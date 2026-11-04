@@ -65,6 +65,7 @@ export interface DurableTurn {
 }
 
 export interface DurablePermission {
+  requestId?: string | null;
   owner?: { turnId: string; ownerId: string; messageID: string; toolMessageID: string };
   replyTarget?: ReplyTarget;
   permissionID: string;
@@ -82,11 +83,34 @@ export interface DurablePermission {
 export interface GatewayState {
   // chatKey -> opencode session id
   sessions: Record<string, string>;
+  sessionGenerations?: Record<string, number>;
   turns: Record<string, DurableTurn>;
   replyTargets: Record<string, ReplyTarget>;
   permissions: Record<string, DurablePermission>;
   tunnelId?: string;
+  // Newest admitted revision for one identity, actor, and target message.
+  whatsappReactionWatermarks?: Record<string, number>;
   [key: string]: unknown;
+}
+
+export function whatsappReactionWatermarkKey(
+  identityId: string,
+  actor: string,
+  targetMessageId: string,
+): string {
+  return JSON.stringify([identityId, actor, targetMessageId]);
+}
+
+// A later lower revision is an old delivery, not new context.
+export function staleWhatsAppReactionRevision(
+  state: GatewayState,
+  reaction: { identityId: string; actor: string; targetMessageId: string; revision: number },
+): boolean {
+  const seen =
+    state.whatsappReactionWatermarks?.[
+      whatsappReactionWatermarkKey(reaction.identityId, reaction.actor, reaction.targetMessageId)
+    ] ?? 0;
+  return seen > 0 && reaction.revision <= seen;
 }
 
 export interface StateStore {
@@ -95,15 +119,26 @@ export interface StateStore {
   // truncated state file.
   update(patch: Partial<GatewayState>): GatewayState;
   updateSlackSend(key: string, update: (entry: unknown) => unknown): void;
+  updateWhatsAppSend(key: string, update: (entry: unknown) => unknown): void;
   updateIMessageSend(key: string, update: (entry: unknown) => unknown): void;
   updateA2ATask(key: string, update: (entry: unknown) => unknown): void;
-  setSession(chatKey: string, sessionID: string, owner?: { turnId: string; ownerId: string }): void;
+  setSession(
+    chatKey: string,
+    sessionID: string,
+    owner?: { turnId: string; ownerId: string },
+    expected?: { sessionID: string; generation: number },
+  ): boolean;
   getSession(chatKey: string): string | undefined;
-  clearSession(chatKey: string, owner?: { turnId: string; ownerId: string }): void;
+  clearSession(
+    chatKey: string,
+    owner?: { turnId: string; ownerId: string },
+    expected?: { generation: number; contextIds: string[] },
+  ): boolean;
   setReplyTarget(chatKey: string, target: ReplyTarget): void;
   getReplyTarget(chatKey: string): ReplyTarget | undefined;
   saveTurn(turn: DurableTurn): void;
   reserveTurns(turns: DurableTurn[]): DurableTurn[];
+  reserveWhatsAppTurn(turn: DurableTurn): boolean;
   updateTurn(id: string, patch: Partial<DurableTurn>): DurableTurn | undefined;
   transitionTurn(
     id: string,
@@ -231,6 +266,15 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           : [{ ...state, slackSends: { ...entries, [key]: entry } }, undefined];
       });
     },
+    updateWhatsAppSend(key, update) {
+      mutate((state) => {
+        const entries = (state.whatsappSends ?? {}) as Record<string, unknown>;
+        const entry = update(entries[key]);
+        return entry === undefined
+          ? [state, undefined]
+          : [{ ...state, whatsappSends: { ...entries, [key]: entry } }, undefined];
+      });
+    },
     updateIMessageSend(key, update) {
       mutate((state) => {
         const entries = (state.imessageSends ?? {}) as Record<string, unknown>;
@@ -251,21 +295,53 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
         return [{ ...state, a2aTasks: { ...tasks, [key]: entry } }, undefined];
       });
     },
-    setSession(chatKey, sessionID, owner) {
-      mutate((state) => {
+    setSession(chatKey, sessionID, owner, expected) {
+      return mutate((state) => {
         checkSessionOwner(state, owner);
-        return [{ ...state, sessions: { ...state.sessions, [chatKey]: sessionID } }, undefined];
+        if (
+          expected &&
+          (state.sessions[chatKey] !== expected.sessionID ||
+            (state.sessionGenerations?.[chatKey] ?? 0) !== expected.generation)
+        )
+          return [state, false];
+        return [
+          {
+            ...state,
+            sessions: { ...state.sessions, [chatKey]: sessionID },
+            sessionGenerations: {
+              ...state.sessionGenerations,
+              [chatKey]: (state.sessionGenerations?.[chatKey] ?? 0) + 1,
+            },
+          },
+          true,
+        ];
       });
     },
     getSession(chatKey) {
       return read().sessions[chatKey];
     },
-    clearSession(chatKey, owner) {
-      mutate((state) => {
+    clearSession(chatKey, owner, expected) {
+      return mutate((state) => {
         checkSessionOwner(state, owner);
+        const generation = state.sessionGenerations?.[chatKey] ?? 0;
+        if (expected && expected.generation !== generation) return [state, false];
         const sessions = { ...state.sessions };
         delete sessions[chatKey];
-        return [{ ...state, sessions }, undefined];
+        const turns = { ...state.turns };
+        for (const id of expected?.contextIds ?? []) {
+          const turn = turns[id];
+          if (turn?.chatKey === chatKey && turn.state === "context_only" && !turn.consumedBy)
+            turns[id] = { ...turn, consumedBy: "session-reset" };
+        }
+        return [
+          {
+            ...state,
+            sessions,
+            turns,
+            sessionGenerations: { ...state.sessionGenerations, [chatKey]: generation + 1 },
+          },
+          true,
+        ];
       });
     },
     setReplyTarget(chatKey, target) {
@@ -286,6 +362,7 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
               !candidate.hostedCapture &&
               !candidate.companion &&
               !candidate.replyTarget?.imessageSource &&
+              !candidate.replyTarget?.whatsappSource &&
               (["delivered", "failed", "interrupted"].includes(candidate.state) ||
                 (candidate.state === "completed" && !candidate.deliver) ||
                 (candidate.state === "context_only" && Boolean(candidate.consumedBy))),
@@ -302,6 +379,51 @@ export function createStateStore(dir: string = gatewayHome()): StateStore {
           if (!turns[candidate.id]) turns[candidate.id] = candidate;
         }
         return [{ ...state, turns }, candidates.map((candidate) => turns[candidate.id])];
+      });
+    },
+    reserveWhatsAppTurn(turn) {
+      const source = turn.replyTarget?.whatsappSource;
+      if (!source) throw new Error("WhatsApp source reservation requires an immutable owner.");
+      return mutate((state) => {
+        if (
+          Object.values(state.turns).some(
+            (old) =>
+              old.replyTarget?.whatsappSource?.identityId === source.identityId &&
+              old.sourceIds?.includes(source.messageId),
+          )
+        )
+          return [state, false];
+        const revision = source.reactionRevision;
+        const actor = turn.replyTarget?.sender;
+        const targetId = source.targetMessageId;
+        let watermarks = state.whatsappReactionWatermarks;
+        if (
+          source.reactionId &&
+          actor &&
+          targetId &&
+          Number.isInteger(revision) &&
+          (revision as number) >= 1
+        ) {
+          const key = whatsappReactionWatermarkKey(source.identityId, actor, targetId);
+          if (
+            staleWhatsAppReactionRevision(state, {
+              identityId: source.identityId,
+              actor,
+              targetMessageId: targetId,
+              revision: revision as number,
+            })
+          )
+            return [state, false];
+          watermarks = { ...watermarks, [key]: revision as number };
+        }
+        return [
+          {
+            ...state,
+            turns: { ...state.turns, [turn.id]: turn },
+            ...(watermarks ? { whatsappReactionWatermarks: watermarks } : {}),
+          },
+          true,
+        ];
       });
     },
     updateTurn(id, patch) {

@@ -2,6 +2,7 @@ import type { AgentIdentity } from "@inkbox/sdk";
 import { IncomingCallAction } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
 import { reconcileSlackSubscription } from "../slack.js";
+import { WHATSAPP_EVENTS } from "../whatsapp-native.js";
 import type { GatewayDeps } from "./types.js";
 
 // Path (under the public URL) all gateway webhook subscriptions target.
@@ -127,7 +128,10 @@ export async function reconcileSubscriptions(
     owner: SubscriptionOwner,
     eventTypes: string[],
     subscriptionUrl = webhookUrl,
+    allowReactionFallback = true,
+    allowCreateConflictRetry = true,
   ): Promise<void> {
+    const requestedEventTypes = eventTypes;
     try {
       const existing = await client.webhooks.subscriptions.list({
         ...owner,
@@ -141,18 +145,40 @@ export async function reconcileSubscriptions(
       );
       const staleOurs = existing.filter(
         (sub) =>
+          !("agentIdentityId" in owner) &&
           sub.url !== subscriptionUrl &&
           sameWebhookPath(sub.url, subscriptionUrl) &&
           [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family)),
       );
-      if (ours?.eventTypes.some((type) => type.startsWith("slack.")))
+      if (ours && "agentIdentityId" in owner)
         eventTypes = [...new Set([...ours.eventTypes, ...eventTypes])];
       if (!ours) {
-        const created = await client.webhooks.subscriptions.create({
-          ...owner,
-          url: subscriptionUrl,
-          eventTypes,
-        });
+        const created = await client.webhooks.subscriptions
+          .create({
+            ...owner,
+            url: subscriptionUrl,
+            eventTypes,
+          })
+          .catch(async (error: unknown) => {
+            if (
+              allowCreateConflictRetry &&
+              error instanceof Error &&
+              "statusCode" in error &&
+              Number(error.statusCode) === 409
+            ) {
+              await reconcileOwner(
+                kind,
+                owner,
+                eventTypes,
+                subscriptionUrl,
+                allowReactionFallback,
+                false,
+              );
+              return undefined;
+            }
+            throw error;
+          });
+        if (!created) return;
         result.created += 1;
         if (created.signingKey) {
           result.signingKey ??= created.signingKey;
@@ -168,9 +194,7 @@ export async function reconcileSubscriptions(
       } else {
         await client.webhooks.subscriptions.update(ours.id, {
           eventTypes,
-          ...(ours.eventTypes.some((type) => type.startsWith("slack."))
-            ? { scope: "identity" as const }
-            : {}),
+          ...("agentIdentityId" in owner ? { scope: "identity" as const } : {}),
         });
         result.updated += 1;
         deps.logger.info("updated webhook subscription event types", {
@@ -179,7 +203,11 @@ export async function reconcileSubscriptions(
         });
       }
       for (const stale of staleOurs) {
-        if (stale.eventTypes.some((type) => type.startsWith("slack."))) continue;
+        if (
+          stale.eventTypes.some((type) => type.startsWith("slack.")) ||
+          eventFamilies(stale.eventTypes).size > 1
+        )
+          continue;
         await client.webhooks.subscriptions.delete(stale.id);
         deps.logger.info("removed stale webhook subscription", {
           kind,
@@ -187,6 +215,33 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (
+        kind === "whatsapp" &&
+        /whatsapp/i.test(inkboxErrorMessage(err)) &&
+        /event|prefix|unknown|unsupported/i.test(inkboxErrorMessage(err)) &&
+        err instanceof Error &&
+        "statusCode" in err &&
+        [400, 422].includes(Number(err.statusCode))
+      ) {
+        if (
+          allowReactionFallback &&
+          inkboxErrorMessage(err).includes("whatsapp.reaction_received")
+        ) {
+          deps.logger.warn(
+            "WhatsApp reaction events are unavailable on this API version; direct message subscriptions remain enabled",
+          );
+          await reconcileOwner(
+            kind,
+            owner,
+            requestedEventTypes.filter((type) => type !== "whatsapp.reaction_received"),
+            subscriptionUrl,
+            false,
+          );
+          return;
+        }
+        deps.logger.warn("WhatsApp event subscription unavailable on this API version");
+        return;
+      }
       if (kind === "a2a" && isUnsupportedA2AEventTypes(err)) {
         deps.logger.warn(
           "Inkbox API does not support A2A webhook events yet; " + "skipping the A2A subscription",
@@ -207,6 +262,7 @@ export async function reconcileSubscriptions(
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
   await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
+  await reconcileOwner("whatsapp", { agentIdentityId: identity.id }, WHATSAPP_EVENTS);
   if (identity.imessageEnabled) {
     await reconcileOwner("imessage", { agentIdentityId: identity.id }, IMESSAGE_EVENT_TYPES);
   }

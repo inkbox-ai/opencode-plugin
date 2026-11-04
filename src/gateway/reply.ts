@@ -2,6 +2,7 @@ import type { InkboxRuntime } from "../client.js";
 import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
 import { prepareSlackReply } from "../slack.js";
+import { assertWhatsAppText, prepareWhatsApp } from "../whatsapp-native.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { StateStore } from "./state.js";
 import type { GatewayLogger, ReplyTarget } from "./types.js";
@@ -42,6 +43,8 @@ export async function prepareReply(
   raw: string,
   logger: GatewayLogger,
   store?: StateStore,
+  _allowedRecipients?: string[],
+  requestId?: string,
 ): Promise<() => Promise<ReplyResult>> {
   const trimmed = (raw ?? "").trim();
   if (!trimmed || trimmed === SILENT)
@@ -62,11 +65,25 @@ export async function prepareReply(
   const body = target.channel === "email" ? trimmed : stripMarkdown(trimmed);
   try {
     if (target.channel === "sms") assertSmsTextWithinLimit(body);
+    if (target.channel === "whatsapp") assertWhatsAppText(body);
     if (target.channel === "imessage") assertIMessageTextWithinLimit(body);
   } catch (error) {
     throw new ReplyPreparationError(error instanceof Error ? error.message : String(error));
   }
   const identity = await runtime.getIdentity();
+  if (target.channel === "whatsapp") {
+    if (target.group) throw new ReplyPreparationError("WhatsApp supports direct messages only.");
+    const send = await prepareWhatsApp(
+      identity,
+      target,
+      { text: body },
+      store,
+      undefined,
+      true,
+      requestId,
+    );
+    return async () => ({ delivered: true, reason: "sent", messageId: (await send()).id });
+  }
   const nativeSend =
     target.channel === "imessage" && target.imessageSource
       ? await prepareNativeIMessage(identity, target, { text: body }, store)
@@ -100,6 +117,7 @@ export async function deliverReply(
   target: ReplyTarget,
   raw: string,
   logger: GatewayLogger,
+  allowedRecipients?: string[],
 ): Promise<ReplyResult> {
-  return (await prepareReply(runtime, target, raw, logger))();
+  return (await prepareReply(runtime, target, raw, logger, undefined, allowedRecipients))();
 }

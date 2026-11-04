@@ -1,6 +1,7 @@
 // The advertised tool surface is a compatibility contract: names, groups,
 // default-enabled state, and the sensitive set. Renaming or re-gating a tool
 // is a breaking change and must show up here as a deliberate diff.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { buildAllTools } from "../../src/tools/index.js";
@@ -32,6 +33,22 @@ function stubDeps(): ToolDeps {
 }
 
 const DEFAULT_ENABLED = [
+  "inkbox_send_whatsapp",
+  "inkbox_list_whatsapp_conversations",
+  "inkbox_get_whatsapp_conversation",
+  "inkbox_list_whatsapp_messages",
+  "inkbox_get_whatsapp_message",
+  "inkbox_upload_whatsapp_media",
+  "inkbox_get_whatsapp_media",
+  "inkbox_mark_whatsapp_read",
+  "inkbox_get_whatsapp_status",
+  "inkbox_lookup_whatsapp_send",
+  "inkbox_get_whatsapp_thread",
+  "inkbox_get_whatsapp_conversation_thread",
+  "inkbox_send_whatsapp_reaction",
+  "inkbox_get_whatsapp_reaction",
+  "inkbox_remove_whatsapp_reaction",
+
   "inkbox_a2a_call",
   "inkbox_a2a_check",
   "inkbox_a2a_reply",
@@ -103,6 +120,7 @@ const SENSITIVE = [
 ].sort();
 
 const GROUPS = [
+  "whatsapp",
   "a2a",
   "email",
   "sms",
@@ -119,10 +137,33 @@ const GROUPS = [
 describe("tool vocabulary", () => {
   const all = buildAllTools(stubDeps());
 
-  it("ships exactly the expected 57 default-configuration tools", () => {
+  it("ships exactly the expected 72 default-configuration tools", () => {
     const names = all.map((t) => t.name).sort();
     expect(names).toEqual([...DEFAULT_ENABLED, ...OPT_IN].sort());
-    expect(names).toHaveLength(57);
+    expect(names).toHaveLength(72);
+  });
+
+  it("documents the actual default counts and complete grouped tool inventory", () => {
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    expect(readme).toContain(
+      `${DEFAULT_ENABLED.length} tools are enabled by default; ${OPT_IN.length} more are opt-in`,
+    );
+    for (const group of GROUPS) {
+      const row = readme.split("\n").find((line) => line.startsWith(`| \`${group}\` |`));
+      expect(row, group).toBeDefined();
+      const columns = row!.split("|");
+      for (const enabled of [true, false]) {
+        const documented = [...columns[enabled ? 2 : 3].matchAll(/`(inkbox_[a-z0-9_]+)`/g)]
+          .map((match) => match[1])
+          .sort();
+        expect(documented).toEqual(
+          all
+            .filter((tool) => tool.group === group && tool.defaultEnabled === enabled)
+            .map((tool) => tool.name)
+            .sort(),
+        );
+      }
+    }
   });
 
   it("has no duplicate tool names", () => {

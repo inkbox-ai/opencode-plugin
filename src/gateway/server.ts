@@ -85,13 +85,24 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
       return send(res, 400, "invalid json");
     }
 
+    if (typeof parsed.event_type === "string" && parsed.event_type.startsWith("whatsapp.")) {
+      const secret = resolveProviderSecret(provider, deps.config, env);
+      if (
+        provider.name !== "inkbox" ||
+        (!verified && !(await provider.verify({ body, headers, secret })))
+      )
+        return send(res, 401, "WhatsApp requires a verified Inkbox webhook");
+      if (parsed.companion != null) return send(res, 400, "WhatsApp Companion is unsupported");
+      verified = true;
+    }
     const requestId = headers["x-inkbox-request-id"];
     // Companion retries must reach the durable reservation before each ACK.
     const companion =
       provider.name === "inkbox" &&
       parsed &&
       typeof parsed === "object" &&
-      parsed.companion != null;
+      (parsed.companion != null ||
+        (typeof parsed.event_type === "string" && parsed.event_type.startsWith("whatsapp.")));
     if (!companion && !deps.dedup.begin(requestId)) {
       // Already seen/in-flight — ack so the sender stops retrying.
       return send(res, 200, JSON.stringify({ deduped: true }), "application/json");

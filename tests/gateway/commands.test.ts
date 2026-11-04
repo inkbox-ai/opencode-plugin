@@ -71,12 +71,19 @@ describe("/stop", () => {
     expect(await handleCommand(deps, "ck", "/stop")).toBe("Stopped.");
   });
 
-  it("says nothing was running when there was no turn to abort", async () => {
-    const deps = makeDeps({
-      sessions: makeSessions({ abortTurn: vi.fn(async () => false) }) as never,
-    });
-    expect(await handleCommand(deps, "ck", "/stop")).toBe("Nothing was running.");
-  });
+  it.each([false, true])(
+    "does not disclose unrelated work when scoped stop has no match (busy=%s)",
+    async (busy) => {
+      const deps = makeDeps({
+        sessions: makeSessions({
+          abortTurn: vi.fn(async () => false),
+          status: vi.fn(() => ({ busy })),
+        }) as never,
+      });
+      expect(await handleCommand(deps, "ck", "/stop")).toBe("No matching work was stopped.");
+      expect(deps.sessions.status).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("/status", () => {

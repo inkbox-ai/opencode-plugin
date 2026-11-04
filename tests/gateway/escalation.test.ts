@@ -826,3 +826,24 @@ it("coalesces inventory retry and forced recovery reads while one read is pendin
     d.listener.close();
   }
 });
+
+it.each([undefined, "permission:retained"])(
+  "preserves retained prompt delivery identity %s during recovery",
+  async (requestId) => {
+    const deps = makeDeps();
+    deps.state.savePermission({
+      ...perm,
+      chatKey: "ck",
+      deadline: Date.now() + 10000,
+      state: "relayed",
+      ...(requestId ? { requestId } : {}),
+    });
+    await createEscalationBridge(deps).catchUp();
+    expect(deps.relay.ask).toHaveBeenCalledWith(
+      "ck",
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ requestId: requestId ?? null }),
+    );
+  },
+);

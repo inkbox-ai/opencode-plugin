@@ -57,7 +57,7 @@ export function normalizeContactMemories(value: unknown): string[] {
 export function matchedContactMemories(
   payload: Record<string, unknown>,
   options: {
-    channel: "email" | "sms" | "imessage" | "voice";
+    channel: "email" | "sms" | "imessage" | "whatsapp" | "voice";
     from: string;
     contactId?: string;
     allowSoleContactFallback?: boolean;
