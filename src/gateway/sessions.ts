@@ -250,6 +250,7 @@ export function createSessionManager(
         conversationId &&
         !Object.values(deps.state.read().whatsappSends ?? {}).some(
           (record: any) =>
+            record.ingress !== true &&
             record.identityId === source.identityId &&
             record.sourceId === source.messageId &&
             record.conversationId?.toLowerCase() === conversationId.toLowerCase(),

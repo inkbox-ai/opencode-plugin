@@ -24,7 +24,7 @@ import { createSessionManager, extractText } from "../../src/gateway/sessions.js
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 import * as slackActivity from "../../src/slack-activity.js";
-import { prepareWhatsApp } from "../../src/whatsapp-native.js";
+import { prepareWhatsApp, reserveWhatsAppIngress } from "../../src/whatsapp-native.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
@@ -138,7 +138,9 @@ function makeManager(existingDir?: string, factory = createSessionManager) {
   };
   const config = { gateway: { ...defaultGatewayConfig() } } as unknown as ResolvedConfig;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const companionSenderAllowed = vi.fn(async (from: string) => from === "sponsor@example.com");
+  const companionSenderAllowed = vi.fn(
+    async (from: string, _requireReply?: boolean) => from === "sponsor@example.com",
+  );
   const companionLocalAllowed = vi.fn(
     (_from: string, _contactId: string | undefined, _requireReply: boolean) => true,
   );
@@ -3960,6 +3962,17 @@ it.each([false, true])(
   async (posted) => {
     const d = makeManager();
     const source = { identityId: "identity-1", messageId: "restart-source" };
+    reserveWhatsAppIngress(
+      sms("question", {
+        channel: "whatsapp",
+        chatKey: "wa-restart",
+        conversationId: "conversation-1",
+        whatsappSource: source,
+      }),
+      false,
+      d.state,
+      () => ({ kind: "normal", waiterId: null }),
+    );
     d.state.saveTurn({
       id: "restart-wa",
       messageID: "restart-wa",
