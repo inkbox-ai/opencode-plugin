@@ -4152,3 +4152,88 @@ it("uses each current WhatsApp Companion control source for distinct acknowledge
     await d.mgr.close();
   }
 });
+
+it("accepts a signed sponsored WhatsApp source through HTTP, canonical hydration and native delivery", async () => {
+  const d = whatsappCompanionFixture();
+  d.config.gateway.companionResponseMode = "relaxed";
+  const { createWebhookServer } = await import("../../src/gateway/server.js");
+  const { createRequestDedup } = await import("../../src/gateway/dedup.js");
+  const { inkboxProvider } = await import("../../src/gateway/providers.js");
+  const { createHmac } = await import("node:crypto");
+  const secret = "whsec_synthetic-whatsapp-companion-contract";
+  const server = createWebhookServer({
+    config: { ...d.config, signingKey: secret },
+    logger: d.logger,
+    dedup: createRequestDedup(),
+    providers: [inkboxProvider],
+    onEvent: (event) =>
+      dispatchEvent(
+        {
+          config: d.config,
+          logger: d.logger,
+          state: d.state,
+          inkbox: d.inkbox,
+          sessions: d.mgr,
+          contacts: {
+            resolve: async (phone: string) => ({ contactId: phone }),
+            chatKeyFor: () => "unused-group-contact",
+          },
+        } as any,
+        event,
+      ),
+  });
+  await server.listen("127.0.0.1", 0);
+  try {
+    const body = JSON.stringify({
+      event_type: "whatsapp.received",
+      companion: d.c.metadata,
+      data: {
+        message: {
+          id: "source-1",
+          agent_identity_id: "identity-1",
+          conversation_id: "conversation-1",
+          is_group: true,
+          remote_number: null,
+          local_number: "+15559990000",
+          participants: ["+15550000001", "+15550000002"],
+          unresolved_participant_count: 0,
+          sender_number: "+15550000001",
+          direction: "inbound",
+          content: "Current question",
+          is_blocked: true,
+          sender_access: "sponsored",
+          media: [],
+          agent_mentioned: true,
+          mentions: [],
+        },
+      },
+    });
+    const requestId = "signed-companion",
+      timestamp = String(Math.floor(Date.now() / 1000));
+    const digest = createHmac("sha256", secret.slice(6))
+      .update(`${requestId}.${timestamp}.${body}`)
+      .digest("hex");
+    const port = (server.server.address() as { port: number }).port;
+    const response = await fetch(`http://127.0.0.1:${port}/webhook`, {
+      method: "POST",
+      body,
+      headers: {
+        "content-type": "application/json",
+        "x-inkbox-request-id": requestId,
+        "x-inkbox-timestamp": timestamp,
+        "x-inkbox-signature": `sha256=${digest}`,
+      },
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(d.loadInitialization).toHaveBeenCalledOnce();
+    expect(d.activationMessages).toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(d.identity.sendWhatsApp).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: "conversation-1" }),
+    );
+  } finally {
+    await server.close();
+    await d.mgr.close();
+  }
+});

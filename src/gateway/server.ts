@@ -92,7 +92,6 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
         (!verified && !(await provider.verify({ body, headers, secret })))
       )
         return send(res, 401, "WhatsApp requires a verified Inkbox webhook");
-      if (parsed.companion != null) return send(res, 400, "WhatsApp Companion is unsupported");
       verified = true;
     }
     const requestId = headers["x-inkbox-request-id"];

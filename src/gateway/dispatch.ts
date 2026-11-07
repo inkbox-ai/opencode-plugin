@@ -756,8 +756,19 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
   const companion =
     event.body.companion == null ? undefined : companionMetadata(event.body.companion);
   const identity = await deps.inkbox.getIdentity();
-  if (message.agent_identity_id !== identity.id || message.is_blocked === true) return true;
   const type = event.eventType ?? inferType(event.body);
+  const sponsoredReceipt =
+    type === "whatsapp.received" &&
+    group &&
+    companion?.channel === "whatsapp" &&
+    companion.phase !== "ordinary" &&
+    companion.conversation_id === message.conversation_id &&
+    message.sender_access === "sponsored";
+  if (
+    message.agent_identity_id !== identity.id ||
+    (message.is_blocked === true && !sponsoredReceipt)
+  )
+    return true;
   const reaction =
     type === "whatsapp.reaction_received" ? resourceOf(event.body, "reaction") : undefined;
   if (reaction) {

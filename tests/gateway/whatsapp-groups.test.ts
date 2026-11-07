@@ -9,6 +9,7 @@ import { companionWakes } from "../../src/gateway/response-policy.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import {
   authorizeWhatsAppCompanion,
+  mentionContext,
   nativeMentions,
   WhatsAppPreflightError,
   whatsappControlText,
@@ -225,13 +226,7 @@ it("requires current activation and rejects borrowed cross-conversation grants",
   ).toBe("whatsapp");
 });
 
-it("acknowledges a correctly signed group event on an old SDK without model or send effects", async () => {
-  const f = fixture();
-  f.identity.getWhatsAppConversation.mockResolvedValue({
-    id: conversation,
-    agentIdentityId: owner,
-    participants: [phone, other],
-  } as any);
+async function signedRequest(f: ReturnType<typeof fixture>, eventBody: unknown): Promise<number> {
   const { createWebhookServer } = await import("../../src/gateway/server.js");
   const { createRequestDedup } = await import("../../src/gateway/dedup.js");
   const { inkboxProvider } = await import("../../src/gateway/providers.js");
@@ -246,7 +241,7 @@ it("acknowledges a correctly signed group event on an old SDK without model or s
   });
   await server.listen("127.0.0.1", 0);
   try {
-    const body = JSON.stringify({ ...f.event().body, event_type: "whatsapp.received" });
+    const body = JSON.stringify(eventBody);
     const requestId = "group-contract",
       timestamp = String(Math.floor(Date.now() / 1000));
     const digest = createHmac("sha256", secret.slice(6))
@@ -263,11 +258,123 @@ it("acknowledges a correctly signed group event on an old SDK without model or s
       },
       body,
     });
-    expect(result.status).toBe(200);
-    expect(f.handleInbound).not.toHaveBeenCalled();
-    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
-    expect(f.store.listTurns()).toHaveLength(0);
+    return result.status;
   } finally {
     await server.close();
   }
+}
+
+it("acknowledges a correctly signed group event on an old SDK without model or send effects", async () => {
+  const f = fixture();
+  f.identity.getWhatsAppConversation.mockResolvedValue({
+    id: conversation,
+    agentIdentityId: owner,
+    participants: [phone, other],
+  } as any);
+  expect(await signedRequest(f, { ...f.event().body, event_type: "whatsapp.received" })).toBe(200);
+  expect(f.handleInbound).not.toHaveBeenCalled();
+  expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  expect(f.store.listTurns()).toHaveLength(0);
+});
+
+it.each([
+  "initialization",
+  "live",
+  "ordinary",
+  "missing",
+  "direct",
+  "wrong-channel",
+  "direct-access",
+  "reaction",
+])(
+  "admits only signed current sponsored group Companion sources despite ordinary blocked provenance (%s)",
+  async (scenario) => {
+    const f = fixture();
+    const metadata =
+      scenario === "missing"
+        ? undefined
+        : {
+            channel: scenario === "wrong-channel" ? "imessage" : "whatsapp",
+            scope_id: "scope",
+            ...(scenario === "ordinary" ? {} : { activation_id: "activation" }),
+            conversation_id: conversation,
+            sequence: 1,
+            phase:
+              scenario === "ordinary"
+                ? "ordinary"
+                : scenario === "live"
+                  ? "live"
+                  : "initialization",
+          };
+    const changes = {
+      is_blocked: true,
+      sender_access: scenario === "direct-access" ? "direct" : "sponsored",
+      ...(scenario === "direct"
+        ? { is_group: false, participants: [phone], remote_number: phone }
+        : {}),
+    };
+    expect(
+      await signedRequest(f, {
+        ...f.event(changes, metadata).body,
+        event_type: scenario === "reaction" ? "whatsapp.reaction_received" : "whatsapp.received",
+      }),
+    ).toBe(200);
+    if (["initialization", "live"].includes(scenario)) {
+      expect(f.acceptCompanion).toHaveBeenCalledOnce();
+      expect(f.acceptCompanion.mock.calls[0][0]).toMatchObject({
+        senderAccess: "sponsored",
+        metadata,
+      });
+    } else expect(f.acceptCompanion).not.toHaveBeenCalled();
+    expect(f.handleInbound).not.toHaveBeenCalled();
+    expect(f.identity.sendWhatsApp).not.toHaveBeenCalled();
+  },
+);
+
+it("replaces only complete current native mention tokens, including overlaps and repetitions", async () => {
+  const contacts: any = {
+    resolve: vi.fn(async () => ({ contactName: "Taylor", contactMemories: ["not context"] })),
+  };
+  const raw = "@123 @1234 @12345 x@123 @@123 @123x (@123), @1234! @123 @9 я@123 @123я";
+  const result = await mentionContext(
+    raw,
+    [
+      { text: "@123", phoneNumber: null, isAgent: true },
+      { text: "@1234", phoneNumber: other, isAgent: false },
+      { text: "@9", phoneNumber: null, isAgent: false },
+    ],
+    "@sample",
+    contacts,
+  );
+  expect(result.split("\n")[0]).toBe(
+    "@sample @Taylor @12345 x@123 @@123 @123x (@sample), @Taylor! @sample @unresolved mention я@123 @123я",
+  );
+  expect(result).toContain(JSON.stringify(raw));
+  expect(result).not.toContain("not context");
+  contacts.resolve.mockRejectedValueOnce(new Error("lookup unavailable"));
+  expect(
+    (
+      await mentionContext(
+        "@7",
+        [{ text: "@7", phoneNumber: other, isAgent: false }],
+        "sample",
+        contacts,
+      )
+    ).split("\n")[0],
+  ).toBe(`@${other}`);
+});
+
+it("renders current native mention names in direct messages without changing raw attention text", async () => {
+  const f = fixture();
+  await dispatchEvent(
+    f.deps,
+    f.event({ is_group: false, participants: [phone], remote_number: phone }),
+  );
+  const input = f.handleInbound.mock.calls[0][0];
+  expect(input.text.split("\n")[0]).toBe("Hello @sample and @Taylor");
+  expect(input.rawText).toBe("Hello @123 and @456");
+  expect(input.whatsappSource.mentions).toEqual([
+    { text: "@123", phoneNumber: f.roster.localNumber, isAgent: true },
+    { text: "@456", phoneNumber: other, isAgent: false },
+  ]);
 });
