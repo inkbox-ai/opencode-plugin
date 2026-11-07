@@ -129,17 +129,15 @@ it.skipIf(process.env.INKBOX_REQUIRE_GROUP_SDK !== "1")(
           };
         else
           data = {
-            message: {
-              ...fixture.message,
-              is_group: true,
-              remote_number: null,
-              group_name: "Example group",
-              unresolved_participant_count: 0,
-              participants: ["+15555550101", "+15555550102"],
-              agent_mentioned: true,
-              mentions: [{ text: "@123", phone_number: null, is_agent: true }],
-              sender_access: "sponsored",
-            },
+            ...fixture.message,
+            is_group: true,
+            remote_number: null,
+            group_name: "Example group",
+            unresolved_participant_count: 0,
+            participants: ["+15555550101", "+15555550102"],
+            agent_mentioned: true,
+            mentions: [{ text: "@123", phone_number: null, is_agent: true }],
+            sender_access: "sponsored",
           };
         return new Response(JSON.stringify(data), {
           headers: { "content-type": "application/json" },
