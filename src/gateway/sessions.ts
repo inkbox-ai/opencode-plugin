@@ -107,6 +107,7 @@ const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastMessageSequence = 0n;
 
 function retryableRead(error: unknown): boolean {
+  if (error instanceof WhatsAppPreflightError) return retryableRead(error.cause);
   const err = error as {
     status?: number;
     statusCode?: number;
@@ -238,6 +239,23 @@ export function createSessionManager(
       progress.notify(turn.replyTarget.slack, event);
     }
   }
+  function whatsappPreflightOnly(turn: DurableTurn): boolean {
+    const target = turn.replyTarget;
+    const source = target?.whatsappSource;
+    const conversationId = target?.conversationId;
+    return Boolean(
+      target?.channel === "whatsapp" &&
+        source?.identityId &&
+        source.messageId &&
+        conversationId &&
+        !Object.values(deps.state.read().whatsappSends ?? {}).some(
+          (record: any) =>
+            record.identityId === source.identityId &&
+            record.sourceId === source.messageId &&
+            record.conversationId?.toLowerCase() === conversationId.toLowerCase(),
+        ),
+    );
+  }
   async function authorizeWhatsApp(target?: ReplyTarget): Promise<void> {
     if (
       target?.channel === "whatsapp" &&
@@ -251,7 +269,7 @@ export function createSessionManager(
         for (const participant of conversation.participants) {
           if (
             deps.companionSenderAllowed &&
-            !(await deps.companionSenderAllowed(participant, true))
+            !(await deps.companionSenderAllowed(participant, false))
           )
             throw new Error("WhatsApp participant is not permitted by local settings.");
         }
@@ -1207,6 +1225,11 @@ export function createSessionManager(
       if (turn.state === "submitted") await finish(turn, await completion(turn));
       else if (turn.state === "completed") await finish(turn, turn.output);
       else if (turn.state === "delivery_started") {
+        if (whatsappPreflightOnly(turn)) {
+          const completed = deps.state.updateTurn(id, { state: "completed" });
+          if (completed) await finish(completed, completed.output);
+          return;
+        }
         deps.state.updateTurn(id, {
           state: turn.companion ? "paused" : "failed",
           uncertainStage: "delivery",
@@ -2244,7 +2267,10 @@ export function createSessionManager(
         .filter((turn) => !TERMINAL.has(turn.state) && !turn.hostedCapture && !turn.a2aContext)
         .sort((a, b) => a.createdAt - b.createdAt);
       for (const turn of recoverable) {
-        if (turn.state === "delivery_started") {
+        if (turn.state === "delivery_started" && whatsappPreflightOnly(turn)) {
+          const completed = deps.state.updateTurn(turn.id, { state: "completed" });
+          if (completed) enqueue(completed);
+        } else if (turn.state === "delivery_started") {
           deps.state.updateTurn(turn.id, {
             state: turn.companion ? "paused" : "failed",
             uncertainStage: "delivery",

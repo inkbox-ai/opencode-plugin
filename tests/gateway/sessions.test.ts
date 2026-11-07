@@ -3954,3 +3954,122 @@ it("preserves native WhatsApp mention attention and treats other mentions as sha
     await d.mgr.close();
   }
 });
+
+it.each([false, true])(
+  "recovers a preflight-only WhatsApp restart without retrying a posted operation (posted=%s)",
+  async (posted) => {
+    const d = makeManager();
+    const source = { identityId: "identity-1", messageId: "restart-source" };
+    d.state.saveTurn({
+      id: "restart-wa",
+      messageID: "restart-wa",
+      chatKey: "wa-restart",
+      kind: "normal",
+      state: "delivery_started",
+      text: "question",
+      output: "saved answer",
+      deliver: true,
+      replyTarget: {
+        channel: "whatsapp",
+        conversationId: "conversation-1",
+        whatsappSource: source,
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    if (posted)
+      d.state.updateWhatsAppSend("existing", () => ({
+        identityId: source.identityId,
+        sourceId: source.messageId,
+        conversationId: "conversation-1",
+        state: "started",
+      }));
+    try {
+      await d.mgr.catchUp();
+      if (posted) {
+        expect(d.state.getTurn("restart-wa")?.state).toBe("failed");
+        expect(d.identity.sendWhatsApp).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() => expect(d.state.getTurn("restart-wa")?.state).toBe("delivered"));
+        expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce();
+        expect(d.identity.sendWhatsApp).toHaveBeenCalledWith(
+          expect.objectContaining({ text: "saved answer" }),
+        );
+      }
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    } finally {
+      await d.mgr.close();
+    }
+  },
+);
+
+it("rechecks ordinary group participants using the same inbound policy, not a Companion sponsor outbound rule", async () => {
+  const d = whatsappCompanionFixture();
+  d.companionSenderAllowed.mockImplementation(async (_from, requireReply) => !requireReply);
+  try {
+    await d.mgr.handleInbound(
+      sms("hello group", {
+        channel: "whatsapp",
+        chatKey: "ordinary-wa",
+        conversationId: "conversation-1",
+        group: { participantCount: 2 },
+        from: "+15550000001",
+        whatsappSource: { identityId: "identity-1", messageId: "ordinary-source" },
+      }),
+    );
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(
+      d.companionSenderAllowed.mock.calls.every(([, requireReply]) => requireReply === false),
+    ).toBe(true);
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("retains a completed WhatsApp answer after repeated transient failures in final preflight", async () => {
+  const d = makeManager();
+  const getConversation = d.identity.getWhatsAppConversation.getMockImplementation()!;
+  let fail = true;
+  d.identity.getWhatsAppConversation.mockImplementation(async (id) => {
+    if (fail && d.state.getTurn("retry-wa")?.state === "delivery_started")
+      throw Object.assign(new Error("temporarily unavailable"), { statusCode: 503 });
+    return getConversation(id);
+  });
+  d.state.saveTurn({
+    id: "retry-wa",
+    messageID: "retry-wa",
+    chatKey: "wa-retry",
+    kind: "normal",
+    state: "completed",
+    retryCount: 6,
+    text: "question",
+    output: "saved answer",
+    deliver: true,
+    replyTarget: {
+      channel: "whatsapp",
+      conversationId: "conversation-1",
+      whatsappSource: { identityId: "identity-1", messageId: "retry-source" },
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  try {
+    await d.mgr.catchUp();
+    await vi.waitFor(() =>
+      expect(d.state.getTurn("retry-wa")).toMatchObject({
+        state: "completed",
+        retryCount: 7,
+        output: "saved answer",
+      }),
+    );
+    expect(d.identity.sendWhatsApp).not.toHaveBeenCalled();
+    expect(Object.keys(d.state.read().whatsappSends ?? {})).toHaveLength(0);
+    fail = false;
+    d.state.updateTurn("retry-wa", { retryAt: 0 });
+    await d.mgr.catchUp();
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+  } finally {
+    await d.mgr.close();
+  }
+});
