@@ -6,6 +6,7 @@ import {
   isWhatsAppGroup,
   mentionContext,
   nativeMentions,
+  renderWhatsAppReplyContext,
   resolvedWhatsAppGroup,
   UnsupportedWhatsAppGroupSDK,
   whatsappDestination,
@@ -77,12 +78,32 @@ function messageChatKey(deps: DispatchDeps, input: ChatKeyInput, participants: n
   });
 }
 
+const whatsappIngress = new WeakMap<InkboxRuntime, Map<string, Promise<boolean>>>();
+
 // Route a verified event to the right handler. Returns false only on a
 // genuine processing failure (so the request id rolls back and the sender
 // may retry); filtered/ignored events return true (ack, no retry).
 export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
-  if ((event.eventType ?? inferType(event.body))?.startsWith("whatsapp."))
-    return event.provider === "inkbox" ? handleWhatsApp(deps, event) : false;
+  const eventType = event.eventType ?? inferType(event.body);
+  if (eventType?.startsWith("whatsapp.")) {
+    if (event.provider !== "inkbox" || !event.verified) return false;
+    if (eventType !== "whatsapp.received") return handleWhatsApp(deps, event);
+    const message = resourceOf(event.body, "message");
+    if (!message || typeof message.conversation_id !== "string") return handleWhatsApp(deps, event);
+    let runs = whatsappIngress.get(deps.inkbox);
+    if (!runs) {
+      runs = new Map();
+      whatsappIngress.set(deps.inkbox, runs);
+    }
+    const key = JSON.stringify([message.agent_identity_id, message.conversation_id]);
+    const task = (runs.get(key) ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => handleWhatsApp(deps, event));
+    runs.set(key, task);
+    return task.finally(() => {
+      if (runs.get(key) === task) runs.delete(key);
+    });
+  }
   if (event.provider !== "inkbox") {
     if (deps.onExternal) {
       void deps
@@ -930,6 +951,10 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     rootMessageId:
       typeof message.thread_root_message_id === "string" ? message.thread_root_message_id : null,
   };
+  const replyContext = reaction
+    ? ""
+    : await renderWhatsAppReplyContext(identity, message, deps.contacts);
+  const sourceWithReply = { ...source, ...(replyContext ? { replyContext } : {}) };
   text = await mentionContext(text, source.mentions, identity.agentHandle, deps.contacts);
   if (companion) {
     const acceptCompanion = deps.sessions.acceptCompanion;
@@ -946,7 +971,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
         rawText: str(message.content) ?? "",
         senderAccess: str(message.sender_access),
         initialization: companion.phase === "initialization",
-        whatsappSource: source,
+        whatsappSource: sourceWithReply,
       },
       `[Current WhatsApp source ${messageId}; native_agent_mentioned=${source.agentMentioned}; mentions=${JSON.stringify(source.mentions)}]\n${from}: ${text}\n${JSON.stringify(media)}${paths.length ? `\nLocal media: ${JSON.stringify(paths)}` : ""}`,
       companion.phase === "ordinary"
@@ -956,7 +981,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
             messageId,
             sender: from,
             group: true,
-            whatsappSource: source,
+            whatsappSource: sourceWithReply,
           }
         : undefined,
     );
@@ -982,7 +1007,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     messageId,
     ...resolved,
     whatsappSource: {
-      ...source,
+      ...sourceWithReply,
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),

@@ -2,6 +2,8 @@
 
 ## 0.2.19 (unreleased)
 
+- Show source-keyed inline reply context with quoted author, text, and attachment metadata; keep optional quote lookup failures nonblocking and preserve incoming conversation order.
+- Require the published SDK 0.7.29 for current WhatsApp features.
 - Support existing inbound-first WhatsApp groups, native mentions, and sponsored Companion context through native conversation sessions.
 - Resolve mention display names in groups and direct messages; retain current-message attention rules and group-scoped permissions for media, reactions, and quoted replies.
 

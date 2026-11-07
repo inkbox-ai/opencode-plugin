@@ -164,7 +164,7 @@ export async function prepareWhatsApp(
   authorize?: () => Promise<void>,
 ) {
   if (typeof identity.sendWhatsApp !== "function")
-    throw new Error("WhatsApp requires Inkbox SDK 0.7.26 or newer.");
+    throw new Error("WhatsApp requires Inkbox SDK 0.7.29 or newer.");
   assertWhatsAppText(payload.text ?? "");
   const suppliedQuote = payload.replyToMessageId;
   const source = target.whatsappSource;

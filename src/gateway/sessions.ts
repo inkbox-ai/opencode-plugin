@@ -922,7 +922,7 @@ export function createSessionManager(
       (contactId ? map[contactId] : undefined) ?? map[channel];
     const wakes = companionWakes(c, deps.config.gateway);
     const text = companionFrame(
-      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}`,
+      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
       target,
     );
     const next = deps.state.transitionTurn(
@@ -1924,7 +1924,7 @@ export function createSessionManager(
                           : []),
                       ])
                     : undefined,
-                burstTextChars: [...msg.text].length,
+                burstTextChars: [...msg.text, ...(msg.whatsappSource.replyContext ?? "")].length,
                 retryAt:
                   !msg.reaction &&
                   !msg.whatsappSource.mediaIds?.length &&
@@ -2003,14 +2003,15 @@ export function createSessionManager(
         if (
           previous?.burstKey === turn.burstKey &&
           (previous.sourceIds?.length ?? 0) < 8 &&
-          (previous.burstTextChars ?? 0) + msg.text.length <= 4000 &&
+          (previous.burstTextChars ?? 0) + (turn.burstTextChars ?? msg.text.length) <= 4000 &&
           Date.now() < previous.createdAt + 2000 &&
           (previous.retryAt ?? 0) > Date.now()
         ) {
           const merged = deps.state.updateTurn(previous.id, {
             text: previous.text + "\n" + (msg.whatsappSource ? turn.text : msg.text),
             sourceIds: [...(previous.sourceIds ?? []), sourceId!],
-            burstTextChars: (previous.burstTextChars ?? 0) + msg.text.length,
+            burstTextChars:
+              (previous.burstTextChars ?? 0) + (turn.burstTextChars ?? msg.text.length),
             retryAt: Math.min(previous.createdAt + 2000, Date.now() + 750),
           });
           if (merged) enqueue(merged);

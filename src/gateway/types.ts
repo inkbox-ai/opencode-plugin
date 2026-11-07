@@ -44,6 +44,7 @@ export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    replyContext?: string;
     agentMentioned?: boolean;
     mentions?: import("../whatsapp-groups.js").WhatsAppMention[];
     autoReplyTarget?: string;
@@ -111,6 +112,7 @@ export interface ReplyTarget {
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    replyContext?: string;
     agentMentioned?: boolean;
     mentions?: import("../whatsapp-groups.js").WhatsAppMention[];
     autoReplyTarget?: string;

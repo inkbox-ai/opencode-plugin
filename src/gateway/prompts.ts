@@ -246,6 +246,7 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   if (directive) lines.push(`Operator directive for this channel: ${directive}`);
   if (msg.group) lines.push(groupReminder(msg.group.participantCount));
   lines.push(escapeContactMemoriesTokens(msg.text));
+  if (msg.whatsappSource?.replyContext) lines.push(msg.whatsappSource.replyContext);
   if (msg.mediaPaths.length > 0) {
     lines.push(escapeContactMemoriesTokens(`[attached files: ${msg.mediaPaths.join(", ")}]`));
   }
