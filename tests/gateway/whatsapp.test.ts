@@ -27,7 +27,11 @@ const owner = "10000000-0000-4000-8000-000000000001",
   conversation = "20000000-0000-4000-8000-000000000001",
   source = "30000000-0000-4000-8000-000000000001";
 const dmIdentity = {
-  getWhatsAppConversation: async () => ({ agentIdentityId: owner, participants: ["+15555550101"] }),
+  getWhatsAppConversation: async (id: string) => ({
+    id,
+    agentIdentityId: owner,
+    participants: ["+15555550101"],
+  }),
 };
 const time = "2026-10-01T12:00:00Z";
 const wire = {
@@ -727,7 +731,8 @@ function v2Tools(allowedRecipients: string[] = []) {
   const identity: any = {
     ...dmIdentity,
     id: owner,
-    getWhatsAppConversation: vi.fn(async () => ({
+    getWhatsAppConversation: vi.fn(async (id: string) => ({
+      id,
       agentIdentityId: owner,
       participants: ["+15555550101"],
     })),
@@ -735,7 +740,7 @@ function v2Tools(allowedRecipients: string[] = []) {
       agentIdentityId: owner,
       conversationId: conversation,
     })),
-    getWhatsAppReaction: vi.fn(async () => ({ targetMessageId: source })),
+    getWhatsAppReaction: vi.fn(async () => ({ agentIdentityId: owner, targetMessageId: source })),
     sendWhatsApp: vi.fn(async () => ({
       id: "accepted",
       conversationId: conversation,
@@ -802,7 +807,7 @@ it("rejects every recipient array and list while retaining DM quotes", async () 
     idempotencyKey: "quote-key",
   });
 });
-it("rejects group and foreign conversation targets", async () => {
+it("rejects unresolved, inconsistent group metadata and foreign conversation targets", async () => {
   const f = v2Tools();
   for (const change of [
     { participants: ["+15555550101", "+15555550102"] },
@@ -1186,7 +1191,8 @@ it("anchors a new ordinary reply to its source, not its quoted parent", async ()
     ...dmIdentity,
     id: owner,
     sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
-    getWhatsAppConversation: vi.fn(async () => ({
+    getWhatsAppConversation: vi.fn(async (id: string) => ({
+      id,
       agentIdentityId: owner,
       participants: ["+15555550101"],
     })),
@@ -1301,7 +1307,8 @@ it("defaults source-owned tools without retargeting explicit outreach", async ()
     ...dmIdentity,
     id: owner,
     sendWhatsApp: vi.fn(async () => ({ id: "accepted" })),
-    getWhatsAppConversation: vi.fn(async () => ({
+    getWhatsAppConversation: vi.fn(async (id: string) => ({
+      id,
       agentIdentityId: owner,
       participants: ["+15555550101"],
     })),
@@ -1608,7 +1615,7 @@ it.each(
 )(
   "preserves retained uppercase wire selectors and quote payloads (%j)",
   async ({ quoted, savedState }) => {
-    const calls = stubSdkFetch(),
+    const calls = stubSdkFetch({ ...conversationWire, id: alphabeticConversation }),
       { identity } = await realIdentity();
     const replyTarget = { ...target, conversationId: alphabeticConversation };
     const tool = ownedSendTool(identity, replyTarget),
@@ -1695,11 +1702,10 @@ it("does not classify an unrelated selector as source-owned from returned conver
     replyTarget = { ...target, conversationId: alphabeticConversation };
   const tool = ownedSendTool(identity, replyTarget),
     other = "abcdefab-0000-4000-8000-000000000002";
-  await tool.execute({ conversationId: other, text: "Separate outreach" });
-  expect(posted(calls)).toHaveLength(1);
-  const request = JSON.parse(String(posted(calls)[0].init?.body));
-  expect(request.conversation_id).toBe(other);
-  expect(request).not.toHaveProperty("reply_to_message_id");
+  await expect(tool.execute({ conversationId: other, text: "Separate outreach" })).rejects.toThrow(
+    "ownership changed",
+  );
+  expect(posted(calls)).toHaveLength(0);
   expect(hasExplicitWhatsAppReply(replyTarget, tool.store)).toBe(false);
 });
 
@@ -1739,7 +1745,7 @@ it("rejects removed group selectors and exposes only scalar recipients", async (
   for (const name of ["list_whatsapp_conversations", "list_whatsapp_messages"]) {
     const tool = f.tools.find((tool) => tool.name === `inkbox_${name}`)!;
     expect(tool.definition.args).not.toHaveProperty("includeGroups");
-    await expect(f.execute(name, { includeGroups: true })).rejects.toThrow("direct messages only");
+    await expect(f.execute(name, { includeGroups: true })).rejects.toThrow("group creation");
   }
 });
 

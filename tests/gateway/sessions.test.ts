@@ -24,7 +24,7 @@ import { createSessionManager, extractText } from "../../src/gateway/sessions.js
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 import * as slackActivity from "../../src/slack-activity.js";
-import { prepareWhatsApp } from "../../src/whatsapp-native.js";
+import { prepareWhatsApp, reserveWhatsAppIngress } from "../../src/whatsapp-native.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
 const tmpDirs: string[] = [];
@@ -57,7 +57,8 @@ function makeIdentity() {
     getIMessage: vi.fn(async () => ({ id: "source", conversationId: "conversation" })),
     getIMessageThread: vi.fn(async () => ({ conversationId: "conversation", messages: [] })),
     sendIMessage: vi.fn(async () => ({ id: "im-1" })),
-    getWhatsAppConversation: vi.fn(async () => ({
+    getWhatsAppConversation: vi.fn(async (id: string) => ({
+      id,
       agentIdentityId: "identity-1",
       participants: ["+15550000001"],
     })),
@@ -137,7 +138,9 @@ function makeManager(existingDir?: string, factory = createSessionManager) {
   };
   const config = { gateway: { ...defaultGatewayConfig() } } as unknown as ResolvedConfig;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const companionSenderAllowed = vi.fn(async (from: string) => from === "sponsor@example.com");
+  const companionSenderAllowed = vi.fn(
+    async (from: string, _requireReply?: boolean) => from === "sponsor@example.com",
+  );
   const companionLocalAllowed = vi.fn(
     (_from: string, _contactId: string | undefined, _requireReply: boolean) => true,
   );
@@ -3709,7 +3712,7 @@ it.each([false, true])(
     }
   },
 );
-it("never wakes or replies to unsupported WhatsApp group input", async () => {
+it("retains a group receipt without submitting while current group ownership is unavailable", async () => {
   const h = makeManager();
   try {
     await h.mgr.handleInbound(
@@ -3719,7 +3722,7 @@ it("never wakes or replies to unsupported WhatsApp group input", async () => {
         whatsappSource: { messageId: "group", identityId: "identity-1" },
       }),
     );
-    expect(h.state.listTurns()).toHaveLength(0);
+    await vi.waitFor(() => expect(h.state.listTurns()[0]?.retryAt).toBeGreaterThan(0));
     expect(h.opencode.session.promptAsync).not.toHaveBeenCalled();
     expect(h.identity.sendWhatsApp).not.toHaveBeenCalled();
   } finally {
@@ -3811,6 +3814,520 @@ it("submits each captionless WhatsApp attachment to the host and sends plain fin
       expect(h.identity.sendWhatsApp.mock.calls[index][0]).not.toHaveProperty("replyToMessageId");
     }
     expect(h.identity.sendWhatsApp).toHaveBeenCalledTimes(2);
+  } finally {
+    await h.mgr.close();
+  }
+});
+
+function whatsappCompanionFixture() {
+  const d = makeManager();
+  const phone = "+15550000001";
+  d.companionSenderAllowed.mockImplementation(async (from) => from === phone);
+  d.identity.getWhatsAppConversation.mockResolvedValue({
+    id: "conversation-1",
+    agentIdentityId: "identity-1",
+    participants: [phone, "+15550000002"],
+    isGroup: true,
+    remoteNumber: null,
+    localNumber: "+15559990000",
+    unresolvedParticipantCount: 0,
+  } as any);
+  const c: CompanionTurn = {
+    ...companion(),
+    from: phone,
+    whatsappSource: {
+      identityId: "identity-1",
+      messageId: "source-1",
+      agentMentioned: true,
+      mentions: [{ text: "@123", phoneNumber: "+15559990000", isAgent: true }],
+    },
+    metadata: { ...companion().metadata, channel: "whatsapp" },
+  };
+  const page = {
+    scopeId: "scope-1",
+    activationId: "activation-1",
+    conversationId: "conversation-1",
+    channel: "whatsapp",
+    replyContext: { channel: "whatsapp", conversationId: "conversation-1" },
+  };
+  const loadInitialization = vi.fn(async () => ({
+    ...snapshot(),
+    ...page,
+    entries: [
+      { id: "older", author: "+15550000002", isTrigger: false, historical: true },
+      { id: "source-1", author: phone, isTrigger: true, historical: false },
+    ],
+  }));
+  const activationMessages = vi.fn(async () => page);
+  d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization, activationMessages } });
+  return { ...d, c, page, loadInitialization, activationMessages };
+}
+it("hydrates WhatsApp Companion once and keeps native session order across live receipts", async () => {
+  const d = whatsappCompanionFixture();
+  try {
+    await d.mgr.acceptCompanion(d.c, "Current group question");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    await d.mgr.acceptCompanion(
+      {
+        ...d.c,
+        sourceId: "source-2",
+        initialization: false,
+        metadata: { ...d.c.metadata, phase: "live", sequence: 2 },
+        whatsappSource: { ...d.c.whatsappSource!, messageId: "source-2" },
+      },
+      "Next group question",
+    );
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledTimes(2));
+    expect(d.loadInitialization).toHaveBeenCalledOnce();
+    expect(d.opencode.session.create).toHaveBeenCalledOnce();
+    expect(d.activationMessages.mock.calls.length).toBeGreaterThan(1);
+    expect(d.identity.sendWhatsApp.mock.calls.map(([args]: any) => args.conversationId)).toEqual([
+      "conversation-1",
+      "conversation-1",
+    ]);
+  } finally {
+    await d.mgr.close();
+  }
+});
+it("retains a completed WhatsApp Companion answer while current activation cannot be read", async () => {
+  const d = whatsappCompanionFixture();
+  let revoked = false;
+  const prompt = d.opencode.session.promptAsync.getMockImplementation()!;
+  d.opencode.session.promptAsync.mockImplementation(async (input) => {
+    const result = await prompt(input);
+    revoked = true;
+    return result;
+  });
+  d.activationMessages.mockImplementation(async () => {
+    if (revoked) throw new Error("activation unavailable");
+    return d.page;
+  });
+  try {
+    await d.mgr.acceptCompanion(d.c, "Current group question");
+    await vi.waitFor(() =>
+      expect(
+        d.state
+          .listTurns()
+          .find((t) => t.companion?.sourceId === "source-1" && t.state === "completed")?.output,
+      ).toBe("reply"),
+    );
+    expect(d.identity.sendWhatsApp).not.toHaveBeenCalled();
+    revoked = false;
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce(), {
+      timeout: 4000,
+    });
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+  } finally {
+    await d.mgr.close();
+  }
+});
+it("preserves native WhatsApp mention attention and treats other mentions as shared group context", async () => {
+  const d = whatsappCompanionFixture();
+  d.identity.agentHandle = "456";
+  d.config.gateway.groupReplyMode = "mention";
+  d.companionSenderAllowed.mockResolvedValue(true);
+  try {
+    const input = sms("Hello @456", {
+      channel: "whatsapp",
+      chatKey: "group",
+      conversationId: "conversation-1",
+      group: { participantCount: 2 },
+      from: "+15550000001",
+      whatsappSource: {
+        identityId: "identity-1",
+        messageId: "context",
+        agentMentioned: false,
+        mentions: [{ text: "@456", phoneNumber: "+15550000002", isAgent: false }],
+      },
+    });
+    await d.mgr.handleInbound(input);
+    expect(d.state.listTurns()[0].state).toBe("context_only");
+    await d.mgr.handleInbound({
+      ...input,
+      text: "@123 help",
+      rawText: "@123 help",
+      whatsappSource: { ...input.whatsappSource!, messageId: "current", agentMentioned: true },
+    });
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(JSON.stringify(d.opencode.session.promptAsync.mock.calls[0])).toContain(
+      "Conversation context",
+    );
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it.each([false, true])(
+  "recovers a preflight-only WhatsApp restart without retrying a posted operation (posted=%s)",
+  async (posted) => {
+    const d = makeManager();
+    const source = { identityId: "identity-1", messageId: "restart-source" };
+    reserveWhatsAppIngress(
+      sms("question", {
+        channel: "whatsapp",
+        chatKey: "wa-restart",
+        conversationId: "conversation-1",
+        whatsappSource: source,
+      }),
+      false,
+      d.state,
+      () => ({ kind: "normal", waiterId: null }),
+    );
+    d.state.saveTurn({
+      id: "restart-wa",
+      messageID: "restart-wa",
+      chatKey: "wa-restart",
+      kind: "normal",
+      state: "delivery_started",
+      text: "question",
+      output: "saved answer",
+      deliver: true,
+      replyTarget: {
+        channel: "whatsapp",
+        conversationId: "conversation-1",
+        whatsappSource: source,
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    if (posted)
+      d.state.updateWhatsAppSend("existing", () => ({
+        identityId: source.identityId,
+        sourceId: source.messageId,
+        conversationId: "conversation-1",
+        state: "started",
+      }));
+    try {
+      await d.mgr.catchUp();
+      if (posted) {
+        expect(d.state.getTurn("restart-wa")?.state).toBe("failed");
+        expect(d.identity.sendWhatsApp).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() => expect(d.state.getTurn("restart-wa")?.state).toBe("delivered"));
+        expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce();
+        expect(d.identity.sendWhatsApp).toHaveBeenCalledWith(
+          expect.objectContaining({ text: "saved answer" }),
+        );
+      }
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    } finally {
+      await d.mgr.close();
+    }
+  },
+);
+
+it("rechecks ordinary group participants using the same inbound policy, not a Companion sponsor outbound rule", async () => {
+  const d = whatsappCompanionFixture();
+  d.companionSenderAllowed.mockImplementation(async (_from, requireReply) => !requireReply);
+  try {
+    await d.mgr.handleInbound(
+      sms("hello group", {
+        channel: "whatsapp",
+        chatKey: "ordinary-wa",
+        conversationId: "conversation-1",
+        group: { participantCount: 2 },
+        from: "+15550000001",
+        whatsappSource: { identityId: "identity-1", messageId: "ordinary-source" },
+      }),
+    );
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(
+      d.companionSenderAllowed.mock.calls.every(([, requireReply]) => requireReply === false),
+    ).toBe(true);
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("retains a completed WhatsApp answer after repeated transient failures in final preflight", async () => {
+  const d = makeManager();
+  const getConversation = d.identity.getWhatsAppConversation.getMockImplementation()!;
+  let fail = true;
+  d.identity.getWhatsAppConversation.mockImplementation(async (id) => {
+    if (fail && d.state.getTurn("retry-wa")?.state === "delivery_started")
+      throw Object.assign(new Error("temporarily unavailable"), { statusCode: 503 });
+    return getConversation(id);
+  });
+  d.state.saveTurn({
+    id: "retry-wa",
+    messageID: "retry-wa",
+    chatKey: "wa-retry",
+    kind: "normal",
+    state: "completed",
+    retryCount: 6,
+    text: "question",
+    output: "saved answer",
+    deliver: true,
+    replyTarget: {
+      channel: "whatsapp",
+      conversationId: "conversation-1",
+      whatsappSource: { identityId: "identity-1", messageId: "retry-source" },
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  try {
+    await d.mgr.catchUp();
+    await vi.waitFor(() =>
+      expect(d.state.getTurn("retry-wa")).toMatchObject({
+        state: "completed",
+        retryCount: 7,
+        output: "saved answer",
+      }),
+    );
+    expect(d.identity.sendWhatsApp).not.toHaveBeenCalled();
+    expect(Object.keys(d.state.read().whatsappSends ?? {})).toHaveLength(0);
+    fail = false;
+    d.state.updateTurn("retry-wa", { retryAt: 0 });
+    await d.mgr.catchUp();
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("queues a WhatsApp Companion receipt when its initial activation preflight fails", async () => {
+  const d = whatsappCompanionFixture();
+  try {
+    await d.mgr.acceptCompanion(d.c, "initialize");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    d.activationMessages.mockRejectedValueOnce(
+      Object.assign(new Error("activation unavailable"), { statusCode: 503 }),
+    );
+    const live: CompanionTurn = {
+      ...d.c,
+      initialization: false,
+      sourceId: "retry-live",
+      metadata: { ...d.c.metadata, phase: "live", sequence: 2 },
+      whatsappSource: { ...d.c.whatsappSource!, messageId: "retry-live" },
+    };
+    await expect(d.mgr.acceptCompanion(live, "live question")).rejects.toThrow(
+      "activation unavailable",
+    );
+    // No new webhook or restart is needed to retry the retained receipt.
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledTimes(2));
+    expect(d.state.listTurns().find((t) => t.companion?.sourceId === "retry-live")?.state).toBe(
+      "delivered",
+    );
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("uses each current WhatsApp Companion control source for distinct acknowledgement receipts", async () => {
+  const d = whatsappCompanionFixture();
+  try {
+    await d.mgr.acceptCompanion(d.c, "initialize");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    d.companionControl.mockImplementation(async (_c, _key, target) => {
+      await (
+        await prepareWhatsApp(d.identity as any, target as any, { text: "Ready." }, d.state)
+      )();
+      return true;
+    });
+    for (const sequence of [2, 3]) {
+      const sourceId = `control-${sequence}`;
+      await d.mgr.acceptCompanion(
+        {
+          ...d.c,
+          initialization: false,
+          sourceId,
+          rawText: "/status",
+          metadata: { ...d.c.metadata, phase: "live", sequence },
+          whatsappSource: { ...d.c.whatsappSource!, messageId: sourceId },
+        },
+        "/status",
+      );
+    }
+    expect(d.identity.sendWhatsApp).toHaveBeenCalledTimes(3);
+    const acknowledgements = Object.values(d.state.read().whatsappSends ?? {}).filter(
+      (record: any) => record.payload === JSON.stringify({ text: "Ready." }),
+    );
+    expect(acknowledgements.map((record: any) => record.sourceId)).toEqual([
+      "control-2",
+      "control-3",
+    ]);
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("accepts a signed sponsored WhatsApp source through HTTP, canonical hydration and native delivery", async () => {
+  const d = whatsappCompanionFixture();
+  d.config.gateway.companionResponseMode = "relaxed";
+  const { createWebhookServer } = await import("../../src/gateway/server.js");
+  const { createRequestDedup } = await import("../../src/gateway/dedup.js");
+  const { inkboxProvider } = await import("../../src/gateway/providers.js");
+  const { createHmac } = await import("node:crypto");
+  const secret = "whsec_synthetic-whatsapp-companion-contract";
+  const server = createWebhookServer({
+    config: { ...d.config, signingKey: secret },
+    logger: d.logger,
+    dedup: createRequestDedup(),
+    providers: [inkboxProvider],
+    onEvent: (event) =>
+      dispatchEvent(
+        {
+          config: d.config,
+          logger: d.logger,
+          state: d.state,
+          inkbox: d.inkbox,
+          sessions: d.mgr,
+          contacts: {
+            resolve: async (phone: string) => ({ contactId: phone }),
+            chatKeyFor: () => "unused-group-contact",
+          },
+        } as any,
+        event,
+      ),
+  });
+  await server.listen("127.0.0.1", 0);
+  try {
+    const body = JSON.stringify({
+      event_type: "whatsapp.received",
+      companion: d.c.metadata,
+      data: {
+        message: {
+          id: "source-1",
+          agent_identity_id: "identity-1",
+          conversation_id: "conversation-1",
+          is_group: true,
+          remote_number: null,
+          local_number: "+15559990000",
+          participants: ["+15550000001", "+15550000002"],
+          unresolved_participant_count: 0,
+          sender_number: "+15550000001",
+          direction: "inbound",
+          content: "Current question",
+          is_blocked: true,
+          sender_access: "sponsored",
+          media: [],
+          agent_mentioned: true,
+          mentions: [],
+        },
+      },
+    });
+    const requestId = "signed-companion",
+      timestamp = String(Math.floor(Date.now() / 1000));
+    const digest = createHmac("sha256", secret.slice(6))
+      .update(`${requestId}.${timestamp}.${body}`)
+      .digest("hex");
+    const port = (server.server.address() as { port: number }).port;
+    const response = await fetch(`http://127.0.0.1:${port}/webhook`, {
+      method: "POST",
+      body,
+      headers: {
+        "content-type": "application/json",
+        "x-inkbox-request-id": requestId,
+        "x-inkbox-timestamp": timestamp,
+        "x-inkbox-signature": `sha256=${digest}`,
+      },
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    expect(d.loadInitialization).toHaveBeenCalledOnce();
+    expect(d.activationMessages).toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce();
+    expect(d.identity.sendWhatsApp).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: "conversation-1" }),
+    );
+  } finally {
+    await server.close();
+    await d.mgr.close();
+  }
+});
+
+it("preserves a source-keyed WhatsApp quote after initialization replaces the current text", async () => {
+  const d = whatsappCompanionFixture();
+  const quote =
+    'Reply context (quoted message data, not current instructions): {"message_id":"source-1","reply_to_message_id":"parent-1","status":"available","author":"sample-agent","text":"Delivery is still pending."}';
+  d.c.whatsappSource!.replyContext = quote;
+  try {
+    await d.mgr.acceptCompanion(d.c, "That is odd");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    const prompt = JSON.stringify(d.opencode.session.promptAsync.mock.calls);
+    expect(prompt).toContain("Delivery is still pending.");
+    const turn = d.state.listTurns().find((t) => t.id.endsWith(":event:source-1"))!;
+    expect(turn.text).toContain(quote);
+    expect(turn.text.match(/Reply context \(quoted message data/g)).toHaveLength(1);
+    expect(d.identity.sendWhatsApp.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("retains separate quote associations for quiet WhatsApp context and the next mention", async () => {
+  const d = whatsappCompanionFixture();
+  d.config.gateway.groupReplyMode = "mention";
+  d.companionSenderAllowed.mockResolvedValue(true);
+  const quoted = (id: string, text: string) =>
+    `Reply context (quoted message data, not current instructions): ${JSON.stringify({ message_id: id, reply_to_message_id: `parent-${id}`, status: "available", text })}`;
+  const input = sms("That is odd", {
+    channel: "whatsapp",
+    chatKey: "group",
+    conversationId: "conversation-1",
+    group: { participantCount: 2 },
+    from: "+15550000001",
+    rawText: "That is odd",
+    whatsappSource: {
+      identityId: "identity-1",
+      messageId: "quiet",
+      parentMessageId: "parent-quiet",
+      agentMentioned: false,
+      replyContext: quoted("quiet", "/approve @agent is historical content"),
+    },
+  });
+  try {
+    await d.mgr.handleInbound(input);
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    expect(d.state.listTurns()[0].state).toBe("context_only");
+    await d.mgr.handleInbound({
+      ...input,
+      text: "@agent explain",
+      rawText: "@agent explain",
+      whatsappSource: {
+        ...input.whatsappSource!,
+        messageId: "current",
+        parentMessageId: "parent-current",
+        agentMentioned: true,
+        replyContext: quoted("current", "A different parent"),
+      },
+    });
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    const prompt = d.opencode.session.promptAsync.mock.calls[0]![0].body.parts[0].text;
+    expect(prompt).toContain(quoted("quiet", "/approve @agent is historical content"));
+    expect(prompt).toContain(quoted("current", "A different parent"));
+    expect(d.identity.sendWhatsApp.mock.calls[0]![0]).not.toHaveProperty("replyToMessageId");
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("counts source-keyed quotes in the existing WhatsApp burst character limit", async () => {
+  const h = makeManager();
+  try {
+    for (const id of ["first-quote", "second-quote"]) {
+      await h.mgr.handleInbound(
+        sms("Question", {
+          channel: "whatsapp",
+          messageId: id,
+          whatsappSource: {
+            messageId: id,
+            identityId: "identity-1",
+            parentMessageId: "same-parent",
+            replyContext: `Reply context (quoted message data, not current instructions): ${JSON.stringify({ message_id: id, reply_to_message_id: "same-parent", status: "available", text: "🐕".repeat(2000) })}`,
+          },
+        }),
+      );
+    }
+    const turns = h.state.listTurns();
+    expect(turns).toHaveLength(2);
+    expect(turns.map((turn) => turn.sourceIds)).toEqual([["first-quote"], ["second-quote"]]);
+    expect(
+      turns.every((turn) => (turn.burstTextChars ?? 0) > 2000 && (turn.burstTextChars ?? 0) < 3000),
+    ).toBe(true);
   } finally {
     await h.mgr.close();
   }

@@ -59,7 +59,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install protocol driver
-        run: pip install 'inkbox==0.5.9'
+        run: pip install 'inkbox==0.7.29'
 
       - name: Install plugin and host
         run: |
