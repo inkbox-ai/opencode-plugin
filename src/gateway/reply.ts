@@ -2,6 +2,7 @@ import type { InkboxRuntime } from "../client.js";
 import { prepareNativeIMessage } from "../imessage-native.js";
 import { assertIMessageTextWithinLimit, assertSmsTextWithinLimit } from "../limits.js";
 import { prepareSlackReply } from "../slack.js";
+import { authorizeWhatsAppCompanion } from "../whatsapp-groups.js";
 import { assertWhatsAppText, prepareWhatsApp } from "../whatsapp-native.js";
 import { SILENT, stripMarkdown } from "./prompts.js";
 import type { StateStore } from "./state.js";
@@ -72,7 +73,7 @@ export async function prepareReply(
   }
   const identity = await runtime.getIdentity();
   if (target.channel === "whatsapp") {
-    if (target.group) throw new ReplyPreparationError("WhatsApp supports direct messages only.");
+    await authorizeWhatsAppCompanion(runtime, target);
     const send = await prepareWhatsApp(
       identity,
       target,
@@ -81,6 +82,7 @@ export async function prepareReply(
       undefined,
       true,
       requestId,
+      () => authorizeWhatsAppCompanion(runtime, target),
     );
     return async () => ({ delivered: true, reason: "sent", messageId: (await send()).id });
   }

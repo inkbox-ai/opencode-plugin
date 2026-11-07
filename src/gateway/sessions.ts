@@ -15,7 +15,12 @@ import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js"
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
-import { hasExplicitWhatsAppReply, hasWhatsAppGroupShape } from "../whatsapp-native.js";
+import {
+  authorizeWhatsAppCompanion,
+  WhatsAppPreflightError,
+  whatsappDestination,
+} from "../whatsapp-groups.js";
+import { hasExplicitWhatsAppReply } from "../whatsapp-native.js";
 import {
   assertCompanionSize,
   COMPANION_MAX_BYTES,
@@ -102,6 +107,7 @@ const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastMessageSequence = 0n;
 
 function retryableRead(error: unknown): boolean {
+  if (error instanceof WhatsAppPreflightError) return retryableRead(error.cause);
   const err = error as {
     status?: number;
     statusCode?: number;
@@ -154,10 +160,12 @@ export function unsupportedWhatsAppTarget(target: unknown): boolean {
   return (
     row.channel === "whatsapp" &&
     Boolean(
-      row.group ||
-        hasWhatsAppGroupShape(row) ||
-        "whatsappRecipients" in row ||
-        Array.isArray(row.to),
+      "whatsappRecipients" in row ||
+        Array.isArray(row.to) ||
+        (row.group &&
+          (!row.whatsappSource ||
+            typeof (row.whatsappSource as Record<string, unknown>).messageId !== "string" ||
+            typeof (row.whatsappSource as Record<string, unknown>).identityId !== "string")),
     )
   );
 }
@@ -231,7 +239,46 @@ export function createSessionManager(
       progress.notify(turn.replyTarget.slack, event);
     }
   }
-  async function authorizeSlack(turn: DurableTurn): Promise<void> {
+  function whatsappPreflightOnly(turn: DurableTurn): boolean {
+    const target = turn.replyTarget;
+    const source = target?.whatsappSource;
+    const conversationId = target?.conversationId;
+    return Boolean(
+      target?.channel === "whatsapp" &&
+        source?.identityId &&
+        source.messageId &&
+        conversationId &&
+        !Object.values(deps.state.read().whatsappSends ?? {}).some(
+          (record: any) =>
+            record.ingress !== true &&
+            record.identityId === source.identityId &&
+            record.sourceId === source.messageId &&
+            record.conversationId?.toLowerCase() === conversationId.toLowerCase(),
+        ),
+    );
+  }
+  async function authorizeWhatsApp(target?: ReplyTarget): Promise<void> {
+    if (
+      target?.channel === "whatsapp" &&
+      target.conversationId &&
+      (target.group || target.whatsappCompanion)
+    ) {
+      await authorizeWhatsAppCompanion(deps.inkbox, target);
+      const identity = await deps.inkbox.getIdentity();
+      const conversation = await whatsappDestination(identity, target.conversationId, target);
+      if (target.group && !target.whatsappCompanion) {
+        for (const participant of conversation.participants) {
+          if (
+            deps.companionSenderAllowed &&
+            !(await deps.companionSenderAllowed(participant, false))
+          )
+            throw new Error("WhatsApp participant is not permitted by local settings.");
+        }
+      }
+    }
+  }
+  async function authorizeRoute(turn: DurableTurn): Promise<void> {
+    await authorizeWhatsApp(turn.replyTarget);
     const route = turn.replyTarget?.slack ?? turn.companion?.slack;
     if (!route) return;
     if (!deps.config.gateway.slackEnabled) throw new Error("Slack is disabled; receipt retained.");
@@ -475,7 +522,7 @@ export function createSessionManager(
     if (TERMINAL.has(turn.state)) return turn;
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
-    await authorizeSlack(turn);
+    await authorizeRoute(turn);
     activityEvent(turn, "accepted");
     turn = includeContext(turn);
     const sessionID = turn.sessionID ?? (await ensureSession(turn.chatKey, turn));
@@ -496,7 +543,7 @@ export function createSessionManager(
             .at(-1);
     if (closing) throw new HostedCaptureDeferredError();
     assertCompanionLocallyAllowed(turn);
-    await authorizeSlack(turn);
+    await authorizeRoute(turn);
     if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
       throw new Error("Durable turn lease was lost.");
     const next = deps.state.transitionTurn(
@@ -776,6 +823,16 @@ export function createSessionManager(
           sender: trigger.author,
           companionSponsor: trigger.author,
         };
+        if (channel === "whatsapp" && c.whatsappSource && c.metadata.activation_id) {
+          target.whatsappSource = c.whatsappSource;
+          target.whatsappCompanion = {
+            handle: c.handle,
+            scopeId: c.metadata.scope_id,
+            activationId: c.metadata.activation_id,
+            conversationId: c.metadata.conversation_id,
+          };
+          target.group = true;
+        }
         if (channel === "slack") {
           if (
             !c.slack ||
@@ -833,6 +890,21 @@ export function createSessionManager(
     target = {
       ...target,
       ...(c.imessageSource ? { imessageSource: c.imessageSource } : {}),
+      ...(c.whatsappSource
+        ? {
+            whatsappSource: c.whatsappSource,
+            ...(c.metadata.activation_id
+              ? {
+                  whatsappCompanion: {
+                    handle: c.handle,
+                    scopeId: c.metadata.scope_id,
+                    activationId: c.metadata.activation_id,
+                    conversationId: c.metadata.conversation_id,
+                  },
+                }
+              : {}),
+          }
+        : {}),
       ...(c.slack ? { slack: c.slack } : {}),
       sender: c.from,
       companionMode: true,
@@ -850,7 +922,7 @@ export function createSessionManager(
       (contactId ? map[contactId] : undefined) ?? map[channel];
     const wakes = companionWakes(c, deps.config.gateway);
     const text = companionFrame(
-      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}`,
+      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
       target,
     );
     const next = deps.state.transitionTurn(
@@ -871,6 +943,7 @@ export function createSessionManager(
     if (!next) throw new Error("Durable turn lease was lost.");
     if (wakes) {
       assertCompanionLocallyAllowed(next);
+      await authorizeRoute(next);
       activityEvent(next, "accepted");
     }
     if (
@@ -999,7 +1072,7 @@ export function createSessionManager(
     if (hasExplicitWhatsAppReply(current.replyTarget, deps.state)) output = SILENT;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);
-      await authorizeSlack(current);
+      await authorizeRoute(current);
       let send: Awaited<ReturnType<typeof prepareReply>>;
       try {
         send = await prepareReply(
@@ -1027,7 +1100,7 @@ export function createSessionManager(
         return;
       }
       if (closing || deps.state.getTurn(current.id)?.state === "interrupted") return;
-      await authorizeSlack(current);
+      await authorizeRoute(current);
       // The safe SDK reads may span a shutdown, feature change or Stop. Keep
       // the saved answer until enabled, and never checkpoint a stale owner.
       if (closing || channelDisabled(current)) return;
@@ -1048,6 +1121,14 @@ export function createSessionManager(
           deliveryMessageId: sent.messageId,
         });
       } catch (err) {
+        if (err instanceof WhatsAppPreflightError) {
+          deps.state.updateTurn(current.id, {
+            state: "completed",
+            retryAt: Date.now() + 1000,
+            error: String(err),
+          });
+          throw err;
+        }
         deps.state.updateTurn(current.id, {
           state: current.companion ? "paused" : "failed",
           uncertainStage: "delivery",
@@ -1116,7 +1197,7 @@ export function createSessionManager(
         return;
       }
       if (turn.replyTarget?.slack) {
-        await authorizeSlack(turn);
+        await authorizeRoute(turn);
         activityEvent(turn, "accepted");
       }
       if (turn.state === "hydrating" || turn.state === "queued") turn = await submit(turn);
@@ -1145,6 +1226,11 @@ export function createSessionManager(
       if (turn.state === "submitted") await finish(turn, await completion(turn));
       else if (turn.state === "completed") await finish(turn, turn.output);
       else if (turn.state === "delivery_started") {
+        if (whatsappPreflightOnly(turn)) {
+          const completed = deps.state.updateTurn(id, { state: "completed" });
+          if (completed) await finish(completed, completed.output);
+          return;
+        }
         deps.state.updateTurn(id, {
           state: turn.companion ? "paused" : "failed",
           uncertainStage: "delivery",
@@ -1611,6 +1697,17 @@ export function createSessionManager(
         }
         if (turn.state !== "hydrating") return;
       }
+      if (controlTarget?.channel === "whatsapp" && companion.whatsappSource) {
+        try {
+          await authorizeRoute({
+            ...turn,
+            replyTarget: { ...controlTarget, whatsappSource: companion.whatsappSource },
+          });
+        } catch (error) {
+          enqueue(turn);
+          throw error;
+        }
+      }
       if (
         controlTarget &&
         companion.metadata.phase !== "initialization" &&
@@ -1627,6 +1724,7 @@ export function createSessionManager(
             ) !== false) &&
         (await deps.companionControl?.(companion, chatKey, {
           ...controlTarget,
+          ...(companion.whatsappSource ? { whatsappSource: companion.whatsappSource } : {}),
           ...(companion.slack ? { slack: companion.slack } : {}),
           sender: companion.from,
         }))
@@ -1641,12 +1739,23 @@ export function createSessionManager(
         activity.notify(target.slack, waiting ? "waiting" : "resumed");
     },
     async authorizeReply(target) {
+      if (target.channel === "whatsapp") {
+        await authorizeWhatsApp(target);
+        if (
+          target.whatsappCompanion &&
+          target.companionSponsor &&
+          deps.companionSenderAllowed &&
+          !(await deps.companionSenderAllowed(target.companionSponsor, true))
+        )
+          throw new Error("WhatsApp Companion sponsor is not permitted by local settings.");
+        return;
+      }
       if (!target.slack) return;
       const turn = deps.state
         .listTurns()
         .find((turn) => turn.replyTarget?.slack?.sourceEventId === target.slack!.sourceEventId);
       if (!turn) throw new Error("Slack reply owner is unavailable.");
-      await authorizeSlack(turn);
+      await authorizeRoute(turn);
     },
     async stopSlack(route, chatKey) {
       if (!deps.config.gateway.slackEnabled || !slackSenderAllowed(route, deps.config)) return;
@@ -1815,7 +1924,7 @@ export function createSessionManager(
                           : []),
                       ])
                     : undefined,
-                burstTextChars: [...msg.text].length,
+                burstTextChars: [...msg.text, ...(msg.whatsappSource.replyContext ?? "")].length,
                 retryAt:
                   !msg.reaction &&
                   !msg.whatsappSource.mediaIds?.length &&
@@ -1856,7 +1965,12 @@ export function createSessionManager(
           msg.reaction ||
           !(msg.slack
             ? msg.slack.mentioned || msg.slack.direct
-            : mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle))
+            : msg.whatsappSource?.agentMentioned === true ||
+              mentionsAgent(
+                msg.rawText ?? msg.text,
+                identity.agentHandle,
+                msg.whatsappSource?.mentions,
+              ))
         ) {
           if (msg.whatsappSource)
             deps.state.reserveWhatsAppTurn({ ...turn, state: "context_only", deliver: false });
@@ -1889,14 +2003,15 @@ export function createSessionManager(
         if (
           previous?.burstKey === turn.burstKey &&
           (previous.sourceIds?.length ?? 0) < 8 &&
-          (previous.burstTextChars ?? 0) + msg.text.length <= 4000 &&
+          (previous.burstTextChars ?? 0) + (turn.burstTextChars ?? msg.text.length) <= 4000 &&
           Date.now() < previous.createdAt + 2000 &&
           (previous.retryAt ?? 0) > Date.now()
         ) {
           const merged = deps.state.updateTurn(previous.id, {
-            text: previous.text + "\n" + msg.text,
+            text: previous.text + "\n" + (msg.whatsappSource ? turn.text : msg.text),
             sourceIds: [...(previous.sourceIds ?? []), sourceId!],
-            burstTextChars: (previous.burstTextChars ?? 0) + msg.text.length,
+            burstTextChars:
+              (previous.burstTextChars ?? 0) + (turn.burstTextChars ?? msg.text.length),
             retryAt: Math.min(previous.createdAt + 2000, Date.now() + 750),
           });
           if (merged) enqueue(merged);
@@ -2164,7 +2279,10 @@ export function createSessionManager(
         .filter((turn) => !TERMINAL.has(turn.state) && !turn.hostedCapture && !turn.a2aContext)
         .sort((a, b) => a.createdAt - b.createdAt);
       for (const turn of recoverable) {
-        if (turn.state === "delivery_started") {
+        if (turn.state === "delivery_started" && whatsappPreflightOnly(turn)) {
+          const completed = deps.state.updateTurn(turn.id, { state: "completed" });
+          if (completed) enqueue(completed);
+        } else if (turn.state === "delivery_started") {
           deps.state.updateTurn(turn.id, {
             state: turn.companion ? "paused" : "failed",
             uncertainStage: "delivery",

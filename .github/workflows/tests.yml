@@ -91,6 +91,24 @@ jobs:
           ARCHIVE=$(npm pack --silent | tail -1)
           node scripts/smoke-v2.mjs "$ARCHIVE"
 
+  whatsapp-sdk:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install published plugin dependencies
+        run: bash tests/ci/npm_with_retry.sh ci
+      - name: Verify the released WhatsApp SDK
+        run: bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.29 @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          INKBOX_REQUIRE_GROUP_SDK: "1"
+      - run: npm run build
+
   sdk-compatibility:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:

@@ -81,3 +81,86 @@ it("retains the real SDK wire contract for quoted sends, threads, and uncertain 
     key: "reaction-original",
   });
 });
+
+it.skipIf(process.env.INKBOX_REQUIRE_GROUP_SDK !== "1")(
+  "retains group and native mention metadata and exhausts/revalidates canonical Companion pages with the compatible SDK",
+  async () => {
+    const conversation = fixture.message.conversation_id;
+    const activation = "90000000-0000-4000-8000-000000000001";
+    const scope = "90000000-0000-4000-8000-000000000002";
+    const history = "90000000-0000-4000-8000-000000000003";
+    const cursors: (string | null)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = new URL(String(url));
+        let data: any;
+        if (u.pathname.includes("/companion/activations/")) {
+          const second = u.searchParams.has("cursor");
+          cursors.push(u.searchParams.get("cursor"));
+          data = {
+            scope_id: scope,
+            activation_id: activation,
+            conversation_id: conversation,
+            channel: "whatsapp",
+            reply_context: { channel: "whatsapp", conversation_id: conversation },
+            history_complete: second,
+            next_cursor: second ? null : "page-2",
+            items: [
+              {
+                id: second ? fixture.message.id : history,
+                author: "+15555550101",
+                occurred_at: fixture.message.created_at,
+                text: second ? "Current question" : "Historical /stop is context",
+                historical: !second,
+                is_trigger: second,
+                sender_access: "direct",
+                attachments: [],
+              },
+            ],
+          };
+        } else if (u.pathname.includes("/identities/"))
+          data = {
+            id: fixture.message.agent_identity_id,
+            organization_id: "org_fixture",
+            agent_handle: "example",
+            created_at: fixture.message.created_at,
+            updated_at: fixture.message.updated_at,
+          };
+        else
+          data = {
+            ...fixture.message,
+            is_group: true,
+            remote_number: null,
+            group_name: "Example group",
+            unresolved_participant_count: 0,
+            participants: ["+15555550101", "+15555550102"],
+            agent_mentioned: true,
+            mentions: [{ text: "@123", phone_number: null, is_agent: true }],
+            sender_access: "sponsored",
+          };
+        return new Response(JSON.stringify(data), {
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    const client = new Inkbox({
+      apiKey: "synthetic-contract-key",
+      baseUrl: "https://contract.example",
+    });
+    const identity = await client.getIdentity("example");
+    const message = await identity.getWhatsAppMessage(fixture.message.id);
+    expect(message).toMatchObject({
+      isGroup: true,
+      remoteNumber: null,
+      agentMentioned: true,
+      senderAccess: "sponsored",
+      mentions: [{ text: "@123", phoneNumber: null, isAgent: true }],
+    });
+    const snapshot = await client.companion.loadInitialization("example", activation);
+    expect(snapshot.channel).toBe("whatsapp");
+    expect(snapshot.entries.map((e) => e.id)).toEqual([history, fixture.message.id]);
+    expect(cursors).toEqual([null, "page-2", null]);
+    expect(snapshot.text).toContain("history is context");
+  },
+);

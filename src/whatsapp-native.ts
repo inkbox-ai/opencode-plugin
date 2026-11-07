@@ -3,6 +3,7 @@ import type { AgentIdentity } from "@inkbox/sdk";
 import { createStateStore, type StateStore } from "./gateway/state.js";
 import type { CommandTargets, InboundMessage, ReplyTarget } from "./gateway/types.js";
 import type { HostClient } from "./host/types.js";
+import { WhatsAppPreflightError, whatsappDestination } from "./whatsapp-groups.js";
 
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
@@ -22,6 +23,7 @@ const rejectedSendCodes: Record<number, readonly string[]> = {
   ],
   409: [
     "whatsapp_capability_not_ready",
+    "whatsapp_group_reply_required",
     "whatsapp_quote_unavailable",
     "whatsapp_reaction_pending",
     "whatsapp_reaction_target_unavailable",
@@ -55,7 +57,7 @@ export function assertWhatsAppOwner(
 ): void {
   if (
     target?.channel === "whatsapp" &&
-    (target.group || hasWhatsAppGroupShape(target) || Array.isArray(target.to))
+    ("whatsappRecipients" in target || Array.isArray(target.to))
   )
     throw new Error("WhatsApp supports direct messages only.");
   if (!target?.nativeOwner) return;
@@ -159,34 +161,24 @@ export async function prepareWhatsApp(
   originalKey?: string,
   inheritSourceQuote = true,
   requestId?: string,
+  authorize?: () => Promise<void>,
 ) {
   if (typeof identity.sendWhatsApp !== "function")
-    throw new Error("WhatsApp requires Inkbox SDK 0.7.26 or newer.");
+    throw new Error("WhatsApp requires Inkbox SDK 0.7.29 or newer.");
   assertWhatsAppText(payload.text ?? "");
   const suppliedQuote = payload.replyToMessageId;
   const source = target.whatsappSource;
-  if (
-    target.group ||
-    "whatsappRecipients" in target ||
-    hasWhatsAppGroupShape(target) ||
-    hasWhatsAppGroupShape(payload)
-  )
-    throw new Error("WhatsApp supports direct messages only.");
+  if ("whatsappRecipients" in target || hasWhatsAppGroupShape(payload))
+    throw new Error("Recipient lists and group creation are not supported.");
   const destination = target.to;
   if (destination !== undefined) whatsappRecipient(destination);
   if (!(target.conversationId || destination) || (source && source.identityId !== identity.id))
     throw new Error("The original WhatsApp identity or conversation changed.");
   assertWhatsAppOwner(target, store);
   if (target.conversationId) {
-    const conversation = await identity.getWhatsAppConversation(target.conversationId);
-    if (
-      conversation.agentIdentityId !== identity.id ||
-      hasWhatsAppGroupShape(conversation) ||
-      conversation.participants.length !== 1
-    )
-      throw new Error("An owned direct WhatsApp conversation is required.");
-    whatsappRecipient(conversation.participants[0]);
+    await whatsappDestination(identity, target.conversationId, target);
   }
+
   const keyFor = (body: typeof payload) =>
     `opencode:whatsapp:${createHash("sha256")
       .update(
@@ -227,6 +219,14 @@ export async function prepareWhatsApp(
   }
   const idempotencyKey = saved ? legacyKey : (originalKey ?? keyFor(payload));
   return async () => {
+    try {
+      assertWhatsAppOwner(target, store);
+      await authorize?.();
+      if (target.conversationId) await whatsappDestination(identity, target.conversationId, target);
+    } catch (error) {
+      throw new WhatsAppPreflightError(error);
+    }
+
     assertWhatsAppOwner(target, store);
     const priorAttempt = Object.values(store.read().whatsappSends ?? {}).find(
       (send: any) =>

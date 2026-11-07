@@ -255,13 +255,33 @@ export default { ...Inkbox, async setup(ctx) {
   };
   const sessionID = await create("Synthetic lifecycle");
   await host.ready(root);
+  const whatsappSends = [];
+  const gatewayState = createStateStore(join(home, "gateway-fixture"));
   const sessions = createSessionManager({
     opencode: host,
     config: resolveConfig({ gateway: { model: "fixture/fixture" } }, {}),
-    state: createStateStore(join(home, "gateway-fixture")),
+    state: gatewayState,
+    companionSenderAllowed: async () => true,
     directory: root,
     inkbox: {
-      getIdentity: async () => ({ agentHandle: "synthetic", emailAddress: "fixture@example.test" }),
+      getIdentity: async () => ({
+        id: "synthetic-identity",
+        agentHandle: "synthetic",
+        emailAddress: "fixture@example.test",
+        getWhatsAppConversation: async (id) => ({
+          id,
+          agentIdentityId: "synthetic-identity",
+          isGroup: true,
+          remoteNumber: null,
+          localNumber: "+15550000009",
+          unresolvedParticipantCount: 0,
+          participants: ["+15550000001", "+15550000002"],
+        }),
+        sendWhatsApp: async (request) => {
+          whatsappSends.push(request);
+          return { id: `whatsapp-${whatsappSends.length}`, conversationId: request.conversationId };
+        },
+      }),
     },
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -276,6 +296,24 @@ export default { ...Inkbox, async setup(ctx) {
         sessions.runText("second", "Synthetic concurrent question"),
       ]),
       ["Synthetic completed", "Synthetic completed"],
+    );
+    await sessions.handleInbound({
+      channel: "whatsapp",
+      chatKey: "native-whatsapp-group",
+      from: "+15550000001",
+      conversationId: "whatsapp-group",
+      messageId: "whatsapp-source",
+      whatsappSource: { identityId: "synthetic-identity", messageId: "whatsapp-source" },
+      group: { participantCount: 2, participants: ["+15550000001", "+15550000002"] },
+      text: "Synthetic WhatsApp group question",
+      mediaPaths: [],
+    });
+    await until(() => whatsappSends.length === 1, "WhatsApp native group reply");
+    assert.equal(whatsappSends[0].conversationId, "whatsapp-group");
+    assert.equal(whatsappSends[0].text, "Synthetic completed");
+    assert.notEqual(
+      gatewayState.getSession("native-whatsapp-group"),
+      gatewayState.getSession("first"),
     );
   } finally {
     await sessions.close();

@@ -463,7 +463,13 @@ it("starts native inventory readiness unconfirmed instead of inheriting a prior 
   expect(hooks.manager.state.read().permissionInventory).toEqual({ ready: false });
 });
 
-function waInput(text: string, sender: string, messageId: string, group = false) {
+function waInput(
+  text: string,
+  sender: string,
+  messageId: string,
+  group = false,
+  native: Record<string, unknown> = {},
+) {
   return hooks.server.onEvent({
     body: {
       message: {
@@ -475,7 +481,7 @@ function waInput(text: string, sender: string, messageId: string, group = false)
         mediaPaths: [],
         conversationId: "wa-conversation",
         messageId,
-        whatsappSource: { messageId, identityId: "wa-identity" },
+        whatsappSource: { messageId, identityId: "wa-identity", ...native },
         ...(group ? { group: { participantCount: 2 } } : {}),
       },
     },
@@ -1251,3 +1257,103 @@ it.each(["/clear", "/new", "/resume"])(
     expect((f.identity as any).sendWhatsApp).toHaveBeenCalledOnce();
   },
 );
+
+function enableWhatsAppGroup(f: Awaited<ReturnType<typeof start>>) {
+  enableWhatsApp(f);
+  (f.identity as any).getWhatsAppConversation.mockResolvedValue({
+    id: "wa-conversation",
+    agentIdentityId: "wa-identity",
+    isGroup: true,
+    remoteNumber: null,
+    localNumber: "+15550000000",
+    participants: ["+15550000001", "+15550000002"],
+    unresolvedParticipantCount: 0,
+  });
+  f.config.gateway.groupReplyMode = "mention";
+}
+it("requires a current native self mention and the asked group author for approval", async () => {
+  const f = await start();
+  enableWhatsAppGroup(f);
+  Object.assign(f.identity, { agentHandle: "456" });
+  const target: ReplyTarget = {
+    channel: "whatsapp",
+    conversationId: "wa-conversation",
+    group: true,
+    sender: "+15550000001",
+    whatsappSource: { identityId: "wa-identity", messageId: "asked" },
+  };
+  let settled = false;
+  const answer = hooks.escalation.relay
+    .ask("contact-1", "Approve?", target)
+    .then((value: string) => {
+      settled = true;
+      return value;
+    });
+  const self = [{ text: "@123", phoneNumber: "+15550000000", isAgent: true }];
+  await waInput("@123 allow", "+15550000001", "not-native", true, {
+    agentMentioned: "true",
+    mentions: self,
+  });
+  expect(settled).toBe(false);
+  await waInput("@456 allow", "+15550000001", "other-mention", true, {
+    agentMentioned: false,
+    mentions: [{ text: "@456", phoneNumber: "+15550000002", isAgent: false }],
+  });
+  expect(settled).toBe(false);
+  await waInput("@123 allow", "+15550000002", "wrong-author", true, {
+    agentMentioned: true,
+    mentions: self,
+  });
+  expect(settled).toBe(false);
+  await waInput("@123 allow", "+15550000001", "approval", true, {
+    agentMentioned: true,
+    mentions: self,
+  });
+  expect(await answer).toBe("allow");
+});
+it("normalizes a current native group Stop without cancelling another author's work", async () => {
+  hooks.realSessions = true;
+  const f = await start();
+  enableWhatsAppGroup(f);
+  const self = [{ text: "@123", phoneNumber: "+15550000000", isAgent: true }];
+  await waInput("@123 work", "+15550000001", "active", true, {
+    agentMentioned: true,
+    mentions: self,
+  });
+  await vi.waitFor(() => expect(hooks.manager.state.listTurns()[0]?.state).toBe("submitted"));
+  await waInput("@123 /stop", "+15550000002", "other-stop", true, {
+    agentMentioned: true,
+    mentions: self,
+  });
+  expect(f.opencode.session.abort).not.toHaveBeenCalled();
+  await waInput("@123 /stop", "+15550000001", "own-stop", true, {
+    agentMentioned: true,
+    mentions: self,
+  });
+  expect(f.opencode.session.abort).toHaveBeenCalledOnce();
+  expect(hooks.manager.state.listTurns()[0].state).toBe("interrupted");
+});
+
+it("does not consume an AUTO group approval addressed to another native mention with a matching numeric handle", async () => {
+  const f = await start();
+  enableWhatsAppGroup(f);
+  f.config.gateway.groupReplyMode = "auto";
+  Object.assign(f.identity, { agentHandle: "456" });
+  const target: ReplyTarget = {
+    channel: "whatsapp",
+    conversationId: "wa-conversation",
+    group: true,
+    sender: "+15550000001",
+    whatsappSource: { identityId: "wa-identity", messageId: "asked" },
+  };
+  const answer = hooks.escalation.relay.ask("contact-1", "Approve?", target);
+  await waInput("@456 allow", "+15550000001", "not-self", true, {
+    agentMentioned: false,
+    mentions: [{ text: "@456", phoneNumber: "+15550000002", isAgent: false }],
+  });
+  // Ordinary AUTO input supersedes the waiter; it must not approve it.
+  expect(await answer).toBeUndefined();
+  const next = hooks.escalation.relay.ask("contact-1", "Approve again?", target);
+  await waInput("allow", "+15550000001", "literal-approval", true);
+  expect(await next).toBe("allow");
+});
