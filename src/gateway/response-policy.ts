@@ -1,7 +1,13 @@
 import type { ResolvedGatewayConfig } from "../config.js";
+import { type WhatsAppMention, whatsappAttentionText } from "../whatsapp-groups.js";
 import type { CompanionTurn } from "./companion.js";
 
-export function mentionsAgent(text: string, handle = ""): boolean {
+export function mentionsAgent(
+  text: string,
+  handle = "",
+  nativeMentions: WhatsAppMention[] = [],
+): boolean {
+  text = whatsappAttentionText(text, nativeMentions);
   const body = text.replace(/(?:https?:\/\/|www\.)\S+/gi, " ");
   return [...new Set(["agent", handle.trim().replace(/^@/, "")])].some((token) => {
     if (!token) return false;
@@ -16,9 +22,15 @@ export function sameAuthor(channel: string, left: string, right: string): boolea
     : left === right;
 }
 
-export function controlText(text: string, handle = ""): string {
+export function controlText(
+  text: string,
+  handle = "",
+  nativeMentions: WhatsAppMention[] = [],
+): string {
   const parts = text.trim().split(/\s+/);
   const first = parts[0].toLowerCase().replace(/[,:]+$/, "");
+  if (nativeMentions.some((mention) => !mention.isAgent && mention.text?.toLowerCase() === first))
+    return text;
   return ["@agent", `@${handle.replace(/^@/, "").toLowerCase()}`].includes(first)
     ? parts.slice(1).join(" ")
     : text;
@@ -34,7 +46,7 @@ export function companionWakes(c: CompanionTurn, config: ResolvedGatewayConfig):
   if (
     config.groupReplyMode !== "mention" ||
     c.whatsappSource?.agentMentioned === true ||
-    mentionsAgent(c.rawText ?? "", c.handle)
+    mentionsAgent(c.rawText ?? "", c.handle, c.whatsappSource?.mentions)
   )
     return true;
   const email = c.emailAddress?.trim().toLowerCase();

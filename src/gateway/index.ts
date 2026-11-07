@@ -136,6 +136,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       const raw = controlText(
         whatsappControlText(turn.rawText ?? "", turn.whatsappSource?.mentions),
         turn.handle,
+        turn.whatsappSource?.mentions,
       );
       if (
         turn.metadata.phase !== "initialization" &&
@@ -491,10 +492,15 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             !msg.group ||
             g.groupReplyMode !== "mention" ||
             msg.whatsappSource.agentMentioned === true ||
-            mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle);
+            mentionsAgent(
+              originalRaw,
+              (await opts.inkbox.getIdentity()).agentHandle,
+              msg.whatsappSource?.mentions,
+            );
           raw = controlText(
             whatsappControlText(originalRaw, msg.whatsappSource.mentions),
             (await opts.inkbox.getIdentity()).agentHandle,
+            msg.whatsappSource?.mentions,
           );
           const receipt = reserveWhatsAppIngress(
             msg,
@@ -574,7 +580,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             (msg.slack
               ? msg.slack.direct || msg.slack.mentioned
               : msg.whatsappSource?.agentMentioned === true ||
-                mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle)));
+                mentionsAgent(
+                  originalRaw,
+                  (await opts.inkbox.getIdentity()).agentHandle,
+                  msg.whatsappSource?.mentions,
+                )));
         if (disposition?.kind === "permission") {
           // A stale answer stays an answer; it cannot become a new instruction.
           if (!pending.tryConsume(msg.chatKey, raw, author, complete, disposition.waiterId))

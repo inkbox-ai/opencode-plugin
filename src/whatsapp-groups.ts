@@ -25,6 +25,19 @@ export function nativeMentions(value: unknown): WhatsAppMention[] {
   });
 }
 
+export function whatsappAttentionText(text: string, mentions: WhatsAppMention[] = []): string {
+  const tokens = mentions
+    .map((mention) => mention.text)
+    .filter((token): token is string => token !== null && /^@[0-9]+$/.test(token))
+    .sort((a, b) => b.length - a.length);
+  return tokens.length
+    ? text.replace(
+        new RegExp(String.raw`(?<![\p{L}\p{N}_@])(?:${tokens.join("|")})(?![\p{L}\p{N}_])`, "gu"),
+        " ",
+      )
+    : text;
+}
+
 export function whatsappControlText(text: string, mentions: WhatsAppMention[] = []): string {
   for (const mention of mentions) {
     if (mention.isAgent && mention.text) {

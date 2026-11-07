@@ -1966,7 +1966,11 @@ export function createSessionManager(
           !(msg.slack
             ? msg.slack.mentioned || msg.slack.direct
             : msg.whatsappSource?.agentMentioned === true ||
-              mentionsAgent(msg.rawText ?? msg.text, identity.agentHandle))
+              mentionsAgent(
+                msg.rawText ?? msg.text,
+                identity.agentHandle,
+                msg.whatsappSource?.mentions,
+              ))
         ) {
           if (msg.whatsappSource)
             deps.state.reserveWhatsAppTurn({ ...turn, state: "context_only", deliver: false });

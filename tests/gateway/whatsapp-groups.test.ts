@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { companionMetadata } from "../../src/gateway/companion.js";
 import { dispatchEvent } from "../../src/gateway/dispatch.js";
-import { companionWakes } from "../../src/gateway/response-policy.js";
+import { companionWakes, mentionsAgent } from "../../src/gateway/response-policy.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import {
   authorizeWhatsAppCompanion,
@@ -377,4 +377,22 @@ it("renders current native mention names in direct messages without changing raw
     { text: "@123", phoneNumber: f.roster.localNumber, isAgent: true },
     { text: "@456", phoneNumber: other, isAgent: false },
   ]);
+});
+
+it("does not treat another native mention as a typed numeric self handle", () => {
+  const mentions = [{ text: "@123", phoneNumber: other, isAgent: false }];
+  expect(mentionsAgent("@123 help", "123", mentions)).toBe(false);
+  expect(mentionsAgent("@123 @agent help", "123", mentions)).toBe(true);
+  expect(mentionsAgent("@123 help", "123")).toBe(true);
+  const c: any = {
+    senderAccess: "direct",
+    handle: "123",
+    rawText: "@123 help",
+    metadata: { channel: "whatsapp" },
+    whatsappSource: { agentMentioned: false, mentions },
+  };
+  const config = { ...defaultGatewayConfig(), groupReplyMode: "mention" as const };
+  expect(companionWakes(c, config)).toBe(false);
+  c.whatsappSource.agentMentioned = true;
+  expect(companionWakes(c, config)).toBe(true);
 });

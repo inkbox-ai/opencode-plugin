@@ -3923,6 +3923,7 @@ it("retains a completed WhatsApp Companion answer while current activation canno
 });
 it("preserves native WhatsApp mention attention and treats other mentions as shared group context", async () => {
   const d = whatsappCompanionFixture();
+  d.identity.agentHandle = "456";
   d.config.gateway.groupReplyMode = "mention";
   d.companionSenderAllowed.mockResolvedValue(true);
   try {
