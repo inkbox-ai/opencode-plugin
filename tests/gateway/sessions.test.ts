@@ -4086,3 +4086,69 @@ it("retains a completed WhatsApp answer after repeated transient failures in fin
     await d.mgr.close();
   }
 });
+
+it("queues a WhatsApp Companion receipt when its initial activation preflight fails", async () => {
+  const d = whatsappCompanionFixture();
+  try {
+    await d.mgr.acceptCompanion(d.c, "initialize");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    d.activationMessages.mockRejectedValueOnce(
+      Object.assign(new Error("activation unavailable"), { statusCode: 503 }),
+    );
+    const live: CompanionTurn = {
+      ...d.c,
+      initialization: false,
+      sourceId: "retry-live",
+      metadata: { ...d.c.metadata, phase: "live", sequence: 2 },
+      whatsappSource: { ...d.c.whatsappSource!, messageId: "retry-live" },
+    };
+    await expect(d.mgr.acceptCompanion(live, "live question")).rejects.toThrow(
+      "activation unavailable",
+    );
+    // No new webhook or restart is needed to retry the retained receipt.
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledTimes(2));
+    expect(d.state.listTurns().find((t) => t.companion?.sourceId === "retry-live")?.state).toBe(
+      "delivered",
+    );
+  } finally {
+    await d.mgr.close();
+  }
+});
+
+it("uses each current WhatsApp Companion control source for distinct acknowledgement receipts", async () => {
+  const d = whatsappCompanionFixture();
+  try {
+    await d.mgr.acceptCompanion(d.c, "initialize");
+    await vi.waitFor(() => expect(d.identity.sendWhatsApp).toHaveBeenCalledOnce());
+    d.companionControl.mockImplementation(async (_c, _key, target) => {
+      await (
+        await prepareWhatsApp(d.identity as any, target as any, { text: "Ready." }, d.state)
+      )();
+      return true;
+    });
+    for (const sequence of [2, 3]) {
+      const sourceId = `control-${sequence}`;
+      await d.mgr.acceptCompanion(
+        {
+          ...d.c,
+          initialization: false,
+          sourceId,
+          rawText: "/status",
+          metadata: { ...d.c.metadata, phase: "live", sequence },
+          whatsappSource: { ...d.c.whatsappSource!, messageId: sourceId },
+        },
+        "/status",
+      );
+    }
+    expect(d.identity.sendWhatsApp).toHaveBeenCalledTimes(3);
+    const acknowledgements = Object.values(d.state.read().whatsappSends ?? {}).filter(
+      (record: any) => record.payload === JSON.stringify({ text: "Ready." }),
+    );
+    expect(acknowledgements.map((record: any) => record.sourceId)).toEqual([
+      "control-2",
+      "control-3",
+    ]);
+  } finally {
+    await d.mgr.close();
+  }
+});

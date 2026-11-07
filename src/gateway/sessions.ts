@@ -1698,10 +1698,15 @@ export function createSessionManager(
         if (turn.state !== "hydrating") return;
       }
       if (controlTarget?.channel === "whatsapp" && companion.whatsappSource) {
-        await authorizeRoute({
-          ...turn,
-          replyTarget: { ...controlTarget, whatsappSource: companion.whatsappSource },
-        });
+        try {
+          await authorizeRoute({
+            ...turn,
+            replyTarget: { ...controlTarget, whatsappSource: companion.whatsappSource },
+          });
+        } catch (error) {
+          enqueue(turn);
+          throw error;
+        }
       }
       if (
         controlTarget &&
@@ -1719,6 +1724,7 @@ export function createSessionManager(
             ) !== false) &&
         (await deps.companionControl?.(companion, chatKey, {
           ...controlTarget,
+          ...(companion.whatsappSource ? { whatsappSource: companion.whatsappSource } : {}),
           ...(companion.slack ? { slack: companion.slack } : {}),
           sender: companion.from,
         }))
