@@ -3,6 +3,14 @@ import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
 import {
+  isWhatsAppGroup,
+  mentionContext,
+  nativeMentions,
+  resolvedWhatsAppGroup,
+  UnsupportedWhatsAppGroupSDK,
+  whatsappDestination,
+} from "../whatsapp-groups.js";
+import {
   hasWhatsAppGroupShape,
   recordWhatsAppStatus,
   WHATSAPP_EVENTS,
@@ -740,9 +748,13 @@ async function conversationParticipants(
 }
 
 async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
-  if (!event.verified || event.body.companion != null) return false;
+  if (!event.verified) return false;
   let message = resourceOf(event.body, "message");
-  if (!message || hasWhatsAppGroupShape(message)) return true;
+  if (!message) return true;
+  const group = isWhatsAppGroup(message);
+  if (hasWhatsAppGroupShape(message) && !resolvedWhatsAppGroup(message)) return true;
+  const companion =
+    event.body.companion == null ? undefined : companionMetadata(event.body.companion);
   const identity = await deps.inkbox.getIdentity();
   if (message.agent_identity_id !== identity.id || message.is_blocked === true) return true;
   const type = event.eventType ?? inferType(event.body);
@@ -751,9 +763,8 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
   if (reaction) {
     if (
       !Array.isArray(message.participants) ||
-      message.participants.length !== 1 ||
-      message.remote_number !== message.participants[0] ||
-      hasWhatsAppGroupShape(reaction) ||
+      (!group &&
+        (message.participants.length !== 1 || message.remote_number !== message.participants[0])) ||
       reaction.direction !== "inbound" ||
       !["applied", "removed"].includes(String(reaction.status)) ||
       reaction.agent_identity_id !== identity.id ||
@@ -764,11 +775,31 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       Number(reaction.revision) < 1
     )
       return true;
+    if (group) {
+      const current = await identity.getWhatsAppReaction(String(reaction.id));
+      const target = await identity.getWhatsAppMessage(String(reaction.target_message_id));
+      if (
+        current.id !== reaction.id ||
+        current.agentIdentityId !== identity.id ||
+        current.conversationId !== message.conversation_id ||
+        current.targetMessageId !== message.id ||
+        current.direction !== "inbound" ||
+        current.remoteNumber !== reaction.remote_number ||
+        current.revision !== reaction.revision ||
+        current.status !== reaction.status ||
+        target.id !== message.id ||
+        target.agentIdentityId !== identity.id ||
+        target.conversationId !== message.conversation_id ||
+        target.isBlocked ||
+        !resolvedWhatsAppGroup(target)
+      )
+        return true;
+    }
     message = {
       ...message,
       id: `reaction:${reaction.id}:${reaction.revision}:${reaction.status}`,
       sender_number: reaction.remote_number,
-      remote_number: reaction.remote_number,
+      remote_number: group ? null : reaction.remote_number,
       direction: "inbound",
       media: [],
       content: `WhatsApp reaction ${reaction.status === "removed" ? "removed" : "received"}: ${reaction.emoji} on message ${reaction.target_message_id}. A reaction is context, not a new instruction. Reply only if warranted; otherwise return exactly ${SILENT}.`,
@@ -788,21 +819,53 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     !conversationId ||
     !messageId ||
     message.direction !== "inbound" ||
-    hasWhatsAppGroupShape(message) ||
+    (hasWhatsAppGroupShape(message) && !resolvedWhatsAppGroup(message)) ||
     !/^\+[1-9]\d{6,14}$/.test(from) ||
     !Array.isArray(participants) ||
-    participants.length !== 1 ||
+    (!group && participants.length !== 1) ||
     participants.some(
       (number) => typeof number !== "string" || !/^\+[1-9]\d{6,14}$/.test(number),
     ) ||
     new Set(participants).size !== participants.length ||
     !participants.includes(from) ||
-    from !== message.remote_number ||
+    (!group && from !== message.remote_number) ||
     from === message.local_number
   )
     return true;
+  if (
+    companion &&
+    (!group ||
+      companion.channel !== "whatsapp" ||
+      companion.conversation_id !== conversationId ||
+      !deps.sessions.acceptCompanion)
+  )
+    throw new Error("WhatsApp Companion conversation does not match the received source.");
+  if (group) {
+    let current: Awaited<ReturnType<typeof whatsappDestination>>;
+    try {
+      current = await whatsappDestination(identity, conversationId, {
+        channel: "whatsapp",
+        group: true,
+      });
+    } catch (error) {
+      if (!(error instanceof UnsupportedWhatsAppGroupSDK)) throw error;
+      deps.logger.warn("whatsapp.group_sdk_unavailable", {});
+      return true;
+    }
+    if (!current.participants.includes(from)) return true;
+    if (!companion || companion.phase === "ordinary") {
+      for (const participant of current.participants) {
+        const contact = await deps.contacts.resolve(participant);
+        if (!senderAllowed(participant, contact.contactId, deps.config.gateway)) return true;
+      }
+    }
+  }
   const resolved = await deps.contacts.resolve(from);
-  if (!senderAllowed(from, resolved.contactId, deps.config.gateway)) return true;
+  if (
+    (!companion || companion.phase === "ordinary") &&
+    !senderAllowed(from, resolved.contactId, deps.config.gateway)
+  )
+    return true;
   const media = Array.isArray(message.media)
     ? message.media.map(record).filter((item): item is Record<string, unknown> => Boolean(item))
     : [];
@@ -834,16 +897,65 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       text += "\n[WhatsApp attachment unavailable; its owned media ID remains retained]";
   }
   if (!text.trim() && !paths.length) return true;
-  const contactMemories = deps.config.gateway.contactMemories
-    ? matchedContactMemories(event.body, {
-        channel: "whatsapp",
+  const contactMemories =
+    !group && deps.config.gateway.contactMemories
+      ? matchedContactMemories(event.body, {
+          channel: "whatsapp",
+          from,
+          contactId: resolved.contactId,
+          allowSoleContactFallback: true,
+        })
+      : [];
+  const mentions = nativeMentions(message.mentions);
+  const source = {
+    messageId,
+    identityId: identity.id,
+    mediaIds: media.map((item) => String(item.id)),
+    agentMentioned: !reaction && message.agent_mentioned === true,
+    mentions: reaction ? [] : mentions,
+    parentMessageId:
+      typeof message.reply_to_message_id === "string" ? message.reply_to_message_id : null,
+    threadId: typeof message.thread_id === "string" ? message.thread_id : null,
+    rootMessageId:
+      typeof message.thread_root_message_id === "string" ? message.thread_root_message_id : null,
+  };
+  text = await mentionContext(text, source.mentions, identity.agentHandle, deps.contacts);
+  if (companion) {
+    const acceptCompanion = deps.sessions.acceptCompanion;
+    if (!acceptCompanion) throw new Error("WhatsApp Companion receiver is unavailable.");
+    await acceptCompanion.call(
+      deps.sessions,
+      {
+        metadata: companion,
+        identityId: identity.id,
+        environment: deps.config.baseUrl,
+        handle: identity.agentHandle,
+        sourceId: messageId,
         from,
-        contactId: resolved.contactId,
-        allowSoleContactFallback: true,
-      })
-    : [];
+        rawText: str(message.content) ?? "",
+        senderAccess: str(message.sender_access),
+        initialization: companion.phase === "initialization",
+        whatsappSource: source,
+      },
+      `[Current WhatsApp source ${messageId}; native_agent_mentioned=${source.agentMentioned}; mentions=${JSON.stringify(source.mentions)}]\n${from}: ${text}\n${JSON.stringify(media)}${paths.length ? `\nLocal media: ${JSON.stringify(paths)}` : ""}`,
+      companion.phase === "ordinary"
+        ? {
+            channel: "whatsapp",
+            conversationId,
+            messageId,
+            sender: from,
+            group: true,
+            whatsappSource: source,
+          }
+        : undefined,
+    );
+    return true;
+  }
   await deps.sessions.handleInbound({
     channel: "whatsapp",
+    ...(group
+      ? { group: { participantCount: participants.length, participants: participants as string[] } }
+      : {}),
     chatKey: messageChatKey(
       deps,
       {
@@ -852,13 +964,14 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
         conversationId,
         from,
       },
-      1,
+      group ? Math.max(2, participants.length) : 1,
     ),
     from,
     conversationId,
     messageId,
     ...resolved,
     whatsappSource: {
+      ...source,
       messageId,
       identityId: identity.id,
       mediaIds: media.map((item) => String(item.id)),

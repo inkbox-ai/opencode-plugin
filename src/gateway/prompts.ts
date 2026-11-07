@@ -30,7 +30,7 @@ write for the medium:
   channel it arrived on, the sender, and any resolved Inkbox contact. Read
   it to know who you are talking to and where — the tag plus inkbox_whoami
   tell you which addresses and lines are yours — but never echo it back.
-- WhatsApp is approved dedicated direct messaging, at most 4,000 characters and one owned attachment (current server limits can be lower). Use one E.164 recipient string or an existing direct conversationId; recipient arrays and comma-separated lists are rejected. Explicit quoted replies require conversationId and replyToMessageId. Named/custom reactions return durable receipts; queued or uncertain is not applied. No calls or remote read receipts. Normal final replies are plain chat messages. Quote selectively when referring to an older message, distinguishing multiple requests, or identifying a specific attachment: use inkbox_send_whatsapp with an explicit replyToMessageId and do not repeat the sent answer as a final reply. Active-source tools inherit the conversation, not a quote; explicit different destinations remain separate outreach. Delivery uncertainty is not failure; inspect the original key, never resend or re-upload.
+- WhatsApp supports dedicated direct messages and existing inbound-first groups, at most 4,000 characters and one owned attachment (current server limits can be lower). Use one E.164 recipient string or an existing conversationId; groups use only conversationId and cannot be created; recipient arrays and comma-separated lists are rejected. Explicit quoted replies require conversationId and replyToMessageId. Named/custom reactions return durable receipts; queued or uncertain is not applied. No calls or remote read receipts. Normal final replies are plain chat messages. Quote selectively when referring to an older message, distinguishing multiple requests, or identifying a specific attachment: use inkbox_send_whatsapp with an explicit replyToMessageId and do not repeat the sent answer as a final reply. Active-source tools inherit the conversation, not a quote; explicit different destinations remain separate outreach. Delivery uncertainty is not failure; inspect the original key, never resend or re-upload.
 - Plain text on phone channels. No markdown on phone channels — no **bold**, no
   backticks, no headings, no code blocks unless someone explicitly asks
   for code.
@@ -198,6 +198,8 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
   if (msg.whatsappSource)
     fields.push(
       `whatsapp_media_ids=${JSON.stringify(msg.whatsappSource.mediaIds ?? [])}`,
+      `whatsapp_agent_mentioned=${msg.whatsappSource.agentMentioned === true}`,
+      `whatsapp_mentions=${JSON.stringify(msg.whatsappSource.mentions ?? [])}`,
       ...(msg.whatsappSource.parentMessageId !== undefined
         ? [`whatsapp_reply_to_message_id=${JSON.stringify(msg.whatsappSource.parentMessageId)}`]
         : []),
@@ -224,6 +226,7 @@ export function frameInbound(msg: InboundMessage, directive?: string): string {
       `connection_id=${msg.slack.connectionId}`,
       `thread_ts=${JSON.stringify(msg.slack.threadTs)}`,
     );
+  if (msg.group?.name) fields.push(`group_name=${JSON.stringify(msg.group.name)}`);
   if (msg.group?.participants?.length) {
     fields.push(`participants=${JSON.stringify(msg.group.participants.join(", "))}`);
   }

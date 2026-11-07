@@ -31,7 +31,12 @@ export function companionWakes(c: CompanionTurn, config: ResolvedGatewayConfig):
       config.slackEnabled &&
       (config.groupReplyMode !== "mention" || c.slack.mentioned || c.slack.direct)
     );
-  if (config.groupReplyMode !== "mention" || mentionsAgent(c.rawText ?? "", c.handle)) return true;
+  if (
+    config.groupReplyMode !== "mention" ||
+    c.whatsappSource?.agentMentioned === true ||
+    mentionsAgent(c.rawText ?? "", c.handle)
+  )
+    return true;
   const email = c.emailAddress?.trim().toLowerCase();
   return Boolean(
     c.metadata.channel === "mail" &&

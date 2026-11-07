@@ -4,6 +4,11 @@ import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
+import {
+  UnsupportedWhatsAppGroupSDK,
+  whatsappControlText,
+  whatsappDestination,
+} from "../whatsapp-groups.js";
 import { reserveWhatsAppIngress, type WhatsAppIngressDisposition } from "../whatsapp-native.js";
 import { createA2AHandler } from "./a2a.js";
 import { createBurstBuffer } from "./burst.js";
@@ -128,7 +133,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     companionContactId: async (from) => (await contacts.resolve(from)).contactId,
     companionControl: async (turn, chatKey, target) => {
       if (!companionWakes(turn, g)) return false;
-      const raw = controlText(turn.rawText ?? "", turn.handle);
+      const raw = controlText(
+        whatsappControlText(turn.rawText ?? "", turn.whatsappSource?.mentions),
+        turn.handle,
+      );
       if (
         turn.metadata.phase !== "initialization" &&
         isPermissionReply(raw) &&
@@ -448,6 +456,23 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       ...sessions,
       handleInbound: async (msg: import("./types.js").InboundMessage): Promise<void> => {
         if (unsupportedWhatsAppTarget(msg)) return;
+        if (msg.channel === "whatsapp" && msg.group && msg.conversationId) {
+          const identity = await opts.inkbox.getIdentity();
+          if (msg.whatsappSource?.identityId !== identity.id) return;
+          try {
+            const conversation = await whatsappDestination(identity, msg.conversationId, {
+              channel: "whatsapp",
+              group: true,
+            });
+            for (const participant of conversation.participants) {
+              const contact = await contacts.resolve(participant);
+              if (!senderAllowed(participant, contact.contactId, g)) return;
+            }
+          } catch (error) {
+            if (error instanceof UnsupportedWhatsAppGroupSDK) return;
+            throw error;
+          }
+        }
         let complete = () => {};
         let disposition: WhatsAppIngressDisposition | undefined;
         const author = {
@@ -462,14 +487,22 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         const originalRaw = msg.rawText ?? msg.text;
         let raw = originalRaw;
         if (msg.whatsappSource) {
-          raw = controlText(originalRaw, (await opts.inkbox.getIdentity()).agentHandle);
+          const controlEligible =
+            !msg.group ||
+            g.groupReplyMode !== "mention" ||
+            msg.whatsappSource.agentMentioned === true ||
+            mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle);
+          raw = controlText(
+            whatsappControlText(originalRaw, msg.whatsappSource.mentions),
+            (await opts.inkbox.getIdentity()).agentHandle,
+          );
           const receipt = reserveWhatsAppIngress(
             msg,
             !msg.reaction && (isPermissionReply(raw) || raw.trim().startsWith("/")),
             state,
             () => {
               const waiterId = pending.current(msg.chatKey, author) ?? null;
-              if (!msg.reaction && isPermissionReply(raw) && waiterId)
+              if (controlEligible && !msg.reaction && isPermissionReply(raw) && waiterId)
                 return { kind: "permission", waiterId };
               if (!msg.reaction && raw.trim().startsWith("/")) {
                 const snapshot = state.read();
@@ -540,7 +573,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             g.groupReplyMode !== "mention" ||
             (msg.slack
               ? msg.slack.direct || msg.slack.mentioned
-              : mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle)));
+              : msg.whatsappSource?.agentMentioned === true ||
+                mentionsAgent(originalRaw, (await opts.inkbox.getIdentity()).agentHandle)));
         if (disposition?.kind === "permission") {
           // A stale answer stays an answer; it cannot become a new instruction.
           if (!pending.tryConsume(msg.chatKey, raw, author, complete, disposition.waiterId))

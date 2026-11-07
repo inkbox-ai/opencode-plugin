@@ -44,6 +44,8 @@ export interface InboundMessage {
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    agentMentioned?: boolean;
+    mentions?: import("../whatsapp-groups.js").WhatsAppMention[];
     autoReplyTarget?: string;
     messageId: string;
     identityId: string;
@@ -95,14 +97,22 @@ export interface InboundMessage {
   // absent or 1 for a normal single message.
   burst?: number;
   // Present when the message arrived in a group conversation.
-  group?: { participantCount: number; participants?: string[] };
+  group?: { participantCount: number; participants?: string[]; name?: string };
 }
 
 // Where a session's replies are delivered — always the last-used modality.
 export interface ReplyTarget {
+  whatsappCompanion?: {
+    handle: string;
+    scopeId: string;
+    activationId: string;
+    conversationId: string;
+  };
   channel: Channel;
   slack?: SlackRoute;
   whatsappSource?: {
+    agentMentioned?: boolean;
+    mentions?: import("../whatsapp-groups.js").WhatsAppMention[];
     autoReplyTarget?: string;
     messageId: string;
     identityId: string;

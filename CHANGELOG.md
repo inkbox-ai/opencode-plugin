@@ -2,6 +2,9 @@
 
 ## 0.2.19 (unreleased)
 
+- Support existing inbound-first WhatsApp groups, native mentions, and sponsored Companion context through native conversation sessions.
+- Resolve mention display names in groups and direct messages; retain current-message attention rules and group-scoped permissions for media, reactions, and quoted replies.
+
 - Send new WhatsApp replies as plain chat messages unless a quote is explicitly requested; preserve retained quoted sends during recovery.
 - Preserve image and audio attachment types when media downloads use generic headers, including captionless messages.
 

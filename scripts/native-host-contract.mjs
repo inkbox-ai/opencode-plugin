@@ -67,6 +67,7 @@ opencode.session.messages = async (...args) => {
   if (sourceProof) await sourceProof;
   return result;
 };
+const whatsappSends = [];
 const sends = [],
   statuses = [],
   reactions = [];
@@ -74,6 +75,19 @@ const identity = {
   id: "synthetic-identity",
   agentHandle: "synthetic",
   imessageEnabled: true,
+  getWhatsAppConversation: async (id) => ({
+    id,
+    agentIdentityId: "synthetic-identity",
+    isGroup: true,
+    remoteNumber: null,
+    localNumber: "+15550000009",
+    unresolvedParticipantCount: 0,
+    participants: ["+15550000001", "+15550000002"],
+  }),
+  sendWhatsApp: async (request) => {
+    whatsappSends.push(request);
+    return { id: `whatsapp-${whatsappSends.length}`, conversationId: request.conversationId };
+  },
   getIMessage: async () => ({ id: "source", conversationId: "conversation" }),
   getIMessageThread: async () => ({ conversationId: "conversation", messages: [] }),
   sendIMessage: async (request) => {
@@ -115,6 +129,7 @@ const manager = createSessionManager({
   state,
   directory,
   inkbox: { getIdentity: async () => identity, getClient: async () => ({ slack }) },
+  companionSenderAllowed: async () => true,
   logger: {
     info() {},
     warn() {},
@@ -210,6 +225,24 @@ try {
   await until(() => sends.length === 3, "Slack native thread reply");
   assert.equal(sends[2].threadTs, route.threadTs);
   assert.match(sends[2].text, /smoke-aabbcc33/);
+  await manager.handleInbound({
+    channel: "whatsapp",
+    chatKey: "native-whatsapp-group",
+    from: "+15550000001",
+    conversationId: "whatsapp-group",
+    messageId: "whatsapp-source",
+    whatsappSource: { identityId: identity.id, messageId: "whatsapp-source" },
+    group: { participantCount: 2, participants: ["+15550000001", "+15550000002"] },
+    text: "smoke-aabbcc44",
+    mediaPaths: [],
+  });
+  await until(() => whatsappSends.length === 1, "WhatsApp native group reply");
+  assert.equal(whatsappSends[0].conversationId, "whatsapp-group");
+  assert.match(whatsappSends[0].text, /smoke-aabbcc44/);
+  assert.notEqual(
+    state.getSession("native-whatsapp-group"),
+    state.getSession("native-conversation"),
+  );
   await manager.close();
   assert.ok(statuses.some((status) => status[3] === "processing"));
   assert.ok(statuses.some((status) => status[3] === "active"));
