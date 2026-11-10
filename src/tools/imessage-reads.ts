@@ -306,7 +306,7 @@ export function imessageReadTools(deps: ToolDeps): RegisteredTool[] {
             });
             return {
               title: `Sent ${reaction.reaction} tapback`,
-              output: `Sent ${reaction.reaction} tapback to message ${args.messageId} (reaction id=${reaction.id}).`,
+              output: `Sent ${reaction.reaction} tapback to message ${reaction.targetMessageId} part ${reaction.partIndex} (reaction id=${reaction.id}).`,
             };
           });
         },
