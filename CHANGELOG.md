@@ -5,6 +5,7 @@
 - Discover and execute current remote tools with complete schemas, native approvals, stable call identity and structured results.
 - Route contact aliases through canonical remote tools for claimed identities while preserving admin and unclaimed setup.
 - Add explicit final replies for incoming email and direct SMS with durable acceptance and uncertain-outcome protection.
+- Retain native background ownership through producer completion, including source-bound follow-up turns and cancellation.
 - Expose gateway admission and completion tracking for embedders, including queued bursts and background work.
 - Require OpenCode V1 1.17.18 or newer for asynchronous plugin approval; retain the V2 2.0.26–2.0.x contract.
 - Require SDK 0.7.38 and use a frozen pnpm source dependency until that SDK release is available.

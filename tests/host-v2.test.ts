@@ -242,12 +242,17 @@ describe("V2 cancellation", () => {
     const cancel = vi.fn().mockResolvedValue(undefined);
     const interrupt = vi.fn().mockResolvedValue({ interrupted: false });
     const native = {
+      message: { list: vi.fn().mockResolvedValue({ data: [], cursor: {} }) },
+      shell: { list: vi.fn().mockResolvedValue({ data: [] }) },
       session: {
+        get: vi.fn().mockResolvedValue({ location: { directory: "/fixture" } }),
+        list: vi.fn().mockResolvedValue({ data: [], cursor: {} }),
         inbox: {
           list: vi
             .fn()
-            .mockResolvedValueOnce([{ id: "msg_pending" }])
-            .mockResolvedValueOnce([]),
+            .mockResolvedValueOnce([{ id: "msg_pending", payload: {} }])
+            .mockResolvedValueOnce([{ id: "msg_pending", payload: {} }])
+            .mockResolvedValue([]),
           cancel,
         },
         interrupt,
@@ -262,7 +267,11 @@ describe("V2 cancellation", () => {
   });
   it("does not acknowledge stop while admitted input remains", async () => {
     const native = {
+      message: { list: vi.fn().mockResolvedValue({ data: [], cursor: {} }) },
+      shell: { list: vi.fn().mockResolvedValue({ data: [] }) },
       session: {
+        get: vi.fn().mockResolvedValue({ location: { directory: "/fixture" } }),
+        list: vi.fn().mockResolvedValue({ data: [], cursor: {} }),
         inbox: { list: vi.fn().mockResolvedValue([{ id: "msg_pending" }]), cancel: vi.fn() },
         interrupt: vi.fn(),
         wait: vi.fn(),
