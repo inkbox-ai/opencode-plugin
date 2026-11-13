@@ -330,6 +330,47 @@ describe("gateway location ownership", () => {
 });
 
 describe("V2 reconnection", () => {
+  it("waits for location plugin registration before the read-only handshake", async () => {
+    const config = resolveConfig({}, {});
+    const hello = vi
+      .fn()
+      .mockRejectedValueOnce({ type: "rpc.unavailable" })
+      .mockResolvedValue({ configuration: configurationKey(config), tools: ["fixture"] });
+    const native = { rpc: () => ({ hello }) } as unknown as V2Client;
+    const host = createV2Host({ get: async () => native, invalidate() {} }, config);
+    expect((await host.tool.ids({ query: { directory: "/fixture" } })).data).toEqual(["fixture"]);
+    expect(hello).toHaveBeenCalledTimes(2);
+    expect(hello.mock.calls[0][1].signal).toBe(hello.mock.calls[1][1].signal);
+  });
+
+  it("does not retry a rejected readiness handshake", async () => {
+    const hello = vi.fn().mockRejectedValue({ type: "permission.denied" });
+    const native = { rpc: () => ({ hello }) } as unknown as V2Client;
+    const host = createV2Host({ get: async () => native, invalidate() {} }, resolveConfig({}, {}));
+    await expect(host.tool.ids({ query: { directory: "/fixture" } })).rejects.toMatchObject({
+      type: "permission.denied",
+    });
+    expect(hello).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops readiness polling when its deadline expires", async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const hello = vi.fn().mockRejectedValue({ type: "rpc.unavailable" });
+    const native = { rpc: () => ({ hello }) } as unknown as V2Client;
+    const host = createV2Host({ get: async () => native, invalidate() {} }, resolveConfig({}, {}));
+    try {
+      const pending = host.tool.ids({ query: { directory: "/fixture" } });
+      const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(hello).toHaveBeenCalled());
+      controller.abort();
+      await rejected;
+      expect(timeout).toHaveBeenCalledWith(5000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it("refreshes the connection for a failed read", async () => {
     const get = vi
       .fn()

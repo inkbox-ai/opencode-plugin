@@ -78,6 +78,15 @@ describe("mediaDir", () => {
 });
 
 describe("downloadMedia", () => {
+  it("bounds filenames with long punctuation suffixes", async () => {
+    const dir = makeTmpDir();
+    const url = `https://cdn.example.com/.picture${"-".repeat(100_000)}.png`;
+    const fetchImpl = makeFetch({ [url]: () => stubResponse({ body: "png-bytes" }) });
+    const saved = await downloadMedia([url], { dir, fetchImpl, logger: makeLogger() });
+    expect(saved).toHaveLength(1);
+    expect(path.basename(saved[0])).toMatch(/^picture-[0-9a-f]{8}\.png$/);
+  });
+
   it("saves a URL to the dir, deriving the extension from the URL path and stripping the query", async () => {
     const dir = path.join(makeTmpDir(), "media");
     const url = "https://cdn.example.com/photos/cat.PNG?sig=secret-token";

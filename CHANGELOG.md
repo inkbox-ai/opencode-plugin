@@ -9,6 +9,8 @@
 - Expose gateway admission and completion tracking for embedders, including queued bursts and background work.
 - Require OpenCode V1 1.17.18 or newer for asynchronous plugin approval; retain the V2 2.0.26–2.0.x contract.
 - Require SDK 0.7.38 and use a frozen pnpm source dependency until that SDK release is available.
+- Wait briefly for native plugin registration before declaring readiness, without retrying prompt submissions.
+- Keep attachment filename sanitization linear for long punctuation sequences.
 
 ## 0.2.19 (unreleased)
 

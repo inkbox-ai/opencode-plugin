@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ResolvedConfig } from "../config.js";
 import { createStateStore } from "../gateway/state.js";
 import { bindHostState } from "./state.js";
@@ -39,7 +40,19 @@ export function createV2Host(connection: V2Connection, config: ResolvedConfig): 
   };
   const hello = (directory: string) =>
     call(async (client) => {
-      const result = await client.rpc(InkboxHost).hello({}, { location: { directory } });
+      const options = { location: { directory }, signal: AbortSignal.timeout(5000) };
+      const rpc = client.rpc(InkboxHost);
+      let result: Awaited<ReturnType<typeof rpc.hello>>;
+      while (true) {
+        try {
+          result = await rpc.hello({}, options);
+          break;
+        } catch (error) {
+          if ((error as { type?: string })?.type !== "rpc.unavailable") throw error;
+          // Location services can answer before their plugins finish loading.
+          await delay(50, undefined, { signal: options.signal });
+        }
+      }
       if (result.configuration !== configurationKey(config))
         throw new Error(
           "Inkbox configuration differs between the gateway and OpenCode. Check identity, channel options, and state directory.",
