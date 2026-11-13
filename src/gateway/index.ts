@@ -52,6 +52,7 @@ export interface StartGatewayOptions {
   logger?: GatewayLogger;
   permissionInventory?: NativePermissionInventory;
   admitVerified?(event: VerifiedEvent): Promise<boolean>;
+  subscriptionsManagedExternally?: boolean;
 }
 
 const consoleLogger: GatewayLogger = {
@@ -309,7 +310,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   }
 
   try {
-    await reconcileSubscriptions(deps, transport.publicUrl);
+    if (!opts.subscriptionsManagedExternally)
+      await reconcileSubscriptions(deps, transport.publicUrl);
   } catch (err) {
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
