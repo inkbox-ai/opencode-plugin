@@ -287,6 +287,7 @@ function advanceDue(previousDue: number, now: number, intervalMs: number): numbe
 }
 
 export function createA2AHandler(deps: {
+  track?(task: () => Promise<void>): Promise<void>;
   inkbox: InkboxRuntime;
   sessions: SessionManager;
   state: StateStore;
@@ -787,7 +788,8 @@ export function createA2AHandler(deps: {
   function start(key: string, data: A2AEventData, acknowledgementDelayMs = 0): void {
     if (closing || settlingTasks.has(data.task_id) || running.has(key)) return;
     let active!: RunningJob;
-    const task = run(key, data, acknowledgementDelayMs).finally(() => {
+    const execute = () => run(key, data, acknowledgementDelayMs);
+    const task = (deps.track ? deps.track(execute) : execute()).finally(() => {
       if (running.get(key) === active) running.delete(key);
     });
     active = { key, taskId: data.task_id, contextId: data.context_id, task };

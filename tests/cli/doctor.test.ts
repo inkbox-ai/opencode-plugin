@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Finding, runDoctor } from "../../src/cli/doctor.js";
 import { NOT_CONFIGURED_MESSAGE } from "../../src/client.js";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
@@ -78,7 +81,7 @@ describe("runDoctor", () => {
       opencode: reachableOpencode(),
       print,
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok, JSON.stringify(result.findings)).toBe(true);
     expect(result.findings.every(isFindingShape)).toBe(true);
     const out = lines.join("\n");
     expect(out).toContain("agent@inkbox.ai");
@@ -144,7 +147,7 @@ describe("runDoctor", () => {
       opencodeBinFound: true,
       print: () => {},
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok, JSON.stringify(result.findings)).toBe(true);
     expect(
       result.findings.some((f) => f.severity === "info" && /launch its own/.test(f.message)),
     ).toBe(true);
@@ -169,7 +172,7 @@ describe("runDoctor", () => {
       opencode: reachableOpencode(),
       print: () => {},
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok, JSON.stringify(result.findings)).toBe(true);
     expect(
       result.findings.some((f) => f.severity === "warning" && /INKBOX_SIGNING_KEY/.test(f.message)),
     ).toBe(true);
@@ -399,4 +402,14 @@ describe("runDoctor", () => {
     expect(out).toContain("voice:");
     expect(out).toContain("bind:");
   });
+});
+
+let doctorHome: string;
+beforeEach(() => {
+  doctorHome = mkdtempSync(join(tmpdir(), "inkbox-doctor-"));
+  vi.stubEnv("INKBOX_OPENCODE_HOME", doctorHome);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(doctorHome, { recursive: true, force: true });
 });

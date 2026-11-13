@@ -4,6 +4,7 @@ import type { ResolvedGatewayConfig } from "../config.js";
 import type { GatewayLogger, StateStoreLike } from "./transport-types.js";
 
 export interface Transport {
+  ready?(): boolean;
   // Public base URL webhooks and the call WS are reachable at.
   publicUrl: string;
   // Rejects when the inbound transport dies after startup (tunnel fatal such
@@ -75,6 +76,7 @@ export async function openTransport(opts: {
   installTunnelWarnFilter();
 
   const client = await opts.inkbox.getClient();
+  let bound = false;
   let onConnected: () => void = () => {};
   const connected = new Promise<void>((resolve) => {
     onConnected = resolve;
@@ -85,6 +87,7 @@ export async function openTransport(opts: {
     // Only a process we own may take over SIGINT/SIGTERM.
     installSignalHandlers: ownsProcess,
     onStatus: (status) => {
+      bound = status === "connected";
       logger.info("transport.tunnel_status", { status });
       if (status === "connected") onConnected();
     },
@@ -129,9 +132,11 @@ export async function openTransport(opts: {
 
   return {
     publicUrl: listener.publicUrl,
+    ready: () => bound && !closing,
     failed,
     close: () => {
       closing = true;
+      bound = false;
       return listener.close();
     },
   };

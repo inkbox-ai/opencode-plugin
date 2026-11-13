@@ -15,6 +15,7 @@ import { createBurstBuffer } from "./burst.js";
 import { handleCommand } from "./commands.js";
 import { createContactResolver } from "./contacts.js";
 import { createNotifyOnce, createRequestDedup } from "./dedup.js";
+import { DeliveryWork } from "./delivery-work.js";
 import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
 import { normalizePermission, subscribePermissionEvents } from "./events.js";
@@ -50,6 +51,7 @@ export interface StartGatewayOptions {
   ownsProcess: boolean;
   logger?: GatewayLogger;
   permissionInventory?: NativePermissionInventory;
+  admitVerified?(event: VerifiedEvent): Promise<boolean>;
 }
 
 const consoleLogger: GatewayLogger = {
@@ -68,7 +70,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const g = opts.config.gateway;
   const deliverReply: typeof deliverChannelReply = (runtime, target, raw, log) =>
     deliverChannelReply(runtime, target, raw, log, opts.config.outbound.allowedRecipients);
-  const state = createStateStore();
+  const deliveries = new DeliveryWork(createStateStore());
+  const state = deliveries.state;
   if (opts.opencode.protocol !== 2) bindHostState(state, 1);
   // A prior process's successful inventory is not evidence for this attachment.
   // Do this before opening any gateway resources or serving readiness requests.
@@ -252,6 +255,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     state,
     logger,
     config: opts.config,
+    track: (task) => deliveries.track(task),
   });
   const hostedCalls = createHostedCallCompletion({
     inkbox: opts.inkbox,
@@ -279,7 +283,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     config: opts.config,
     logger,
     dedup,
-    onEvent: (event) => onEvent(event),
+    onEvent: (event) => (opts.admitVerified ? opts.admitVerified(event) : onEvent(event)),
     ...(callBridge
       ? { onCallUpgrade: (req, socket, head) => void callBridge.handleUpgrade(req, socket, head) }
       : {}),
@@ -402,22 +406,31 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     g.textBatchWindowMs > 0
       ? createBurstBuffer({
           windowMs: g.textBatchWindowMs,
-          deliver: (msg) => {
-            void wrapSessions()
-              .handleInbound(msg)
-              .catch((err) => logger.error("turn.dispatch_failed", { error: String(err) }));
-          },
+          retain: () => deliveries.capture(),
+          deliver: (msg) => wrapSessions().handleInbound(msg),
+          onError: () => logger.error("turn.dispatch_failed", {}),
         })
       : undefined;
 
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
     if (a2a.handles(event)) return a2a.handle(event);
+    const wrapped = wrapSessions();
     return dispatchEvent(
       {
         config: opts.config,
         inkbox: opts.inkbox,
         contacts,
-        sessions: wrapSessions(),
+        sessions: {
+          ...wrapped,
+          handleInbound: (message) => deliveries.track(() => wrapped.handleInbound(message)),
+          runCapture: async (key, text) => {
+            let result: string | undefined;
+            await deliveries.track(async () => {
+              result = await wrapped.runCapture(key, text);
+            });
+            return result;
+          },
+        },
         state,
         notify,
         logger,
@@ -777,6 +790,32 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   return {
     publicUrl: transport.publicUrl,
     failed: transport.failed,
+    dispatchVerified: async (id, event) => {
+      if (!event.verified || event.provider !== "inkbox")
+        throw new Error("Verified Inkbox admission is required.");
+      const data = event.body.data as { call?: { id?: string; mode?: string } } | undefined;
+      const call =
+        event.eventType === "call.ended" && data?.call?.mode === "hosted_agent"
+          ? data.call
+          : undefined;
+      const reference = call?.id
+        ? { identityId: (await opts.inkbox.getIdentity()).id, callId: call.id }
+        : undefined;
+      return deliveries.dispatch(id, () => onEvent(event), reference);
+    },
+    eventState: (id) => deliveries.status(id),
+    activity: () => ({
+      ...deliveries.activity(),
+      native: state
+        .listTurns()
+        .filter(
+          (turn) =>
+            !["delivered", "failed", "interrupted", "context_only"].includes(turn.state) &&
+            !(turn.state === "completed" && !turn.deliver),
+        ).length,
+      permissions: state.listPermissions().length,
+    }),
+    ready: () => transport.ready?.() ?? true,
     async close() {
       sessions.freezeAdmission?.();
       await escalation

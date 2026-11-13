@@ -2,6 +2,7 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import { createInkboxRuntime } from "./client.js";
 import { resolveConfig } from "./config.js";
 import type { GatewayHandle } from "./gateway/types.js";
+import { RemoteTools } from "./remote-tools.js";
 import { registerTools } from "./tools/index.js";
 import { createVaultRuntime } from "./vault.js";
 
@@ -14,7 +15,9 @@ const InkboxPlugin: Plugin = async (input, options) => {
   const vault = createVaultRuntime(runtime, { keyEnvVar: config.vaultKeyEnvVar });
   // Gating happens here: tools that aren't enabled are never registered, so
   // their specs never reach the model. inkbox_doctor reports what's off.
-  const { tools } = registerTools({ runtime, config, vault, opencode: input.client });
+  const remote = new RemoteTools(runtime, config, input.client, input.directory);
+  const { tools: local } = registerTools({ runtime, config, vault, opencode: input.client });
+  const tools = remote.wrap(local);
 
   // In-plugin gateway mode: start the inbound gateway inside opencode. Deferred
   // past plugin init (awaiting server-API calls here would deadlock instance
@@ -33,8 +36,12 @@ const InkboxPlugin: Plugin = async (input, options) => {
 
   return {
     tool: tools,
+    "tool.execute.before": async (input, output) => {
+      remote.before(input, output);
+    },
     dispose: async () => {
       disposed = true;
+      remote.close();
       // Await any in-flight start so dispose can't race past it and leak the
       // tunnel / webhook listener.
       const handle = await startPromise;

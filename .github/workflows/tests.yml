@@ -10,10 +10,11 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -21,11 +22,11 @@ jobs:
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
       - run: python3 -m unittest tests/live/test_a2a_preflight.py
-      - run: npm run build
+      - run: pnpm build
 
   # Same contract suite canary runs on a schedule, but here it gates PRs so a
   # host bump that breaks the plugin interface is visible at review time.
@@ -33,10 +34,11 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
@@ -44,26 +46,27 @@ jobs:
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
-      - run: npm run typecheck
-      - run: npx vitest run tests/contract
+      - run: pnpm typecheck
+      - run: pnpm exec vitest run tests/contract
 
   loader-smoke:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - name: Install minimum native host
-        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.15.0
+        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.17.18
       - name: Packed native loader on minimum host
         run: |
-          test "$(opencode --version)" = "1.15.0"
+          test "$(opencode --version)" = "1.17.18"
           bash scripts/smoke-loader.sh
       - name: Install recent V1 host
         run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.19.0
@@ -78,14 +81,15 @@ jobs:
         version: ["2.0.26", "latest"]
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - run: |
           bash tests/ci/npm_with_retry.sh ci
       - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@${{ matrix.version }}
-      - run: npm run build
+      - run: pnpm build
       - name: Packed V2 host contract
         run: |
           ARCHIVE=$(npm pack --silent | tail -1)
@@ -95,31 +99,33 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install published plugin dependencies
         run: bash tests/ci/npm_with_retry.sh ci
-      - name: Verify the released WhatsApp SDK
-        run: bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.29 @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-      - run: npm run typecheck
-      - run: npm test
+      - name: Verify the pinned SDK floor
+        run: node --input-type=module -e "await import('@inkbox/sdk/remote-mcp')"
+      - run: pnpm typecheck
+      - run: pnpm test
         env:
           INKBOX_REQUIRE_GROUP_SDK: "1"
-      - run: npm run build
+      - run: pnpm build
 
   sdk-compatibility:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install published dependencies, then the historical SDK boundary
         run: |
           bash tests/ci/npm_with_retry.sh ci
           bash tests/ci/npm_with_retry.sh install --no-save --package-lock=false @inkbox/sdk@0.7.15 @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - name: Verify historical base behavior without claiming WhatsApp support
-        run: npx vitest run tests/unit/client.test.ts tests/unit/config.test.ts tests/unit/registry.test.ts tests/unit/send-email.test.ts tests/unit/send-sms.test.ts tests/unit/send-imessage.test.ts tests/unit/imessage-reads.test.ts tests/unit/vault.test.ts
+        run: pnpm exec vitest run tests/unit/client.test.ts tests/unit/config.test.ts tests/unit/registry.test.ts tests/unit/send-email.test.ts tests/unit/send-sms.test.ts tests/unit/send-imessage.test.ts tests/unit/imessage-reads.test.ts tests/unit/vault.test.ts

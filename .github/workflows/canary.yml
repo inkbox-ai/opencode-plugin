@@ -9,38 +9,40 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install locked dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@latest @opencode-ai/plugin@latest
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
 
   loader-smoke:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install locked dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
       - name: Install minimum native host
-        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.15.0
+        run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@1.17.18
       - name: Packed native loader on minimum host
         run: |
-          test "$(opencode --version)" = "1.15.0"
+          test "$(opencode --version)" = "1.17.18"
           bash scripts/smoke-loader.sh
       - name: Install latest native host
         run: bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
@@ -51,14 +53,15 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - run: |
           bash tests/ci/npm_with_retry.sh ci
       - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@latest
-      - run: npm run build
+      - run: pnpm build
       - run: |
           ARCHIVE=$(npm pack --silent | tail -1)
           node scripts/smoke-v2.mjs "$ARCHIVE"

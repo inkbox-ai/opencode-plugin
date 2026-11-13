@@ -11,6 +11,7 @@ import { createV2Host } from "./host/v2-client.js";
 import { createV2Connection, type V2Connection } from "./host/v2-connection.js";
 import { projectHistory, readHistory } from "./host/v2-history.js";
 import { configurationKey, InkboxHost, TurnPolicy } from "./host/v2-rpc.js";
+import { RemoteTools } from "./remote-tools.js";
 import { registerTools } from "./tools/index.js";
 import { createVaultRuntime } from "./vault.js";
 
@@ -50,7 +51,9 @@ export default Plugin.define({
       },
     };
     const host = createV2Host(checked, config);
-    const { tools } = registerTools({ runtime, config, vault, opencode: host });
+    const remote = new RemoteTools(runtime, config, host, ctx.location.directory);
+    const { tools: local } = registerTools({ runtime, config, vault, opencode: host });
+    const tools = remote.wrap(local);
     await ctx.tool.transform((editor) => {
       for (const [name, definition] of Object.entries(tools))
         editor.add({
@@ -63,7 +66,8 @@ export default Plugin.define({
             const directory = session.location.directory;
             if (!directory) throw new Error("OpenCode session directory is unavailable.");
             context.signal.throwIfAborted();
-            const result = await definition.execute(input, {
+            const nativeContext = {
+              callID: context.id,
               sessionID: context.sessionID,
               messageID: context.messageID,
               agent: context.agent,
@@ -86,7 +90,8 @@ export default Plugin.define({
                   context.signal,
                   config.outbound.askTimeoutMs,
                 ),
-            });
+            } satisfies import("@opencode-ai/plugin").ToolContext & { callID: string };
+            const result = await definition.execute(input, nativeContext);
             if (typeof result === "string") return { content: result };
             return {
               content: [
@@ -185,7 +190,7 @@ export default Plugin.define({
       config.gateway.mode === "plugin" &&
       resolve(ctx.location.directory) === directory
     ) {
-      return registerGatewayOwner(
+      const disposeGateway = registerGatewayOwner(
         resolve(gatewayHome()),
         {
           directory,
@@ -202,6 +207,13 @@ export default Plugin.define({
         },
         () => console.error("[inkbox] gateway startup failed. Run inkbox-opencode doctor."),
       );
+      return async () => {
+        remote.close();
+        await disposeGateway();
+      };
     }
+    return () => {
+      remote.close();
+    };
   },
 });

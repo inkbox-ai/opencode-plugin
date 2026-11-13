@@ -49,10 +49,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install locked dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
@@ -90,7 +91,7 @@ jobs:
           LIVE_REAL_MODEL: ${{ matrix.mode == 'real' && '1' || '' }}
           LIVE_REPLY_TIMEOUT_S: ${{ inputs.timeout_s || '150' }}
         run: |
-          npx vitest run --config vitest.live.config.ts \
+          pnpm exec vitest run --config vitest.live.config.ts \
             tests/live/email-reply.test.ts tests/live/sms.test.ts
 
       - name: Report content-free failure state

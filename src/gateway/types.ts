@@ -255,6 +255,13 @@ export interface WebhookProvider {
 }
 
 export interface GatewayHandle {
+  dispatchVerified?(
+    id: string,
+    event: VerifiedEvent,
+  ): Promise<import("./delivery-work.js").DeliveryState>;
+  eventState?(id: string): import("./delivery-work.js").DeliveryState;
+  activity?(): { pending: number; uncertain: number };
+  ready?(): boolean;
   publicUrl: string;
   // Rejects when the inbound transport dies after startup; the sidecar exits
   // nonzero on it so a service manager restarts (and reconnects) the gateway.
