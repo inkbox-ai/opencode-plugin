@@ -1,3 +1,4 @@
+import { remoteFixture, remoteTool } from "../../scripts/remote-native-fixture.mjs";
 // Deterministic OpenAI-compatible mock for live pipe tests. opencode's
 // provider config points at this server, so the agent "thinks" here — no real
 // key, no tokens, no flakiness — while the rest of the pipeline (gateway,
@@ -15,6 +16,7 @@ const PORT = Number(process.argv[2] ?? 8088);
 const NONCE = /smoke-[0-9a-f]{6,}/g;
 let stopStreamsStarted = 0;
 let fixtureRequest = {};
+const remote = remoteFixture();
 
 function replyText(req) {
   const nonce = JSON.stringify(req).match(NONCE)?.at(-1);
@@ -60,6 +62,8 @@ createServer((req, res) => {
     } catch {
       /* tolerate */
     }
+    const remoteReply = remote(body);
+    if (remoteReply) return sendJson(res, 200, remoteReply);
     const model = body.model ?? "mock-model";
     const text = replyText(body);
     const id = `chatcmpl-${randomUUID()}`;
@@ -96,7 +100,7 @@ createServer((req, res) => {
       return;
     }
     if (
-      input.includes("SLACK_UPLOAD_FIXTURE") &&
+      (remoteTool(input) || input.includes("SLACK_UPLOAD_FIXTURE")) &&
       !input.includes("SLACK_STOP_FIXTURE") &&
       !input.includes("smoke-aabbcc55") &&
       !body.messages.slice(lastUser + 1).some((message) => message.role === "tool")
@@ -104,7 +108,7 @@ createServer((req, res) => {
       const call = {
         id: "call_slack_fixture",
         type: "function",
-        function: {
+        function: remoteTool(input) ?? {
           name: "inkbox_slack_upload_file",
           arguments: JSON.stringify({
             connectionId: "connection",

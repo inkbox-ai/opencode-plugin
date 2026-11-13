@@ -44,6 +44,10 @@ git init -q .
 printf 'node_modules/\nnative-*-state/\nslack-upload.json\n' > .gitignore
 git -c user.name='Synthetic fixture' -c user.email='fixture@example.test' commit -q --allow-empty -m 'Synthetic native host fixture'
 npm init -y >/dev/null
+if [ -z "${INKBOX_SDK_PATH:-}" ]; then
+  SDK_DIR="$(cd "$ROOT" && node --input-type=module -e 'import {fileURLToPath} from "node:url"; import {dirname,resolve} from "node:path"; console.log(resolve(dirname(fileURLToPath(import.meta.resolve("@inkbox/sdk"))),".."))')"
+  INKBOX_SDK_PATH="$WORKDIR/$(npm pack --ignore-scripts "$SDK_DIR" --pack-destination "$WORKDIR" --silent | tail -1)"
+fi
 if [ -n "${INKBOX_SDK_PATH:-}" ]; then
   npm install --silent "$INKBOX_SDK_PATH" "$TARBALL"
 else
@@ -71,6 +75,14 @@ import { writeFileSync } from "node:fs";
 export default async (input: any) => {
   const hooks = await InkboxPlugin(input, { gateway: { enabled: false, slackEnabled: true, imessageThreadedReplies: true }, tools: { enable: ["inkbox_credentials_get_secret"] } });
   writeFileSync("$MARKER", JSON.stringify({ tools: Object.keys(hooks.tool ?? {}) }));
+  const {RemoteTools}=await import("$WORKDIR/node_modules/@inkbox/opencode-plugin/dist/remote-tools.js");
+  const {resolveConfig}=await import("$WORKDIR/node_modules/@inkbox/opencode-plugin/dist/config.js");
+  const relay=new RemoteTools({getClient:async()=>({_apiKey:'synthetic',_baseUrl:'http://127.0.0.1:$MODEL_PORT',whoami:async()=>({authSubtype:'api_key.agent_scoped.claimed'})}),getIdentity:async()=>({id:'synthetic'})},resolveConfig({outbound:{approval:'ask',askTimeoutMs:10000}}),input.client,input.directory,'$WORKDIR/native-remote-state');
+  Object.assign(hooks.tool,relay.wrap({}));
+  const before=hooks['tool.execute.before'];
+  hooks['tool.execute.before']=async(input,output)=>{await before?.(input,output);relay.before(input,output);};
+  const dispose=hooks.dispose;
+  hooks.dispose=async()=>{relay.close();await dispose?.();};
   // Synthetic host contract: real native tool context + real plugin upload helper,
   // with an in-memory provider boundary. Never touches a real identity or Slack workspace.
   const { uploadSlackFile } = await import("$WORKDIR/node_modules/@inkbox/opencode-plugin/dist/slack-upload.js");
@@ -96,6 +108,7 @@ EOF
 cat > opencode.json <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
+  "permission": {"inkbox_remote_call":"ask"},
   "provider": { "mock": {
     "npm": "@ai-sdk/openai-compatible", "name": "Synthetic transport fixture",
     "options": { "baseURL": "http://127.0.0.1:$MODEL_PORT/v1" },
@@ -132,6 +145,7 @@ if grep -i "inkbox" "$WORKDIR/serve.log" | grep -iq "error"; then
 fi
 
 echo "==> checking durable messaging against the real native host"
+node "$ROOT/scripts/native-remote-v1.mjs" "$WORKDIR" "$PORT" "$MODEL_PORT"
 node "$ROOT/scripts/native-host-contract.mjs" "$WORKDIR" "$PORT"
 node "$ROOT/scripts/native-permission-contract.mjs" "$WORKDIR" "$PORT"
 node "$ROOT/scripts/native-permission-handoff-contract.mjs" "$WORKDIR" "$PORT"

@@ -34,6 +34,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # --- 1. prerequisites -------------------------------------------------------
 command -v git >/dev/null 2>&1 || die "git is required."
 command -v npm >/dev/null 2>&1 || die "npm is required (comes with Node)."
+command -v pnpm >/dev/null 2>&1 || die "pnpm 10 is required. Install it with npm install -g pnpm@10.28.0."
 command -v node >/dev/null 2>&1 || die "Node.js 20+ is required."
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' ||
   die "Node.js 20+ is required (found $(node --version))."
@@ -63,16 +64,18 @@ fi
 
 # --- 3. build + pack ---------------------------------------------------------
 say "Installing dependencies and building"
-(cd "$SOURCE_DIR" && npm install --silent --no-audit --no-fund && npm run -s build)
+(cd "$SOURCE_DIR" && pnpm install --frozen-lockfile && pnpm build)
 TARBALL="$SOURCE_DIR/$(cd "$SOURCE_DIR" && npm pack --silent | tail -1)"
 [ -f "$TARBALL" ] || die "npm pack did not produce a tarball."
+SDK_DIR="$(cd "$SOURCE_DIR" && node --input-type=module -e 'import {fileURLToPath} from "node:url"; import {dirname,resolve} from "node:path"; console.log(resolve(dirname(fileURLToPath(import.meta.resolve("@inkbox/sdk"))),".."))')"
+SDK_TARBALL="$SOURCE_DIR/$(npm pack --ignore-scripts "$SDK_DIR" --pack-destination "$SOURCE_DIR" --silent | tail -1)"
 
 # --- 4. wire the plugin into the global opencode config ----------------------
 say "Installing the plugin into $OPENCODE_CONFIG_DIR"
 mkdir -p "$OPENCODE_CONFIG_DIR/plugins"
 (cd "$OPENCODE_CONFIG_DIR" &&
   { [ -f package.json ] || npm init -y >/dev/null 2>&1; } &&
-  npm install --silent --no-audit --no-fund --save "$TARBALL")
+  npm install --silent --no-audit --no-fund --save "$SDK_TARBALL" "$TARBALL")
 
 # The packaged channel agent, so gateway sessions find it from any project.
 mkdir -p "$OPENCODE_CONFIG_DIR/agent"

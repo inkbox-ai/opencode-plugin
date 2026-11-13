@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ResolvedConfig } from "../config.js";
 import { createStateStore } from "../gateway/state.js";
 import { bindHostState } from "./state.js";
@@ -6,9 +7,11 @@ import type { HostClient } from "./types.js";
 import type { V2Connection } from "./v2-connection.js";
 import { normalizeHistory, readHistory } from "./v2-history.js";
 import { configurationKey, InkboxHost } from "./v2-rpc.js";
+import { nativeWork, waitNativeWork } from "./v2-work.js";
 
 export function createV2Host(connection: V2Connection, config: ResolvedConfig): HostClient {
   const sessions = new Map<string, Promise<unknown>>();
+  const tracked = new Map<string, string>();
   const serial = <T>(sessionID: string, operation: () => Promise<T>): Promise<T> => {
     const result = (sessions.get(sessionID) ?? Promise.resolve()).catch(() => {}).then(operation);
     sessions.set(sessionID, result);
@@ -37,7 +40,19 @@ export function createV2Host(connection: V2Connection, config: ResolvedConfig): 
   };
   const hello = (directory: string) =>
     call(async (client) => {
-      const result = await client.rpc(InkboxHost).hello({}, { location: { directory } });
+      const options = { location: { directory }, signal: AbortSignal.timeout(5000) };
+      const rpc = client.rpc(InkboxHost);
+      let result: Awaited<ReturnType<typeof rpc.hello>>;
+      while (true) {
+        try {
+          result = await rpc.hello({}, options);
+          break;
+        } catch (error) {
+          if ((error as { type?: string })?.type !== "rpc.unavailable") throw error;
+          // Location services can answer before their plugins finish loading.
+          await delay(50, undefined, { signal: options.signal });
+        }
+      }
       if (result.configuration !== configurationKey(config))
         throw new Error(
           "Inkbox configuration differs between the gateway and OpenCode. Check identity, channel options, and state directory.",
@@ -54,6 +69,7 @@ export function createV2Host(connection: V2Connection, config: ResolvedConfig): 
       call(async (client) => {
         const directory = args.query?.directory;
         const sessionID = args.path.id;
+        tracked.set(sessionID, directory);
         const body = args.body;
         await hello(directory);
         const id = body.messageID ?? `msg_${randomUUID()}`;
@@ -157,7 +173,10 @@ export function createV2Host(connection: V2Connection, config: ResolvedConfig): 
       },
       prompt: async (a: any) => {
         const id = await submit(a);
-        await call((c) => c.session.wait({ sessionID: a.path.id }, { signal: a.signal }));
+        await call(async (c) => {
+          await c.session.wait({ sessionID: a.path.id }, { signal: a.signal });
+          await waitNativeWork(c, a.path.id, a.query.directory, a.signal);
+        });
         const message = (await history(a.path.id))
           .filter((m) => m.info.role === "assistant" && m.info.parentID === id)
           .at(-1);
@@ -168,18 +187,36 @@ export function createV2Host(connection: V2Connection, config: ResolvedConfig): 
         serial(a.path.id, () =>
           call(async (c) => {
             const sessionID = a.path.id;
-            for (const item of await c.session.inbox.list({ sessionID }))
-              await c.session.inbox.cancel({ sessionID, inboxID: item.id });
-            await c.session.interrupt({ sessionID, resume: false });
-            await c.session.wait({ sessionID }, { signal: AbortSignal.timeout(10000) });
-            const pending = await c.session.inbox.list({ sessionID });
-            const active = await c.session.active();
-            if (pending.length || active[sessionID])
+            const directory =
+              a.query?.directory ?? (await c.session.get({ sessionID })).location.directory;
+            const received = new Set<string>();
+            const work = await nativeWork(c, sessionID, directory, received);
+            for (const shell of work.shells)
+              await c.shell.remove({ id: shell.id, location: { directory } });
+            for (const id of work.ids) {
+              for (const item of await c.session.inbox.list({ sessionID: id }))
+                await c.session.inbox.cancel({ sessionID: id, inboxID: item.id });
+              await c.session.interrupt({ sessionID: id, resume: false });
+              await c.session.wait({ sessionID: id }, { signal: AbortSignal.timeout(10000) });
+            }
+            if ((await nativeWork(c, sessionID, directory, received)).busy)
               throw new Error("OpenCode has not confirmed this session stopped.");
             return { data: true };
           }),
         ),
-      status: async () => ({ data: await call((c) => c.session.active(), true) }),
+      status: async (a: any) => ({
+        data: await call(async (c) => {
+          const statuses = await c.session.active();
+          for (const turn of createStateStore().listTurns())
+            if (["submitting", "submitted"].includes(turn.state) && turn.sessionID)
+              tracked.set(turn.sessionID, a.query.directory);
+          for (const [id, directory] of tracked) {
+            if ((await nativeWork(c, id, directory)).busy) statuses[id] = { type: "running" };
+            else tracked.delete(id);
+          }
+          return statuses;
+        }, true),
+      }),
       delete: async (a: any) => {
         await call((c) => c.session.remove({ sessionID: a.path.id }));
         return { data: true };

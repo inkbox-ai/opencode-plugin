@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { NOT_CONFIGURED_MESSAGE } from "../../src/client.js";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
@@ -108,7 +111,7 @@ describe("doctorTools", () => {
   it("reports ok when whoami and the identity resolve", async () => {
     const { deps, runtime } = makeDeps(makeConfig());
     const result = await runDoctor(deps);
-    expect(result.title).toBe("Inkbox doctor: ok");
+    expect(result.title, result.output).toBe("Inkbox doctor: ok");
     expect(result.output).toContain("everything looks good");
     expect(result.output).toContain("agent@inkbox.ai");
     expect(result.output).toContain("+15550001111");
@@ -134,14 +137,14 @@ describe("doctorTools", () => {
     const { deps } = makeDeps(makeConfig(), runtime);
     const result = await runDoctor(deps);
     expect(result.output).toContain("Authenticated as session; expected an api_key credential.");
-    expect(result.title).toBe("Inkbox doctor: ok");
+    expect(result.title, result.output).toBe("Inkbox doctor: ok");
   });
 
   it("warns without failing when no signing key is configured", async () => {
     const { deps } = makeDeps(makeConfig({ signingKey: undefined }));
     const result = await runDoctor(deps);
     expect(result.output).toContain("INKBOX_SIGNING_KEY");
-    expect(result.title).toBe("Inkbox doctor: ok");
+    expect(result.title, result.output).toBe("Inkbox doctor: ok");
   });
 
   it("notes when the vault unlock key is absent and stays quiet when it is set", async () => {
@@ -153,4 +156,14 @@ describe("doctorTools", () => {
     const present = await runDoctor(deps);
     expect(present.output).not.toContain("Vault unlock key not present");
   });
+});
+
+let doctorHome: string;
+beforeEach(() => {
+  doctorHome = mkdtempSync(join(tmpdir(), "inkbox-doctor-"));
+  vi.stubEnv("INKBOX_OPENCODE_HOME", doctorHome);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(doctorHome, { recursive: true, force: true });
 });
