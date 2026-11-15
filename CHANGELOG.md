@@ -3,6 +3,7 @@
 ## 0.2.20 (unreleased)
 
 - Discover and execute current remote tools with complete schemas, native approvals, stable call identity and structured results.
+- Omit absent titles and attachment names from V2 tool results so structured remote responses reach the model.
 - Route contact aliases through canonical remote tools for claimed identities while preserving admin and unclaimed setup.
 - Add explicit final replies for incoming email and direct SMS with durable acceptance and uncertain-outcome protection.
 - Retain native background ownership through producer completion, including source-bound follow-up turns and cancellation.

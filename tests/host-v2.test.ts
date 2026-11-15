@@ -11,6 +11,7 @@ import { createV2Host } from "../src/host/v2-client.js";
 import type { V2Client } from "../src/host/v2-connection.js";
 import { normalizeHistory, projectHistory, readHistory } from "../src/host/v2-history.js";
 import { configurationKey } from "../src/host/v2-rpc.js";
+import { RemoteTools } from "../src/remote-tools.js";
 import plugin from "../src/v2.js";
 
 const dirs: string[] = [];
@@ -24,6 +25,46 @@ afterEach(() => {
 });
 
 describe("V2 history", () => {
+  it("returns JSON-safe remote results without optional titles or attachment names", async () => {
+    vi.stubEnv("INKBOX_OPENCODE_HOME", temporary());
+    const result = {
+      output: "Remote result",
+      metadata: { inkboxRemote: { content: [], structuredContent: { accepted: true } } },
+      attachments: [{ url: "https://example.test/file", mime: "text/plain" }],
+    };
+    vi.spyOn(RemoteTools.prototype, "wrap").mockReturnValue({
+      remote_fixture: { description: "Synthetic tool", args: {}, execute: async () => result },
+    } as any);
+    let tool: any;
+    try {
+      await plugin.setup({
+        options: {},
+        location: { directory: "/fixture" },
+        storage: { get: async () => undefined, set: async () => {} },
+        tool: {
+          transform: async (register: any) =>
+            register({
+              add: (value: any) => {
+                tool = value;
+              },
+            }),
+          list: async () => [],
+          hook: async () => {},
+        },
+        session: {
+          get: async () => ({ location: { directory: "/fixture" } }),
+          hook: async () => {},
+        },
+        rpc: { register: async () => {} },
+      } as any);
+      const output = await tool.execute({}, { signal: new AbortController().signal });
+      expect(output.metadata.inkboxRemote).toEqual(result.metadata.inkboxRemote);
+      expect(JSON.parse(JSON.stringify(output))).toStrictEqual(output);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
   it("returns JSON-safe hello output before the first gateway startup", async () => {
     vi.stubEnv("INKBOX_OPENCODE_HOME", temporary());
     let methods: any;

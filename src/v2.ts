@@ -100,10 +100,13 @@ export default Plugin.define({
                   type: "file" as const,
                   uri: file.url,
                   mime: file.mime,
-                  name: file.filename,
+                  ...(file.filename !== undefined ? { name: file.filename } : {}),
                 })),
               ],
-              metadata: { ...result.metadata, title: result.title },
+              metadata: {
+                ...result.metadata,
+                ...(result.title !== undefined ? { title: result.title } : {}),
+              },
             };
           },
         });
