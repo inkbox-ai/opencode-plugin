@@ -199,3 +199,24 @@ it.each([{ companion: null }, { data: { companion: { phase: "live" } } }])(
     expect(deps.onEvent).toHaveBeenCalledOnce();
   },
 );
+
+it.each([false, true])(
+  "dedupes event replays after a successful dispatch (initial failure: %s)",
+  async (failsFirst) => {
+    const onEvent = vi.fn(async () => true);
+    if (failsFirst) onEvent.mockResolvedValueOnce(false);
+    const url = await start(baseDeps({ onEvent, providers: [testProvider({ name: "inkbox" })] }));
+    const send = (requestId: string) =>
+      fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": requestId },
+        body: JSON.stringify({ id: "evt-mail", event_type: "message.received" }),
+      });
+    if (failsFirst) expect((await send("failed")).status).toBe(500);
+    expect((await send("original")).status).toBe(200);
+    const replay = await send("replay");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ deduped: true });
+    expect(onEvent).toHaveBeenCalledTimes(failsFirst ? 2 : 1);
+  },
+);

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.21
+
+- Deduplicate webhook retries by event ID even when each delivery has a new request ID.
+
 ## 0.2.20 (unreleased)
 
 - Discover and execute current remote tools with complete schemas, native approvals, stable call identity and structured results.
