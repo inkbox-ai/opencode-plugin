@@ -53,7 +53,7 @@ it.each(["create", "update", "delete"])(
           calls.push(request.params);
           result = request.params.requestState
             ? { content: [], structuredContent: { id: "contact" } }
-            : { resultType: "input_required", requestState: "prepared" };
+            : { resultType: "input_required", requestState: "prepared", inputRequests: {} };
         }
         return Response.json({ jsonrpc: "2.0", id: request.id, result });
       }),

@@ -172,7 +172,7 @@ it("submits terminal SMS through the real SDK schema and durable continuation", 
                 delivery_status: "queued",
               },
             }
-          : { resultType: "input_required", requestState: "prepared" };
+          : { resultType: "input_required", requestState: "prepared", inputRequests: {} };
       }
       return Response.json({ jsonrpc: "2.0", id: request.id, result });
     }),
