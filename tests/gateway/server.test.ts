@@ -220,3 +220,17 @@ it.each([false, true])(
     expect(onEvent).toHaveBeenCalledTimes(failsFirst ? 2 : 1);
   },
 );
+
+it("preserves distinct forwarded updates with the same object id", async () => {
+  const deps = baseDeps({ providers: [testProvider({ name: "inkbox" })] });
+  const url = await start(deps);
+  for (const requestId of ["update-1", "update-2"]) {
+    const response = await fetch(`${url}/webhook`, {
+      method: "POST",
+      headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": requestId },
+      body: JSON.stringify({ id: "object-1", event_type: "external.updated" }),
+    });
+    expect(response.status).toBe(200);
+  }
+  expect(deps.onEvent).toHaveBeenCalledTimes(2);
+});

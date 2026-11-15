@@ -95,7 +95,14 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
       verified = true;
     }
     const requestId = headers["x-inkbox-request-id"];
-    const eventId = provider.name === "inkbox" && typeof parsed.id === "string" ? parsed.id : "";
+    const eventId =
+      provider.name === "inkbox" &&
+      ["message.received", "text.received", "imessage.received", "call.ended"].includes(
+        String(parsed.event_type),
+      ) &&
+      typeof parsed.id === "string"
+        ? parsed.id
+        : "";
     const dedupId = eventId ? `inkbox:event:${eventId}` : requestId;
     // Companion retries must reach the durable reservation before each ACK.
     const companion =
