@@ -56,12 +56,11 @@ export class RemoteTools {
           const source = await this.binding(context);
           const catalog = await this.catalog(context, source);
           if (catalog.held) return local(args, context);
-          const operation = this.operation(name, args, context, source);
           return this.result(
             await this.call(
               name,
               aliases[name],
-              contactArguments(name, args, operation),
+              contactArguments(name, args),
               args,
               context,
               source,
@@ -323,7 +322,6 @@ export class RemoteTools {
 export function contactArguments(
   name: string,
   args: Record<string, unknown>,
-  operation: string,
 ): Record<string, unknown> {
   const values = Object.fromEntries(
     Object.entries(args)
@@ -335,7 +333,6 @@ export function contactArguments(
   );
   if (name === "inkbox_lookup_contact" && Object.values(values).filter(Boolean).length !== 1)
     throw new Error("Specify one lookup criterion.");
-  if (name === "inkbox_delete_contact") return { ...values, idempotency_key: operation };
   if (!["inkbox_create_contact", "inkbox_update_contact"].includes(name)) return values;
   const { contact_id, ...fields } = values;
   for (const key of ["emails", "phones"]) {
@@ -349,6 +346,5 @@ export function contactArguments(
   }
   return {
     ...(name === "inkbox_create_contact" ? { contact: fields } : { contact_id, patch: fields }),
-    idempotency_key: operation,
   };
 }
