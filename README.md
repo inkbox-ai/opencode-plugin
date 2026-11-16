@@ -586,3 +586,15 @@ Approval prompts serialize per conversation. Only explicit approval tokens answe
 **Vault migration:** export `INKBOX_OPENCODE_VAULT_KEY` for lazy optional unlocking. Existing custom `vault.keyEnvVar` settings still work. If you retain `INKBOX_VAULT_KEY` or a Vault key in the SDK's global config, the SDK may unlock eagerly; remove that global setting when migrating to the plugin-local variable. Locked metadata listing continues to work. Individual plaintext/TOTP reads recheck the configured identity's grants and refresh the secret; login payloads expose `has_totp`, never the TOTP seed. Existing typed tool names remain supported; `inkbox_credentials_get_secret` adds key-pair/other reads and must be enabled by its exact name.
 
 Doctor distinguishes disabled channels, missing SDK capabilities, disconnected Slack workspaces, incomplete active webhook coverage, and unverified native backend support. An available source permits a bounded read-only native endpoint probe; absent source or tunnel URL remains explicitly unverified. These checks never send messages or modify subscriptions.
+
+### Managed diagnostics
+
+When `INKBOX_HOSTED_MODE=1`, doctor reads the secret-free report named by
+`INKBOX_DIAGNOSTICS_FILE`. Reports must match the identity and harness, belong to
+this user, have private file permissions, and be no more than 60 seconds old.
+Missing, stale, or unhealthy reports do not establish readiness. With
+`INKBOX_DIAGNOSTIC_CONTEXT=terminal`, the signing key is checked in the runtime
+report; the key itself is not needed in the terminal. Runtime processes still
+require their own signing key. Managed delivery does not require ordinary webhook
+subscriptions. Standalone diagnostics are unchanged. These checks do not send
+messages or prove end-to-end delivery.

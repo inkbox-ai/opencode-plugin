@@ -6,6 +6,7 @@ import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
 import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
+import { hostedDiagnostics } from "../hosted-diagnostics.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
 import { hostMajor, incompatibleWrappers } from "./wrappers.js";
@@ -41,6 +42,22 @@ export async function runDoctor(
   deps: DoctorDeps = {},
 ): Promise<{ ok: boolean; findings: Finding[] }> {
   const print = deps.print ?? ((line: string) => console.log(line));
+  const hosted = hostedDiagnostics(
+    config.identity,
+    "opencode",
+    config.signingKey,
+    deps.env ?? process.env,
+  );
+  if (hosted) {
+    print(JSON.stringify(hosted, null, 2));
+    return {
+      ok: hosted.ready,
+      findings: hosted.checks.map((check) => ({
+        severity: check.ok ? "info" : "error",
+        message: check.detail,
+      })),
+    };
+  }
   const findings: Finding[] = [];
   const add = (severity: Severity, message: string) => findings.push({ severity, message });
 
