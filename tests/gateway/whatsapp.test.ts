@@ -984,7 +984,9 @@ it.each([false, true])(
     const args = remove
       ? { reactionId: "revision-1", idempotencyKey: "decode-key" }
       : { messageId: source, customEmoji: "👍", idempotencyKey: "decode-key" };
-    f.fetch.mockResolvedValueOnce(ok({}, 201));
+    f.fetch.mockResolvedValueOnce(
+      new Response("{", { status: 201, headers: { "Content-Type": "application/json" } }),
+    );
     await expect(f.execute(tool, args)).rejects.toThrow("not confirmed");
     const started = createStateStore().read().whatsappSends;
     expect(Object.values(started as object)).toEqual([
