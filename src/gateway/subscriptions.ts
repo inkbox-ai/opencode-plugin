@@ -13,11 +13,13 @@ export const CALL_MEDIA_WS_PATH = "/phone/media/ws";
 export const MAILBOX_EVENT_TYPES = ["message.received", "message.bounced", "message.failed"];
 export const PHONE_EVENT_TYPES = [
   "text.received",
+  "text.transcription_finished",
   "text.delivery_failed",
   "text.delivery_unconfirmed",
 ];
 export const IMESSAGE_EVENT_TYPES = [
   "imessage.received",
+  "imessage.transcription_finished",
   "imessage.reaction_received",
   "imessage.delivery_failed",
 ];

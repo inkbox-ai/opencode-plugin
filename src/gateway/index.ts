@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
+import { pollVoiceNote, VoiceNoteInbox } from "../voice-notes.js";
 import {
   UnsupportedWhatsAppGroupSDK,
   whatsappControlText,
@@ -280,6 +282,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   // Start the local webhook server first so the tunnel has something to
   // forward to; dispatch is wired below once we can consume messages.
+  const voiceNotes = new VoiceNoteInbox({
+    path: `${state.filePath}.voice-notes-${createHash("sha256")
+      .update(JSON.stringify([opts.config.identity, opts.config.baseUrl]))
+      .digest("hex")}.json`,
+    poll: (event) =>
+      pollVoiceNote(event, { ...opts.config, identity: () => opts.inkbox.getIdentity() }),
+    deliver: async (saved) => {
+      const { __voiceEnvelope, ...body } = saved;
+      const result = await dispatchRegular({ ...__voiceEnvelope, body, headers: {} });
+      if (result === false) throw new Error("Voice-note dispatch was not accepted.");
+    },
+    warn: () => logger.warn("voice_note.delivery_retained", {}),
+  });
+
   const server = createWebhookServer({
     config: opts.config,
     logger,
@@ -415,7 +431,25 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         })
       : undefined;
 
+  voiceNotes.recover();
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
+    if (
+      event.provider === "inkbox" &&
+      event.verified &&
+      (await voiceNotes.accept({
+        ...event.body,
+        __voiceEnvelope: {
+          provider: event.provider,
+          verified: true,
+          eventType: event.eventType,
+          requestId: event.requestId,
+        },
+      }))
+    )
+      return true;
+    return dispatchRegular(event);
+  }
+  async function dispatchRegular(event: VerifiedEvent): Promise<boolean | undefined> {
     if (a2a.handles(event)) return a2a.handle(event);
     const wrapped = wrapSessions();
     return dispatchEvent(
@@ -821,6 +855,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     }),
     ready: () => transport.ready?.() ?? true,
     async close() {
+      voiceNotes.close();
       sessions.freezeAdmission?.();
       await escalation
         .close()

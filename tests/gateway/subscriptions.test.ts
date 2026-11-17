@@ -733,3 +733,9 @@ it("keeps query-distinct A2A receivers when mixed WhatsApp reaction registration
   );
   expect(subscriptions.create).not.toHaveBeenCalled();
 });
+
+it("automatically subscribes to transcription completion for all voice-note channels", () => {
+  expect(PHONE_EVENT_TYPES).toContain("text.transcription_finished");
+  expect(IMESSAGE_EVENT_TYPES).toContain("imessage.transcription_finished");
+  expect(WHATSAPP_EVENTS).toContain("whatsapp.transcription_finished");
+});

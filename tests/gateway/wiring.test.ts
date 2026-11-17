@@ -1370,3 +1370,64 @@ it("does not consume an AUTO group approval addressed to another native mention 
   await waInput("allow", "+15550000001", "literal-approval", true);
   expect(await next).toBe("allow");
 });
+
+it("holds a pending voice note while the webhook receiver accepts completion, then wakes once", async () => {
+  await start();
+  vi.useFakeTimers();
+  try {
+    const message = {
+      id: "voice-source",
+      conversation_id: "conversation-voice",
+      direction: "inbound",
+      media: [{ id: "audio-1", transcription: { status: "pending" } }],
+    };
+    const envelope = {
+      provider: "inkbox",
+      verified: true,
+      headers: {},
+      eventType: "imessage.received",
+      body: {
+        event_type: "imessage.received",
+        data: { message },
+        message: {
+          chatKey: "contact-voice",
+          from: "+15555550123",
+          channel: "imessage",
+          text: "Original caption",
+          rawText: "Original caption",
+          mediaPaths: [],
+        },
+      },
+    };
+    expect(await hooks.server.onEvent(envelope)).toBe(true);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    const completion = {
+      ...envelope,
+      eventType: "imessage.transcription_finished",
+      body: {
+        ...envelope.body,
+        event_type: "imessage.transcription_finished",
+        data: {
+          message: {
+            ...message,
+            media: [
+              {
+                id: "audio-1",
+                transcription: { status: "completed", text: "Please move the review." },
+              },
+            ],
+          },
+        },
+      },
+    };
+    await hooks.server.onEvent(completion);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+    await hooks.server.onEvent(completion);
+    await hooks.server.onEvent(envelope);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});

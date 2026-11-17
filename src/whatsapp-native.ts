@@ -7,6 +7,7 @@ import { WhatsAppPreflightError, whatsappDestination } from "./whatsapp-groups.j
 
 export const WHATSAPP_EVENTS = [
   "whatsapp.received",
+  "whatsapp.transcription_finished",
   "whatsapp.reaction_received",
   "whatsapp.sent",
   "whatsapp.delivered",

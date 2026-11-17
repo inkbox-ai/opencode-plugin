@@ -2,6 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
+import { voiceNoteContext } from "../voice-notes.js";
 import {
   isWhatsAppGroup,
   mentionContext,
@@ -340,7 +341,7 @@ async function handleInbound(
             typeof info.resource?.body !== "string"),
         subject: info.subject,
       },
-      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
+      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${voiceNoteContext(info.resource)}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
       target,
     );
     deps.logger.info("companion.accepted", {
@@ -444,7 +445,7 @@ async function handleInbound(
       : {}),
     ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
-    text: info.text,
+    text: [info.text, voiceNoteContext(info.resource)].filter(Boolean).join("\n\n"),
     rawText: info.text,
     mediaPaths,
     ...(participants > 1
@@ -956,6 +957,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     : await renderWhatsAppReplyContext(identity, message, deps.contacts);
   const sourceWithReply = { ...source, ...(replyContext ? { replyContext } : {}) };
   text = await mentionContext(text, source.mentions, identity.agentHandle, deps.contacts);
+  text = [text, voiceNoteContext(message)].filter(Boolean).join("\n\n");
   if (companion) {
     const acceptCompanion = deps.sessions.acceptCompanion;
     if (!acceptCompanion) throw new Error("WhatsApp Companion receiver is unavailable.");

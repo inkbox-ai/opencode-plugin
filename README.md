@@ -390,6 +390,13 @@ mirror so `doctor` can report configuration drift.
 `apiKey`, `identity`, `baseUrl`, and `signingKey` resolve in order: plugin
 option → env var → `~/.inkbox/config`.
 
+
+### Voice-note transcription
+
+Incoming MMS, iMessage, and WhatsApp audio keeps its original attachment and caption. When a transcript is pending, the plugin waits up to 60 seconds for a completion notification, then reads the message once if needed. That fallback read is bounded to 10 seconds. A completed transcript reaches the agent as explicitly labeled voice-note context, not as an ordinary typed message.
+
+If transcription fails, is skipped, or remains unavailable after the wait and read, the original message follows the usual attachment-handling path. Completion notifications do not create a second turn. The plugin registers the three channel-specific transcription completion events automatically alongside its existing message subscriptions. Pending messages retain their original deadline across restarts.
+
 ## Inbound gateway (email/text/calls come to the agent)
 
 Beyond outbound tools, the plugin can run an **inbound gateway**: a long-lived
