@@ -17,7 +17,7 @@
 
 ## Prerequisites
 
-- **Supported hosts:** OpenCode 1.17.18–1.x or 2.0.26–2.0.x. Verified on 1.17.18, 1.18.35, 1.19.0, and 2.0.26. V1 and V2 use separate plugin entrypoints; the installer selects the installed host version.
+- **Supported hosts:** OpenCode 1.17.18–1.x or 2.0.26–2.0.x. Verified on 1.17.18, 1.18.35, 1.19.0, and 2.0.26. V1 and V2 use separate plugin entrypoints; the installer selects the installed host version. V2 loader checks cover the minimum supported release and the newest release within the package’s declared V2 range.
 - **opencode installed and logged in.** The plugin loads into real opencode
   sessions and the gateway drives an `opencode serve` — install it
   ([opencode.ai](https://opencode.ai)) and authenticate a model provider.

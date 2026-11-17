@@ -88,7 +88,12 @@ jobs:
           cache: pnpm
       - run: |
           bash tests/ci/npm_with_retry.sh ci
-      - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@${{ matrix.version }}
+      - name: Install selected supported V2 host
+        env:
+          HOST_VERSION: ${{ matrix.version }}
+        run: |
+          HOST_PACKAGE=$(node scripts/opencode-v2-package.mjs "$HOST_VERSION")
+          bash tests/ci/npm_with_retry.sh install -g "$HOST_PACKAGE"
       - run: pnpm build
       - name: Packed V2 host contract
         run: |
