@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallEndedWebhookPayload } from "@inkbox/sdk";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createBurstBuffer } from "../../src/gateway/burst.js";
 import { DeliveryWork } from "../../src/gateway/delivery-work.js";
 import { saveHostedCall } from "../../src/gateway/hosted-call-registry.js";
@@ -10,6 +10,7 @@ import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   delete process.env.INKBOX_OPENCODE_HOME;
   for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -147,4 +148,74 @@ it("keeps concurrent and merged turn references independent", async () => {
   expect(work.status("merged")).toBe("pending");
   store.updateTurn("one", { state: "delivered" });
   expect(work.status("merged")).toBe("completed");
+});
+
+it("keeps uncertain work protected but excludes settled failures from activity", async () => {
+  const { work, store } = setup();
+  await work.dispatch("failed-turn", async () => {
+    work.state.saveTurn(turn("failed"));
+    return true;
+  });
+  store.updateTurn("failed", { state: "failed", executionFenced: true });
+  expect(work.status("failed-turn")).toBe("failed");
+  expect(work.activity()).toEqual({ pending: 0, uncertain: 0 });
+  store.updateTurn("failed", { uncertainStage: "delivery" });
+  expect(work.activity()).toEqual({ pending: 0, uncertain: 1 });
+});
+it("retires only expired completed receipts at capacity and retains duplicate protection", async () => {
+  const { work, store } = setup();
+  const records = Object.fromEntries(
+    Array.from({ length: 20000 }, (_, i) => [
+      String(i),
+      { turns: [], routed: true, completed: true, completedAt: Date.now() - 15 * 86400_000 },
+    ]),
+  );
+  records["1"]!.completedAt = Date.now();
+  store.update({ deliveryWork: records });
+  expect(await work.dispatch("new", async () => true)).toBe("completed");
+  expect(work.status("0")).toBe("absent");
+  expect(work.status("1")).toBe("completed");
+  const route = async () => {
+    throw new Error("Duplicate must not run");
+  };
+  expect(await work.dispatch("1", route)).toBe("completed");
+});
+
+it("quarantines retained uncertainty without discarding duplicate protection or live work", async () => {
+  const { work, store } = setup();
+  await work.dispatch("event", async () => {
+    work.state.saveTurn(turn("one"));
+    return true;
+  });
+  expect(() => work.quarantine("event")).toThrow("active work");
+  store.updateTurn("one", { state: "failed", uncertainStage: "delivery" });
+  expect(work.activity().uncertain).toBe(1);
+  work.quarantine("event");
+  expect(work.status("event")).toBe("failed");
+  expect(work.activity()).toEqual({ pending: 0, uncertain: 0 });
+  expect(
+    await work.dispatch("event", async () => {
+      throw new Error("Duplicate");
+    }),
+  ).toBe("failed");
+});
+
+it("starts the retention clock for legacy completed receipts even at capacity", async () => {
+  const { work, store } = setup();
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  store.update({
+    deliveryWork: Object.fromEntries(
+      Array.from({ length: 20000 }, (_, i) => [
+        String(i),
+        { turns: [], routed: true, completed: true },
+      ]),
+    ),
+  });
+  await expect(work.dispatch("new", async () => true)).rejects.toThrow("capacity");
+  expect(
+    (store.read().deliveryWork as Record<string, { completedAt: number }>)["0"]!.completedAt,
+  ).toBe(now);
+  vi.mocked(Date.now).mockReturnValue(now + 15 * 86400_000);
+  expect(await work.dispatch("new", async () => true)).toBe("completed");
 });

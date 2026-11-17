@@ -4,6 +4,9 @@
 
 ### Changed
 - Require Inkbox SDK 0.7.39 for durable messaging and remote tool handling.
+- Keep remote tool discovery available across long sessions with bounded catalog eviction.
+- Retire completed delivery receipts after fourteen days while retaining unresolved outcomes and duplicate protection.
+- Exclude settled failures from running work.
 
 ## 0.2.25
 

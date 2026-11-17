@@ -260,6 +260,7 @@ export interface GatewayHandle {
     event: VerifiedEvent,
   ): Promise<import("./delivery-work.js").DeliveryState>;
   eventState?(id: string): import("./delivery-work.js").DeliveryState;
+  quarantineDelivery?(id: string): void;
   activity?(): { pending: number; uncertain: number };
   ready?(): boolean;
   publicUrl: string;

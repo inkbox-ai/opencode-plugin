@@ -807,6 +807,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       return deliveries.dispatch(id, () => onEvent(event), reference);
     },
     eventState: (id) => deliveries.status(id),
+    quarantineDelivery: (id: string) => deliveries.quarantine(id),
     activity: () => ({
       ...deliveries.activity(),
       native: state

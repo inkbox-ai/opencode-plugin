@@ -191,3 +191,19 @@ describe("native remote relay", () => {
     expect(h.calls).toHaveLength(0);
   });
 });
+
+it("evicts old discovery catalogs and keeps recent native bindings usable", async () => {
+  const h = harness();
+  const relay = h.relay as unknown as { catalogs: Map<string, Promise<unknown>> };
+  const first = Promise.resolve({ tools: [] });
+  for (let i = 0; i < 4096; i++) relay.catalogs.set(`old-${i}`, first);
+  expect(await h.execute("inkbox_remote_tools", {}, "capacity")).toMatchObject({
+    tools: h.descriptors,
+  });
+  expect(relay.catalogs.size).toBe(4096);
+  expect(relay.catalogs.has("old-0")).toBe(false);
+  expect(await h.execute("inkbox_remote_tools", {}, "recent")).toMatchObject({
+    tools: h.descriptors,
+  });
+  expect(h.client.whoami).toHaveBeenCalledTimes(1);
+});

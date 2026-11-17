@@ -205,8 +205,7 @@ export class RemoteTools {
     const key = hash([ctx.sessionID, source.parentID]);
     let pending = this.catalogs.get(key);
     if (!pending) {
-      if (this.catalogs.size >= 4096)
-        throw new Error("Remote catalog capacity reached; finish and reconnect native sessions.");
+      if (this.catalogs.size >= 4096) this.catalogs.delete(this.catalogs.keys().next().value!);
       pending = (async () => {
         const client = await this.runtime.getClient();
         const account = await client.whoami();
@@ -227,6 +226,9 @@ export class RemoteTools {
         });
         return { remote, tools: await remote.refresh({ signal: ctx.abort }) };
       })();
+      this.catalogs.set(key, pending);
+    } else {
+      this.catalogs.delete(key);
       this.catalogs.set(key, pending);
     }
     const result = await pending;

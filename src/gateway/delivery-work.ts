@@ -10,6 +10,8 @@ type Receipt = {
   outstanding?: number;
   epoch?: string;
   completed?: boolean;
+  completedAt?: number;
+  quarantined?: boolean;
   hostedCall?: { identityId: string; callId: string };
 };
 export type DeliveryState = "absent" | "pending" | "completed" | "failed" | "uncertain";
@@ -103,6 +105,13 @@ export class DeliveryWork {
     if (!id || id.length > 256) throw new Error("A bounded delivery identity is required.");
     const records = this.receipts();
     if (records[id]) return this.status(id);
+    const now = Date.now();
+    for (const [key, receipt] of Object.entries(records)) {
+      if (!receipt.completed && !receipt.quarantined) continue;
+      receipt.completedAt ??= now;
+      if (receipt.completedAt < now - 14 * 86400_000) delete records[key];
+    }
+    this.base.update({ deliveryWork: records });
     if (Object.keys(records).length >= 20000) throw new Error("Delivery receipt capacity reached.");
     records[id] = { turns: [], routed: false, ...(hostedCall ? { hostedCall } : {}) };
     this.base.update({ deliveryWork: records });
@@ -131,6 +140,7 @@ export class DeliveryWork {
     const state = this.stateOf(id, receipt, snapshot.turns);
     if (state === "completed" && receipt && !receipt.completed) {
       receipt.completed = true;
+      receipt.completedAt = Date.now();
       this.base.update({ deliveryWork: records });
     }
     return state;
@@ -142,6 +152,7 @@ export class DeliveryWork {
   ): DeliveryState {
     if (!receipt) return "absent";
     if (receipt.completed) return "completed";
+    if (receipt.quarantined) return "failed";
     if (this.active.has(id)) return "pending";
     if (receipt.failed || !receipt.routed) return "uncertain";
     if ((receipt.outstanding ?? 0) > 0 && receipt.epoch !== this.epoch) return "uncertain";
@@ -164,6 +175,33 @@ export class DeliveryWork {
     }
     return pending ? "pending" : "completed";
   }
+  quarantine(id: string): void {
+    const records = this.receipts();
+    const receipt = records[id];
+    if (!receipt) return;
+    const snapshot = this.base.read();
+    if (
+      this.active.has(id) ||
+      ((receipt.outstanding ?? 0) > 0 && receipt.epoch === this.epoch) ||
+      receipt.turns.some((turnId) => {
+        const turn = snapshot.turns[turnId];
+        return (
+          turn &&
+          !["delivered", "failed", "interrupted", "context_only"].includes(turn.state) &&
+          !(turn.state === "completed" && !turn.deliver)
+        );
+      })
+    )
+      throw new Error("Delivery still has active work.");
+    if (receipt.hostedCall) {
+      const call = getHostedCall(receipt.hostedCall.identityId, receipt.hostedCall.callId);
+      if (call && !["completed", "failed"].includes(call.state))
+        throw new Error("Delivery still has active call work.");
+    }
+    receipt.quarantined = true;
+    receipt.completedAt = Date.now();
+    this.base.update({ deliveryWork: records });
+  }
   activity(): { pending: number; uncertain: number } {
     let pending = 0,
       uncertain = 0;
@@ -175,10 +213,11 @@ export class DeliveryWork {
       const status = this.stateOf(id, receipt, snapshot.turns);
       if (status === "completed" && !receipt.completed) {
         receipt.completed = true;
+        receipt.completedAt = Date.now();
         changed = true;
       }
       if (status === "pending") pending++;
-      if (status === "uncertain" || status === "failed") uncertain++;
+      if (status === "uncertain") uncertain++;
     }
     if (changed) this.base.update({ deliveryWork: snapshot.deliveryWork });
     return { pending, uncertain };
