@@ -1,6 +1,6 @@
 {
   "name": "@inkbox/opencode-plugin",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "private": true,
   "description": "Inkbox for opencode \u2014 give your agent an email address, a phone number (SMS/MMS + voice), iMessage, dedicated WhatsApp, contacts, notes, and an encrypted credential vault.",
   "license": "MIT",
@@ -64,7 +64,7 @@
     "opencode": ">=1.17.18 <2.0.0 || >=2.0.26 <2.1.0"
   },
   "dependencies": {
-    "@inkbox/sdk": ">=0.7.38 <1.0.0",
+    "@inkbox/sdk": ">=0.7.39 <1.0.0",
     "@opencode-ai/sdk": ">=1.17.18 <1.19.0",
     "@opencode/client": "2.0.26",
     "@opencode/plugin": "2.0.26",
@@ -92,7 +92,7 @@
   "packageManager": "pnpm@10.28.0",
   "pnpm": {
     "overrides": {
-      "@inkbox/sdk": "github:inkbox-ai/inkbox#b465550e4563ae3b75443ab44d269d15a6238132&path:/sdk/typescript"
+      "@inkbox/sdk": "github:inkbox-ai/inkbox#84386f5ea022a9594fb901894f927ee444c2cf91&path:/sdk/typescript"
     }
   }
 }
