@@ -34,7 +34,7 @@ import {
   mentionsAgent,
   sameAuthor,
 } from "./response-policy.js";
-import { createWebhookServer } from "./server.js";
+import { createWebhookServer, type WebhookAdmission } from "./server.js";
 import { createSessionManager, unsupportedWhatsAppTarget } from "./sessions.js";
 import { createStateStore } from "./state.js";
 import { reconcileSubscriptions } from "./subscriptions.js";
@@ -51,7 +51,7 @@ export interface StartGatewayOptions {
   ownsProcess: boolean;
   logger?: GatewayLogger;
   permissionInventory?: NativePermissionInventory;
-  admitVerified?(event: VerifiedEvent): Promise<boolean>;
+  admitVerified?(event: VerifiedEvent): Promise<boolean | WebhookAdmission>;
   subscriptionsManagedExternally?: boolean;
 }
 
@@ -284,7 +284,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     config: opts.config,
     logger,
     dedup,
-    onEvent: (event) => (opts.admitVerified ? opts.admitVerified(event) : onEvent(event)),
+    onEvent,
+    admitVerified: opts.admitVerified,
     ...(callBridge
       ? { onCallUpgrade: (req, socket, head) => void callBridge.handleUpgrade(req, socket, head) }
       : {}),

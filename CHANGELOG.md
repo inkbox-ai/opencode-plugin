@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.25
+
+- Preserve durable admission response bodies and route retries through the admission callback.
+
 ## 0.2.24
 
 - Make managed diagnostics use a recent runtime health report instead of terminal signing-key or ordinary webhook settings. Keep standalone checks and report unavailable runtime evidence.

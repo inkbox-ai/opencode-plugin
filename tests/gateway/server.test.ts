@@ -67,6 +67,51 @@ describe("GET /health", () => {
 });
 
 describe("POST /webhook", () => {
+  it("returns durable admission receipts for every concurrent retry", async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const receipt = { receipt_id: "receipt_1", state: "accepted" };
+    const admitVerified = vi.fn(async () => {
+      await barrier;
+      return { status: 202 as const, body: receipt };
+    });
+    const deps = baseDeps({ admitVerified });
+    const url = await start(deps);
+    const send = () =>
+      fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "same-event" },
+        body: JSON.stringify({ event_type: "message.received" }),
+      });
+    const first = send();
+    const duplicate = send();
+    await vi.waitFor(() => expect(admitVerified).toHaveBeenCalledTimes(2));
+    release();
+    for (const response of await Promise.all([first, duplicate])) {
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toEqual(receipt);
+    }
+    expect(deps.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("retries failed external admission without falling back to local dispatch", async () => {
+    const admitVerified = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const deps = baseDeps({ admitVerified });
+    const url = await start(deps);
+    for (const status of [500, 200, 200]) {
+      const response = await fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "same-event" },
+        body: "{}",
+      });
+      expect(response.status).toBe(status);
+    }
+    expect(admitVerified).toHaveBeenCalledTimes(3);
+    expect(deps.onEvent).not.toHaveBeenCalled();
+  });
+
   it("does not acknowledge concurrent Companion retries before durable acceptance", async () => {
     let release!: () => void;
     const barrier = new Promise<void>((resolve) => {
