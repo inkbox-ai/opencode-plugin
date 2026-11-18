@@ -112,6 +112,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   };
 
   const sessions = createSessionManager({
+    resolveVoiceNote: (event, deadline) => voiceNotes.resolve(event, deadline),
     opencode: opts.opencode,
     inkbox: opts.inkbox,
     config: opts.config,

@@ -300,6 +300,12 @@ async function handleInbound(
     await deps.sessions.acceptCompanion(
       {
         metadata,
+        ...(Array.isArray(info.resource?.media) &&
+        info.resource.media.some(
+          (item) => item && typeof item === "object" && "transcription" in item,
+        )
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
         rawText: info.text,
@@ -341,7 +347,7 @@ async function handleInbound(
             typeof info.resource?.body !== "string"),
         subject: info.subject,
       },
-      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${voiceNoteContext(info.resource)}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
+      `${info.from} at ${str(info.resource?.created_at) ?? str(event.body.timestamp) ?? "unknown time"}: ${info.text}\n${JSON.stringify(info.resource?.media ?? info.resource?.attachments ?? [])}`,
       target,
     );
     deps.logger.info("companion.accepted", {

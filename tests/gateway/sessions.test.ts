@@ -24,6 +24,7 @@ import { createSessionManager, extractText } from "../../src/gateway/sessions.js
 import { createStateStore, type DurableTurn } from "../../src/gateway/state.js";
 import type { InboundMessage } from "../../src/gateway/types.js";
 import * as slackActivity from "../../src/slack-activity.js";
+import { VoiceNoteInbox } from "../../src/voice-notes.js";
 import { prepareWhatsApp, reserveWhatsAppIngress } from "../../src/whatsapp-native.js";
 import fixture from "../fixtures/companion-v1.json" with { type: "json" };
 
@@ -4330,5 +4331,130 @@ it("counts source-keyed quotes in the existing WhatsApp burst character limit", 
     ).toBe(true);
   } finally {
     await h.mgr.close();
+  }
+});
+
+it("keeps a pending voice initializer ahead of later live hydration", async () => {
+  let voices!: VoiceNoteInbox;
+  const d = makeManager(undefined, (deps) =>
+    createSessionManager({
+      ...deps,
+      resolveVoiceNote: (event, deadline) => voices.resolve(event, deadline),
+    }),
+  );
+  const file = path.join(d.dir, "voice-resolution.json");
+  voices = new VoiceNoteInbox({
+    path: file,
+    poll: vi.fn(async () => undefined),
+    deliver: vi.fn(async () => {}),
+    warn: vi.fn(),
+  });
+  const loadInitialization = vi.fn(async () => snapshot());
+  d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+  const init = companion();
+  init.voiceNoteEvent = {
+    event_type: "text.received",
+    data: {
+      text_message: {
+        id: "source-1",
+        conversation_id: "conversation-1",
+        direction: "inbound",
+        text: "hello",
+        media: [{ id: "voice-one", transcription: { status: "pending" } }],
+      },
+    },
+  };
+  init.voiceNoteDeadline = Date.now() + 60_000;
+  try {
+    await d.mgr.acceptCompanion(init, "hello");
+    await vi.waitFor(() => expect(fs.existsSync(file)).toBe(true));
+    await d.mgr.acceptCompanion(companion("live", 2), "Next live source");
+    expect(d.state.listTurns()).toHaveLength(2);
+    expect(loadInitialization).not.toHaveBeenCalled();
+    expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+    const completed = structuredClone(init.voiceNoteEvent);
+    completed.event_type = "text.transcription_finished";
+    completed.data.text_message.media[0].transcription = {
+      status: "completed",
+      text: "Recorded source update.",
+    };
+    await voices.accept(completed);
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2));
+    expect(loadInitialization).toHaveBeenCalledTimes(1);
+    const prompts = d.opencode.session.promptAsync.mock.calls.map((call) => JSON.stringify(call));
+    expect(prompts[0]).toContain("Recorded source update.");
+    expect(prompts[0].match(/Recorded source update\./g)).toHaveLength(1);
+    expect(prompts[1]).toContain("Next live source");
+    await voices.accept(completed);
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+  } finally {
+    voices.close();
+    await d.mgr.close();
+  }
+});
+
+it("restarts a Companion initializer after one persisted voice fallback without another poll", async () => {
+  let voices!: VoiceNoteInbox;
+  const d = makeManager(undefined, (deps) =>
+    createSessionManager({
+      ...deps,
+      resolveVoiceNote: (event, deadline) => voices.resolve(event, deadline),
+    }),
+  );
+  const poll = vi.fn(async () => undefined);
+  voices = new VoiceNoteInbox({
+    path: path.join(d.dir, "voice-resolution.json"),
+    poll,
+    deliver: vi.fn(async () => {}),
+    warn: vi.fn(),
+  });
+  let release!: () => void;
+  const loadInitialization = vi.fn(
+    () =>
+      new Promise<ReturnType<typeof snapshot>>((resolve) => {
+        release = () => resolve(snapshot());
+      }),
+  );
+  d.inkbox.getClient.mockResolvedValue({ companion: { loadInitialization } });
+  const init = companion();
+  init.voiceNoteDeadline = Date.now() - 1;
+  init.voiceNoteEvent = {
+    event_type: "text.received",
+    data: {
+      text_message: {
+        id: "source-1",
+        conversation_id: "conversation-1",
+        direction: "inbound",
+        text: "hello",
+        media: [{ id: "voice-one", transcription: { status: "pending" } }],
+      },
+    },
+  };
+  await d.mgr.acceptCompanion(init, "hello");
+  await vi.waitFor(() => expect(loadInitialization).toHaveBeenCalledOnce());
+  expect(poll).toHaveBeenCalledOnce();
+  expect(d.state.listTurns()[0].companion?.voiceNoteResolved).toBe(true);
+  await d.mgr.close();
+  voices.close();
+  release();
+  const resolve = vi.fn(async () => {
+    throw new Error("A saved resolution must not wait again");
+  });
+  const restarted = makeManager(d.dir, (deps) =>
+    createSessionManager({ ...deps, resolveVoiceNote: resolve }),
+  );
+  restarted.inkbox.getClient.mockResolvedValue({
+    companion: { loadInitialization: vi.fn(async () => snapshot()) },
+  });
+  try {
+    await restarted.mgr.catchUp();
+    await vi.waitFor(() => expect(restarted.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    expect(JSON.stringify(restarted.opencode.session.promptAsync.mock.calls[0])).toContain(
+      "transcript unavailable",
+    );
+    expect(resolve).not.toHaveBeenCalled();
+    expect(poll).toHaveBeenCalledOnce();
+  } finally {
+    await restarted.mgr.close();
   }
 });

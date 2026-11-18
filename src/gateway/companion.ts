@@ -22,6 +22,9 @@ export interface CompanionTurn {
   initialization: boolean;
   content?: string;
   mailBodyPending?: boolean;
+  voiceNoteEvent?: import("../voice-notes.js").VoiceEvent;
+  voiceNoteDeadline?: number;
+  voiceNoteResolved?: boolean;
   subject?: string;
   environment?: string;
   rawText?: string;
