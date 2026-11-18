@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.20 (unreleased)
+## 0.2.27 (unreleased)
 
 - Keep reaction outcomes unconfirmed when the response has no receipt ID, including when response parsing tolerates missing fields.
 - Exercise the newest supported V2 host in loader checks without silently expanding the declared host-version range.
