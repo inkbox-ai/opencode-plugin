@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   pollVoiceNote,
+  snapshotHasVoiceNote,
   type VoiceEvent,
   VoiceNoteInbox,
   voiceNoteContext,
@@ -325,4 +326,26 @@ it("does not label real video as an unavailable voice note", () => {
   expect(voiceNoteContext(message)).toBe("");
   message.media[0].transcription.error_code = "unsupported_audio";
   expect(voiceNoteContext(message)).toContain("transcript unavailable");
+});
+
+it("recognizes generated snapshot notes only on the exact trigger and caption", () => {
+  const message = received("imessage", ["completed"]).data.message;
+  const note =
+    "[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nMove the review to Thursday.";
+  const entry = { id: message.id, isTrigger: true, text: `Original caption\n\n${note}` };
+  expect(snapshotHasVoiceNote(message, [entry], "Original caption")).toBe(true);
+  expect(
+    snapshotHasVoiceNote(message, [{ ...entry, id: "other-source" }], "Original caption"),
+  ).toBe(false);
+  expect(snapshotHasVoiceNote(message, [{ ...entry, isTrigger: false }], "Original caption")).toBe(
+    false,
+  );
+  expect(snapshotHasVoiceNote(message, [entry], `Original caption\n\n${note}`)).toBe(false);
+  expect(
+    snapshotHasVoiceNote(
+      message,
+      [{ ...entry, text: "Original caption\n[Voice note 1]" }],
+      "Original caption",
+    ),
+  ).toBe(false);
 });

@@ -3820,8 +3820,8 @@ it("submits each captionless WhatsApp attachment to the host and sends plain fin
   }
 });
 
-function whatsappCompanionFixture() {
-  const d = makeManager();
+function whatsappCompanionFixture(factory = createSessionManager) {
+  const d = makeManager(undefined, factory);
   const phone = "+15550000001";
   d.companionSenderAllowed.mockImplementation(async (from) => from === phone);
   d.identity.getWhatsAppConversation.mockResolvedValue({
@@ -4458,3 +4458,83 @@ it("restarts a Companion initializer after one persisted voice fallback without 
     await restarted.mgr.close();
   }
 });
+
+it.each([false, true])(
+  "waits for WhatsApp Companion speech in its ordered consumer (snapshot labels=%s)",
+  async (labelled) => {
+    let voices!: VoiceNoteInbox;
+    const d = whatsappCompanionFixture((deps) =>
+      createSessionManager({
+        ...deps,
+        resolveVoiceNote: (value, deadline) => voices.resolve(value, deadline),
+      }),
+    );
+    const file = path.join(d.dir, "whatsapp-voice.json");
+    const poll = vi.fn(async () => undefined);
+    voices = new VoiceNoteInbox({ path: file, poll, deliver: vi.fn(), warn: vi.fn() });
+    const header =
+      '[Current WhatsApp source source-1; native_agent_mentioned=true; mentions=[]]\nLocal media: ["/tmp/synthetic-voice.ogg"]';
+    d.c.voiceNoteEvent = {
+      event_type: "whatsapp.received",
+      data: {
+        message: {
+          id: "source-1",
+          content: "hello",
+          conversation_id: "conversation-1",
+          direction: "inbound",
+          media: [{ id: "voice-one", transcription: { status: "pending" } }],
+        },
+      },
+    };
+    d.c.voiceNoteDeadline = Date.now() + 60_000;
+    const page: any = await d.loadInitialization();
+    d.loadInitialization.mockClear();
+    if (labelled) {
+      const text =
+        "hello\n\n[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nRecorded group update.";
+      page.entries.find((entry: any) => entry.isTrigger).text = text;
+      page.text = text;
+    }
+    d.loadInitialization.mockResolvedValue(page);
+    try {
+      await d.mgr.acceptCompanion(d.c, header);
+      await vi.waitFor(() => expect(fs.existsSync(file)).toBe(true));
+      await d.mgr.acceptCompanion(
+        {
+          ...d.c,
+          sourceId: "source-2",
+          initialization: false,
+          voiceNoteEvent: undefined,
+          voiceNoteDeadline: undefined,
+          metadata: { ...d.c.metadata, phase: "live", sequence: 2 },
+          whatsappSource: { ...d.c.whatsappSource!, messageId: "source-2" },
+        },
+        "Later typed group update",
+      );
+      expect(d.loadInitialization).not.toHaveBeenCalled();
+      expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
+      const done = structuredClone(d.c.voiceNoteEvent);
+      done.event_type = "whatsapp.transcription_finished";
+      done.data.message.media[0].transcription = {
+        status: "completed",
+        text: "Recorded group update.",
+      };
+      await voices.accept(done);
+      await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2));
+      const prompts = d.opencode.session.promptAsync.mock.calls.map((call) => JSON.stringify(call));
+      expect(prompts[0].match(/Recorded group update\./g)).toHaveLength(1);
+      expect(prompts[1]).toContain("Later typed group update");
+      const original = d.state
+        .listTurns()
+        .find((turn) => turn.companion?.sourceId === "source-1" && turn.kind !== "capture")!;
+      expect(original.companion?.content).toBe(header);
+      expect(original.companion?.whatsappSource).toEqual(d.c.whatsappSource);
+      expect(poll).not.toHaveBeenCalled();
+      await voices.accept(done);
+      expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    } finally {
+      voices.close();
+      await d.mgr.close();
+    }
+  },
+);

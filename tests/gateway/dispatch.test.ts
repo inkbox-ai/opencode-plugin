@@ -750,3 +750,67 @@ describe("dispatchEvent call completion", () => {
     expect(onHostedCallEnded).toHaveBeenCalledWith(ended.body);
   });
 });
+
+it("hands WhatsApp Companion voice metadata to the durable consumer without eager fallback prose", async () => {
+  const deps = makeDeps();
+  const phone = "+15555550101";
+  deps.inkbox.getIdentity = vi.fn(
+    async () =>
+      ({
+        id: "identity-1",
+        agentHandle: "test-agent",
+        getWhatsAppConversation: async () => ({
+          id: "group-1",
+          agentIdentityId: "identity-1",
+          participants: [phone, "+15555550102"],
+          isGroup: true,
+          remoteNumber: null,
+          localNumber: "+15555550100",
+          unresolvedParticipantCount: 0,
+        }),
+        getWhatsAppMedia: async () => ({
+          status: "ready",
+          url: "https://media.test/voice.ogg",
+          contentType: "audio/ogg",
+        }),
+      }) as any,
+  );
+  const accept = vi.fn(async () => {});
+  deps.sessions.acceptCompanion = accept;
+  const incoming = event("whatsapp.received", {
+    message: {
+      id: "wa-voice",
+      agent_identity_id: "identity-1",
+      conversation_id: "group-1",
+      direction: "inbound",
+      sender_number: phone,
+      remote_number: null,
+      local_number: "+15555550100",
+      is_group: true,
+      participants: [phone, "+15555550102"],
+      unresolved_participant_count: 0,
+      content: "Voice caption",
+      sender_access: "direct",
+      agent_mentioned: true,
+      media: [{ id: "voice-one", transcription: { status: "pending" } }],
+    },
+  });
+  incoming.body.event_type = "whatsapp.received";
+  incoming.body.companion = {
+    scope_id: "scope-1",
+    activation_id: "activation-1",
+    conversation_id: "group-1",
+    channel: "whatsapp",
+    phase: "initialization",
+    sequence: 1,
+  };
+  await dispatchEvent(deps, incoming);
+  expect(accept).toHaveBeenCalledOnce();
+  const [turn, text] = accept.mock.calls[0] as unknown as [any, string];
+  expect(turn.voiceNoteEvent).toEqual(incoming.body);
+  expect(turn.voiceNoteDeadline).toBeGreaterThan(Date.now() + 55_000);
+  expect(turn.rawText).toBe("Voice caption");
+  expect(text).toContain("Current WhatsApp source wa-voice");
+  expect(text).toContain("Local media:");
+  expect(text).not.toContain("transcript unavailable");
+});

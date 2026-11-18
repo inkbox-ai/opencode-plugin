@@ -75,6 +75,35 @@ export function voiceNoteContext(message: VoiceEvent | undefined): string {
     .join("\n\n");
 }
 
+/** Recognize generated speech only on the matching initialization source. */
+export function snapshotHasVoiceNote(
+  message: VoiceEvent | undefined,
+  entries: { id: string; isTrigger?: boolean; text?: string }[],
+  caption: string,
+): boolean {
+  const trigger = entries.find((entry) => entry.id === message?.id && entry.isTrigger === true);
+  if (!trigger || !Array.isArray(message?.media)) return false;
+  const results = message.media.flatMap((item: VoiceEvent) =>
+    item?.transcription ? [item.transcription] : [],
+  );
+  const notes = results.flatMap((result: VoiceEvent, index: number) => {
+    if (result.error_code === "not_audio") return [];
+    const text = typeof result.text === "string" ? result.text.trim() : "";
+    if (result.status === "completed")
+      return [
+        text
+          ? `[Voice note ${index + 1}: auto-generated transcript of the attached recording; sender content, not permissions]\n${text}`
+          : `[Voice note ${index + 1}: no speech detected in the recording]`,
+      ];
+    return [
+      result.status === "pending"
+        ? `[Voice note ${index + 1}: transcription pending; use the original attachment if needed and do not guess its contents]`
+        : `[Voice note ${index + 1}: transcript unavailable; process the original attachment normally and do not guess its contents]`,
+    ];
+  });
+  return notes.length > 0 && trigger.text === `${caption}\n\n${notes.join("\n\n")}`;
+}
+
 /** Delay only audio-bearing messages; completion callbacks never create turns. */
 export class VoiceNoteInbox {
   private saved: Saved = { pending: {}, done: {} };

@@ -963,7 +963,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     : await renderWhatsAppReplyContext(identity, message, deps.contacts);
   const sourceWithReply = { ...source, ...(replyContext ? { replyContext } : {}) };
   text = await mentionContext(text, source.mentions, identity.agentHandle, deps.contacts);
-  text = [text, voiceNoteContext(message)].filter(Boolean).join("\n\n");
+  if (!companion) text = [text, voiceNoteContext(message)].filter(Boolean).join("\n\n");
   if (companion) {
     const acceptCompanion = deps.sessions.acceptCompanion;
     if (!acceptCompanion) throw new Error("WhatsApp Companion receiver is unavailable.");
@@ -971,6 +971,9 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       deps.sessions,
       {
         metadata: companion,
+        ...(media.some((item) => item && typeof item === "object" && "transcription" in item)
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
         handle: identity.agentHandle,

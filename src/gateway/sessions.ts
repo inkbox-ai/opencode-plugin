@@ -16,7 +16,7 @@ import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
 import { replyState } from "../terminal-reply.js";
-import { type VoiceEvent, voiceNoteContext } from "../voice-notes.js";
+import { snapshotHasVoiceNote, type VoiceEvent, voiceNoteContext } from "../voice-notes.js";
 import {
   authorizeWhatsAppCompanion,
   WhatsAppPreflightError,
@@ -763,7 +763,9 @@ export function createSessionManager(
     if (closing) throw new HostedCaptureDeferredError();
     const message = event.data?.[event.event_type.startsWith("text.") ? "text_message" : "message"];
     if (message?.id !== c.sourceId) throw new Error("Companion voice note source changed.");
-    const content = `${c.from} at ${message.created_at ?? event.timestamp ?? "unknown time"}: ${c.rawText ?? ""}\n${JSON.stringify(message.media ?? [])}`;
+    const content = c.whatsappSource
+      ? (c.content ?? turn.text)
+      : `${c.from} at ${message.created_at ?? event.timestamp ?? "unknown time"}: ${c.rawText ?? ""}\n${JSON.stringify(message.media ?? [])}`;
     if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
       throw new Error("Durable turn lease was lost.");
     const latest = deps.state.getTurn(turn.id);
@@ -895,7 +897,17 @@ export function createSessionManager(
             state: "context_only",
             historySourceIds: snapshot.entries.map((entry) => entry.id),
             historyTriggerId: trigger.id,
-            companion: { ...c, hydrated: true },
+            companion: {
+              ...c,
+              hydrated: true,
+              voiceNoteInSnapshot: snapshotHasVoiceNote(
+                c.voiceNoteEvent?.data?.[
+                  c.voiceNoteEvent.event_type.startsWith("text.") ? "text_message" : "message"
+                ],
+                snapshot.entries,
+                c.rawText ?? "",
+              ),
+            },
           }),
         ])[0];
       }
@@ -949,7 +961,7 @@ export function createSessionManager(
       (contactId ? map[contactId] : undefined) ?? map[channel];
     const wakes = companionWakes(c, deps.config.gateway);
     const text = companionFrame(
-      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.voiceNoteEvent ? `\n${voiceNoteContext(c.voiceNoteEvent.data?.[c.voiceNoteEvent.event_type.startsWith("text.") ? "text_message" : "message"])}` : ""}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
+      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.voiceNoteEvent && !(history?.companion?.sourceId === c.sourceId && history.companion.voiceNoteInSnapshot) ? `\n${voiceNoteContext(c.voiceNoteEvent.data?.[c.voiceNoteEvent.event_type.startsWith("text.") ? "text_message" : "message"])}` : ""}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
       target,
     );
     const next = deps.state.transitionTurn(

@@ -25,6 +25,7 @@ export interface CompanionTurn {
   voiceNoteEvent?: import("../voice-notes.js").VoiceEvent;
   voiceNoteDeadline?: number;
   voiceNoteResolved?: boolean;
+  voiceNoteInSnapshot?: boolean;
   subject?: string;
   environment?: string;
   rawText?: string;
