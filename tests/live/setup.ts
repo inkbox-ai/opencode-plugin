@@ -1,4 +1,4 @@
-import { afterAll, beforeAll } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 import { AUT_KEY, client, listCalls, phoneOf } from "./helpers.js";
 
 const ENDED_CALL_STATUSES = new Set(["completed", "failed", "canceled"]);
@@ -12,7 +12,6 @@ let localPhone = "";
 let baseline = new Set<string>();
 let watcher: ReturnType<typeof setInterval> | undefined;
 let checking = false;
-const attempted = new Set<string>();
 
 const statusOf = (call: Call) => (call.status ?? "").toLowerCase();
 
@@ -50,9 +49,7 @@ async function newLiveCalls(): Promise<Map<string, Call>> {
 }
 
 async function watchOnce(): Promise<void> {
-  for (const [callId, call] of await newLiveCalls()) {
-    if (attempted.has(callId)) continue;
-    attempted.add(callId);
+  for (const call of (await newLiveCalls()).values()) {
     await hangup(call);
   }
 }
@@ -77,8 +74,9 @@ async function finishNewCalls(): Promise<void> {
   }
 }
 
-beforeAll(async () => {
+beforeEach(async () => {
   if (!AUT_KEY) return;
+  watcher = undefined;
   aut = client(AUT_KEY);
   localPhone = (await phoneOf(aut)).number;
   baseline = new Set((await ownedCalls()).keys());
@@ -98,7 +96,7 @@ beforeAll(async () => {
   }
 }, 30_000);
 
-afterAll(async () => {
+afterEach(async () => {
   if (!aut) return;
   if (watcher) clearInterval(watcher);
   while (checking) await delay(50);

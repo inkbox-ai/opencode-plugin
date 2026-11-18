@@ -16,6 +16,7 @@ export async function readHistory(
     );
     if (!page.data.length) break;
     messages.push(...page.data);
+    if (messages.length > 20000) throw new Error("OpenCode history capacity exceeded.");
     const next = page.cursor.next;
     if (!next) break;
     if (seen.has(next)) throw new Error("OpenCode history pagination did not advance.");
@@ -34,6 +35,7 @@ export function projectHistory(messages: SessionMessageInfo[], sessionID: string
   let ambiguous = false;
   let inputs: string[] = [];
   let canStart = true;
+  const producers = new Map<string, string>();
   const projected = messages.flatMap((message): any[] => {
     if (message.type === "idle") {
       const failed = message.outcome !== "succeeded" ? inputs : [];
@@ -72,16 +74,47 @@ export function projectHistory(messages: SessionMessageInfo[], sessionID: string
         },
       ];
     }
-    if (["synthetic", "shell", "skill", "compaction"].includes(message.type) && canStart) {
-      parentID = undefined;
-      inputs = [];
-      ambiguous = false;
-      canStart = false;
+    if (["synthetic", "shell", "skill", "compaction"].includes(message.type)) {
+      const metadata = (message as any).metadata;
+      const source =
+        message.type === "synthetic" && metadata?.source === "shell"
+          ? producers.get(`shell:${metadata.shellID}`)
+          : message.type === "synthetic" && metadata?.source === "subagent"
+            ? producers.get(`subagent:${metadata.childID}`)
+            : undefined;
+      if (canStart) {
+        parentID = source;
+        inputs = source ? [source] : [];
+        ambiguous = false;
+        canStart = false;
+      } else if (source && source !== parentID) {
+        inputs = [...new Set([...inputs, source])];
+        parentID = undefined;
+        ambiguous = true;
+      }
     }
     if (message.type !== "assistant") return [];
     const parts = message.content.map((part): any => {
       if (part.type !== "tool") return part;
       const state = part.state as any;
+      if (parentID && !ambiguous && state.status === "completed") {
+        if (
+          part.name === "shell" &&
+          state.metadata?.shellID &&
+          state.content?.some(
+            (item: any) =>
+              item.type === "text" &&
+              item.text.startsWith("Command moved to the background (shell ID:"),
+          )
+        )
+          producers.set(`shell:${state.metadata.shellID}`, parentID);
+        if (
+          part.name === "subagent" &&
+          state.metadata?.status === "running" &&
+          state.metadata?.sessionID
+        )
+          producers.set(`subagent:${state.metadata.sessionID}`, parentID);
+      }
       return {
         type: "tool",
         tool: part.name,

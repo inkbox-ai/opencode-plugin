@@ -4,15 +4,34 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import {
+  assertRemoteNative,
+  remoteFixture,
+  remoteTool,
+  runtimeSource,
+} from "./remote-native-fixture.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "inkbox-v2-"));
 const home = join(root, "home");
 const archive = resolve(process.argv[2]);
-const sdkArchive = process.env.INKBOX_SDK_PATH ? resolve(process.env.INKBOX_SDK_PATH) : undefined;
+const sdkRoot = resolve(dirname(fileURLToPath(import.meta.resolve("@inkbox/sdk"))), "..");
+const sdkArchive = process.env.INKBOX_SDK_PATH
+  ? resolve(process.env.INKBOX_SDK_PATH)
+  : join(
+      root,
+      execFileSync(
+        "npm",
+        ["pack", "--ignore-scripts", sdkRoot, "--pack-destination", root, "--silent"],
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .at(-1),
+    );
 const originalEnv = { ...process.env };
 const originalCwd = process.cwd();
 const binary = process.env.OPENCODE_V2_BIN ?? "opencode";
@@ -31,15 +50,22 @@ for (const key of Object.keys(process.env)) delete process.env[key];
 Object.assign(process.env, env);
 process.chdir(root);
 const seenRequests = [];
+const remote = remoteFixture();
 const model = createServer(async (req, res) => {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw || "{}");
+  const reply = remote(body);
+  if (reply) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(reply));
+    return;
+  }
   seenRequests.push(body);
   const lastUser = body.messages?.findLastIndex((m) => m.role === "user") ?? -1;
   const text = JSON.stringify(body.messages?.[lastUser] ?? "");
   const tool =
-    text.includes("USE_FIXTURE") &&
+    (text.includes("USE_FIXTURE") || text.includes("REMOTE_")) &&
     !body.messages.slice(lastUser + 1).some((m) => m.role === "tool");
   const delta = tool
     ? {
@@ -49,7 +75,7 @@ const model = createServer(async (req, res) => {
             index: 0,
             id: `call_${randomUUID()}`,
             type: "function",
-            function: {
+            function: remoteTool(text) ?? {
               name: text.includes("DOCTOR_FIXTURE") ? "inkbox_doctor" : "fixture_echo",
               arguments: JSON.stringify(
                 text.includes("DOCTOR_FIXTURE")
@@ -162,8 +188,20 @@ import { z } from 'zod';
 import { requestApproval } from ${JSON.stringify(join(packed, "host/v2-approval.js"))};
 import { createV2Host } from ${JSON.stringify(join(packed, "host/v2-client.js"))};
 import { resolveConfig } from ${JSON.stringify(join(packed, "config.js"))};
+import {RemoteTools} from ${JSON.stringify(join(packed, "remote-tools.js"))};
 export default { ...Inkbox, async setup(ctx) {
   const close = await Inkbox.setup(ctx);
+  const remoteConfig=resolveConfig({outbound:{approval:'ask',askTimeoutMs:10000}});
+  const nativeClient=async()=>{const endpoint=await Service.discover();return OpenCode.make({baseUrl:endpoint.url,headers:Service.headers(endpoint)});};
+  const remoteHost={session:{message:async(args)=>createV2Host({get:nativeClient,invalidate(){}},remoteConfig).session.message(args)}};
+  const relay=new RemoteTools(${runtimeSource(`http://127.0.0.1:${model.address().port}`)},remoteConfig,remoteHost,ctx.location.directory,${JSON.stringify(join(home, "remote-fixture"))});
+  await ctx.tool.transform(editor=>{for(const [name,definition] of Object.entries(relay.wrap({}))){
+    editor.remove(name);
+    editor.add({name,description:definition.description,input:z.object(definition.args),options:{codemode:false},async execute(args,context){
+      const result=await definition.execute(args,{callID:context.id,sessionID:context.sessionID,messageID:context.messageID,agent:context.agent,directory:ctx.location.directory,worktree:ctx.location.directory,abort:context.signal,metadata:()=>{},ask:async request=>requestApproval(await nativeClient(),{...request,sessionID:context.sessionID,messageID:context.messageID,callID:context.id,agent:context.agent},context.signal,10000)});
+      return {content:result.output,metadata:result.metadata};
+    }});
+  }});
   await ctx.tool.transform(editor => editor.add({ name:'fixture_echo',description:'Synthetic echo',input:z.object({value:z.string().min(1)}),options:{codemode:false},async execute(input, context) {
     const endpoint = await Service.discover();
     const client = OpenCode.make({baseUrl:endpoint.url,headers:Service.headers(endpoint)});
@@ -173,7 +211,7 @@ export default { ...Inkbox, async setup(ctx) {
     await requestApproval(client,{sessionID:context.sessionID,messageID:context.messageID,callID:context.id,agent:context.agent,permission:'fixture_send',patterns:['fixture@example.test'],always:['fixture@example.test'],metadata:{}},context.signal,input.value==='timeout'?500:10000);
     return {content:input.value};
   }}));
-  return close;
+  return async()=>{relay.close();await close?.();};
 }};
 `,
   );
@@ -253,6 +291,24 @@ export default { ...Inkbox, async setup(ctx) {
     });
     return s.id;
   };
+  await assertRemoteNative(
+    host,
+    root,
+    async (effect = "allow") => {
+      const session = await client.session.create({
+        title: "Synthetic remote",
+        location: { directory: root },
+        permissions: [{ action: "inkbox_remote_call", resource: "*", effect }],
+      });
+      await client.session.switchModel({
+        sessionID: session.id,
+        model: { providerID: "fixture", id: "fixture" },
+      });
+      return session.id;
+    },
+    `http://127.0.0.1:${model.address().port}`,
+    { providerID: "fixture", modelID: "fixture" },
+  );
   const sessionID = await create("Synthetic lifecycle");
   await host.ready(root);
   const whatsappSends = [];

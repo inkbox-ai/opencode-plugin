@@ -15,6 +15,7 @@ import { ownSlackConnection, type SlackRoute, slackRouteKey } from "../slack.js"
 import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
+import { replyState } from "../terminal-reply.js";
 import {
   authorizeWhatsAppCompanion,
   WhatsAppPreflightError,
@@ -1069,6 +1070,18 @@ export function createSessionManager(
       current = completed;
     }
     if (channelDisabled(current)) return;
+    const terminal = await replyState(deps.inkbox, current, dirname(deps.state.filePath));
+    if (terminal === "uncertain") {
+      deps.state.updateTurn(current.id, {
+        state: "failed",
+        uncertainStage: "delivery",
+        executionFenced: true,
+        error: "Final reply outcome is unconfirmed; reconcile its original operation.",
+      });
+      settle(current.id, output);
+      return;
+    }
+    if (terminal === "accepted") output = SILENT;
     if (hasExplicitWhatsAppReply(current.replyTarget, deps.state)) output = SILENT;
     if (current.deliver && current.replyTarget && output !== undefined) {
       assertCompanionLocallyAllowed(current);

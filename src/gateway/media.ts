@@ -55,8 +55,12 @@ function contentTypeFor(filename: string): string {
 }
 
 function sanitizeName(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
-  return safe.slice(0, 80) || "media";
+  const safe = name.replace(/[^A-Za-z0-9._-]+/g, "-");
+  let start = 0;
+  let end = safe.length;
+  while (start < end && (safe[start] === "-" || safe[start] === ".")) start++;
+  while (end > start && (safe[end - 1] === "-" || safe[end - 1] === ".")) end--;
+  return safe.slice(start, Math.min(end, start + 80)) || "media";
 }
 
 function pickExtension(segment: string, contentType: string | null): string {

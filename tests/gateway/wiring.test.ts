@@ -16,6 +16,7 @@ const hooks = vi.hoisted(() => ({
   abort: vi.fn(async () => true),
   reset: vi.fn(async (_key: string) => {}),
   realSessions: false,
+  subscriptions: vi.fn(async () => {}),
 }));
 vi.mock("../../src/gateway/sessions.js", async (load) => {
   const actual = await load<typeof import("../../src/gateway/sessions.js")>();
@@ -55,7 +56,9 @@ vi.mock("../../src/gateway/server.js", () => ({
 vi.mock("../../src/gateway/transport.js", () => ({
   openTransport: async () => ({ publicUrl: "https://gateway.example.com", close: async () => {} }),
 }));
-vi.mock("../../src/gateway/subscriptions.js", () => ({ reconcileSubscriptions: async () => {} }));
+vi.mock("../../src/gateway/subscriptions.js", () => ({
+  reconcileSubscriptions: hooks.subscriptions,
+}));
 vi.mock("../../src/gateway/a2a.js", () => ({
   createA2AHandler: () => ({
     handles: () => false,
@@ -81,11 +84,13 @@ afterEach(async () => {
   hooks.abort.mockClear();
   hooks.reset.mockClear();
   hooks.realSessions = false;
+  hooks.subscriptions.mockClear();
 });
 async function start(
   previousInventoryReady?: boolean,
   existingDir?: string,
   native?: { messages: Map<string, any[]>; statuses: Record<string, { type: string }> },
+  subscriptionsManagedExternally?: boolean,
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
@@ -136,6 +141,7 @@ async function start(
       config,
       directory: "/project",
       ownsProcess: false,
+      subscriptionsManagedExternally,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     }),
   );
@@ -156,6 +162,13 @@ function inbound(text: string, sender: string, channel = "sms", group = false) {
     },
   });
 }
+
+it("retains standalone subscription ownership and honors an external owner", async () => {
+  await start();
+  expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
+  await start(undefined, undefined, undefined, true);
+  expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
+});
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {
   const d = await start();

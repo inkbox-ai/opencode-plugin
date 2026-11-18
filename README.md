@@ -17,7 +17,7 @@
 
 ## Prerequisites
 
-- **Supported hosts:** OpenCode 1.15.0–1.x or 2.0.26–2.0.x. Verified on 1.15.0, 1.18.35, 1.19.0, and 2.0.26. V1 and V2 use separate plugin entrypoints; the installer selects the installed host version.
+- **Supported hosts:** OpenCode 1.17.18–1.x or 2.0.26–2.0.x. Verified on 1.17.18, 1.18.35, 1.19.0, and 2.0.26. V1 and V2 use separate plugin entrypoints; the installer selects the installed host version.
 - **opencode installed and logged in.** The plugin loads into real opencode
   sessions and the gateway drives an `opencode serve` — install it
   ([opencode.ai](https://opencode.ai)) and authenticate a model provider.
@@ -156,7 +156,7 @@ local wrapper:
 ```bash
 git clone https://github.com/inkbox-ai/opencode-plugin.git ~/.inkbox-opencode/app
 cd ~/.inkbox-opencode/app
-npm install && npm run build
+pnpm install --frozen-lockfile && pnpm build
 ```
 
 Then, from your opencode project, install the packed build and add a one-file
@@ -164,7 +164,8 @@ plugin wrapper:
 
 ```bash
 archive=$(cd ~/.inkbox-opencode/app && npm pack --silent | tail -1)
-npm install "$HOME/.inkbox-opencode/app/$archive"
+sdk_archive=$(cd ~/.inkbox-opencode/app && sdk_dir=$(node --input-type=module -e 'import {dirname} from "node:path"; import {fileURLToPath} from "node:url"; process.stdout.write(dirname(dirname(fileURLToPath(import.meta.resolve("@inkbox/sdk")))));') && npm pack --ignore-scripts "$sdk_dir" --silent | tail -1)
+npm install "$HOME/.inkbox-opencode/app/$sdk_archive" "$HOME/.inkbox-opencode/app/$archive"
 mkdir -p .opencode/plugins
 ```
 
@@ -224,7 +225,10 @@ groups are enabled.
 
 ## Tools
 
-50 tools are enabled by default; 22 more are opt-in (see
+Three remote discovery, call and final-reply tools are available alongside the local catalog.
+See [remote tool behavior](REMOTE_TOOLS.md) for approval, refresh and recovery semantics.
+
+In the local catalog, 50 tools are enabled by default; 22 more are opt-in (see
 [Enabling more tools](#enabling-more-tools)). Names are stable — treat renames
 as breaking.
 
@@ -534,11 +538,11 @@ identity your CI live suites use, or they will contend for it.
 ## Development
 
 ```bash
-npm install
-npm run typecheck   # tsc
-npm test            # vitest (unit + contract)
-npm run lint        # biome
-npm run build       # emits dist/
+pnpm install --frozen-lockfile
+pnpm typecheck      # tsc
+pnpm test           # vitest (unit + contract)
+pnpm lint           # biome
+pnpm build          # emits dist/
 bash scripts/smoke-loader.sh   # packs the tarball and loads it through a real opencode
 ```
 
@@ -582,3 +586,15 @@ Approval prompts serialize per conversation. Only explicit approval tokens answe
 **Vault migration:** export `INKBOX_OPENCODE_VAULT_KEY` for lazy optional unlocking. Existing custom `vault.keyEnvVar` settings still work. If you retain `INKBOX_VAULT_KEY` or a Vault key in the SDK's global config, the SDK may unlock eagerly; remove that global setting when migrating to the plugin-local variable. Locked metadata listing continues to work. Individual plaintext/TOTP reads recheck the configured identity's grants and refresh the secret; login payloads expose `has_totp`, never the TOTP seed. Existing typed tool names remain supported; `inkbox_credentials_get_secret` adds key-pair/other reads and must be enabled by its exact name.
 
 Doctor distinguishes disabled channels, missing SDK capabilities, disconnected Slack workspaces, incomplete active webhook coverage, and unverified native backend support. An available source permits a bounded read-only native endpoint probe; absent source or tunnel URL remains explicitly unverified. These checks never send messages or modify subscriptions.
+
+### Managed diagnostics
+
+When `INKBOX_HOSTED_MODE=1`, doctor reads the secret-free report named by
+`INKBOX_DIAGNOSTICS_FILE`. Reports must match the identity and harness, belong to
+this user, have private file permissions, and be no more than 60 seconds old.
+Missing, stale, or unhealthy reports do not establish readiness. With
+`INKBOX_DIAGNOSTIC_CONTEXT=terminal`, the signing key is checked in the runtime
+report; the key itself is not needed in the terminal. Runtime processes still
+require their own signing key. Managed delivery does not require ordinary webhook
+subscriptions. Standalone diagnostics are unchanged. These checks do not send
+messages or prove end-to-end delivery.

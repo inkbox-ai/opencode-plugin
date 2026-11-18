@@ -67,6 +67,51 @@ describe("GET /health", () => {
 });
 
 describe("POST /webhook", () => {
+  it("returns durable admission receipts for every concurrent retry", async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const receipt = { receipt_id: "receipt_1", state: "accepted" };
+    const admitVerified = vi.fn(async () => {
+      await barrier;
+      return { status: 202 as const, body: receipt };
+    });
+    const deps = baseDeps({ admitVerified });
+    const url = await start(deps);
+    const send = () =>
+      fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "same-event" },
+        body: JSON.stringify({ event_type: "message.received" }),
+      });
+    const first = send();
+    const duplicate = send();
+    await vi.waitFor(() => expect(admitVerified).toHaveBeenCalledTimes(2));
+    release();
+    for (const response of await Promise.all([first, duplicate])) {
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toEqual(receipt);
+    }
+    expect(deps.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("retries failed external admission without falling back to local dispatch", async () => {
+    const admitVerified = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const deps = baseDeps({ admitVerified });
+    const url = await start(deps);
+    for (const status of [500, 200, 200]) {
+      const response = await fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "same-event" },
+        body: "{}",
+      });
+      expect(response.status).toBe(status);
+    }
+    expect(admitVerified).toHaveBeenCalledTimes(3);
+    expect(deps.onEvent).not.toHaveBeenCalled();
+  });
+
   it("does not acknowledge concurrent Companion retries before durable acceptance", async () => {
     let release!: () => void;
     const barrier = new Promise<void>((resolve) => {
@@ -199,3 +244,38 @@ it.each([{ companion: null }, { data: { companion: { phase: "live" } } }])(
     expect(deps.onEvent).toHaveBeenCalledOnce();
   },
 );
+
+it.each([false, true])(
+  "dedupes event replays after a successful dispatch (initial failure: %s)",
+  async (failsFirst) => {
+    const onEvent = vi.fn(async () => true);
+    if (failsFirst) onEvent.mockResolvedValueOnce(false);
+    const url = await start(baseDeps({ onEvent, providers: [testProvider({ name: "inkbox" })] }));
+    const send = (requestId: string) =>
+      fetch(`${url}/webhook`, {
+        method: "POST",
+        headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": requestId },
+        body: JSON.stringify({ id: "evt-mail", event_type: "message.received" }),
+      });
+    if (failsFirst) expect((await send("failed")).status).toBe(500);
+    expect((await send("original")).status).toBe(200);
+    const replay = await send("replay");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ deduped: true });
+    expect(onEvent).toHaveBeenCalledTimes(failsFirst ? 2 : 1);
+  },
+);
+
+it("preserves distinct forwarded updates with the same object id", async () => {
+  const deps = baseDeps({ providers: [testProvider({ name: "inkbox" })] });
+  const url = await start(deps);
+  for (const requestId of ["update-1", "update-2"]) {
+    const response = await fetch(`${url}/webhook`, {
+      method: "POST",
+      headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": requestId },
+      body: JSON.stringify({ id: "object-1", event_type: "external.updated" }),
+    });
+    expect(response.status).toBe(200);
+  }
+  expect(deps.onEvent).toHaveBeenCalledTimes(2);
+});

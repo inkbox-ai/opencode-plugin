@@ -47,6 +47,10 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 git init -q . 2>/dev/null || true
 npm init -y >/dev/null 2>&1 || true
+if [ -z "${INKBOX_SDK_PATH:-}" ]; then
+  SDK_DIR="$(cd "$ROOT" && node --input-type=module -e 'import {fileURLToPath} from "node:url"; import {dirname,resolve} from "node:path"; console.log(resolve(dirname(fileURLToPath(import.meta.resolve("@inkbox/sdk"))),".."))')"
+  INKBOX_SDK_PATH="$WORKDIR/$(npm pack --ignore-scripts "$SDK_DIR" --pack-destination "$WORKDIR" --silent | tail -1)"
+fi
 if [ -n "${INKBOX_SDK_PATH:-}" ]; then
   npm install --silent --package-lock=false "$INKBOX_SDK_PATH" "$TARBALL"
 else

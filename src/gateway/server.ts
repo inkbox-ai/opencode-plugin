@@ -4,6 +4,11 @@ import type { RequestDedup } from "./dedup.js";
 import { matchProvider, resolveProviderSecret } from "./providers.js";
 import type { GatewayLogger, VerifiedEvent, WebhookProvider } from "./types.js";
 
+export interface WebhookAdmission {
+  status: 200 | 202;
+  body: Record<string, unknown>;
+}
+
 export interface WebhookServerDeps {
   config: ResolvedConfig;
   logger: GatewayLogger;
@@ -13,6 +18,7 @@ export interface WebhookServerDeps {
   // Handle a verified inbound event. Return false to have the id rolled back
   // (so the sender may retry); throwing is treated the same way.
   onEvent(event: VerifiedEvent): Promise<boolean | undefined>;
+  admitVerified?(event: VerifiedEvent): Promise<boolean | WebhookAdmission>;
   // Optional live-call WebSocket upgrade handler (set when voice is enabled).
   onCallUpgrade?(req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void;
 }
@@ -95,6 +101,15 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
       verified = true;
     }
     const requestId = headers["x-inkbox-request-id"];
+    const eventId =
+      provider.name === "inkbox" &&
+      ["message.received", "text.received", "imessage.received", "call.ended"].includes(
+        String(parsed.event_type),
+      ) &&
+      typeof parsed.id === "string"
+        ? parsed.id
+        : "";
+    const dedupId = eventId ? `inkbox:event:${eventId}` : requestId;
     // Companion retries must reach the durable reservation before each ACK.
     const companion =
       provider.name === "inkbox" &&
@@ -102,7 +117,8 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
       typeof parsed === "object" &&
       (parsed.companion != null ||
         (typeof parsed.event_type === "string" && parsed.event_type.startsWith("whatsapp.")));
-    if (!companion && !deps.dedup.begin(requestId)) {
+    const externalAdmission = companion || deps.admitVerified !== undefined;
+    if (!externalAdmission && !deps.dedup.begin(dedupId)) {
       // Already seen/in-flight — ack so the sender stops retrying.
       return send(res, 200, JSON.stringify({ deduped: true }), "application/json");
     }
@@ -120,15 +136,18 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
     };
 
     try {
-      const ok = await deps.onEvent(event);
+      const ok = await (deps.admitVerified ? deps.admitVerified(event) : deps.onEvent(event));
       if (ok === false) {
-        if (!companion) deps.dedup.rollback(requestId);
+        if (!externalAdmission) deps.dedup.rollback(dedupId);
         return send(res, 500, "dispatch failed");
       }
-      if (!companion) deps.dedup.commit(requestId);
+      if (!externalAdmission) deps.dedup.commit(dedupId);
+      if (ok && typeof ok === "object") {
+        return send(res, ok.status, JSON.stringify(ok.body), "application/json");
+      }
       return send(res, 200, JSON.stringify({ ok: true }), "application/json");
     } catch (err) {
-      if (!companion) deps.dedup.rollback(requestId);
+      if (!externalAdmission) deps.dedup.rollback(dedupId);
       deps.logger.error("webhook.dispatch_error", { error: String(err) });
       return send(res, 500, "dispatch error");
     }

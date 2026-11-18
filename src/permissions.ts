@@ -86,6 +86,11 @@ export async function approveOutbound(
       ...(request.metadata ?? {}),
     },
   });
+  if (!ask || typeof ask.then !== "function")
+    throw new Error(
+      "This OpenCode version cannot perform plugin approval. Upgrade to OpenCode 1.17.18 or newer.",
+    );
+
   // If the race is lost, the still-pending ask must not surface as an
   // unhandled rejection when the user later dismisses or denies it.
   ask.catch(() => {});

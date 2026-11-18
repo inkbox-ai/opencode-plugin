@@ -57,10 +57,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - name: Install locked dependencies
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
@@ -116,7 +117,7 @@ jobs:
           VOICE_DRIVER_STATE: ${{ runner.temp }}/voice_driver_state.json
           LIVE_VOICE_TIMEOUT_S: ${{ inputs.timeout_s || '220' }}
         run: |
-          npx vitest run --config vitest.live.config.ts tests/live/voice.test.ts
+          pnpm exec vitest run --config vitest.live.config.ts tests/live/voice.test.ts
 
       - name: Report content-free failure state
         if: failure() || cancelled()

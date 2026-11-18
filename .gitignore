@@ -7,3 +7,6 @@ coverage/
 
 # local scratch notes
 *-plan.md
+
+__pycache__/
+*.pyc

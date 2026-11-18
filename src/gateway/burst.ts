@@ -16,6 +16,7 @@ export interface BurstBuffer {
 
 interface Pending {
   msgs: InboundMessage[];
+  retained: Array<(task: () => Promise<void>) => Promise<void>>;
   chars: number;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -24,7 +25,9 @@ export function createBurstBuffer(opts: {
   windowMs: number;
   maxMessages?: number;
   maxChars?: number;
-  deliver(msg: InboundMessage): void;
+  deliver(msg: InboundMessage): void | Promise<void>;
+  retain?(): (task: () => Promise<void>) => Promise<void>;
+  onError?(error: unknown): void;
 }): BurstBuffer {
   const maxMessages = opts.maxMessages ?? DEFAULT_BURST_MAX_MESSAGES;
   const maxChars = opts.maxChars ?? DEFAULT_BURST_MAX_CHARS;
@@ -35,19 +38,31 @@ export function createBurstBuffer(opts: {
     if (!batch) return;
     pending.delete(chatKey);
     clearTimeout(batch.timer);
-    opts.deliver(mergeBurst(batch.msgs));
+    const deliver = () => Promise.resolve(opts.deliver(mergeBurst(batch.msgs)));
+    const task = batch.retained.reduce<() => Promise<void>>(
+      (next, retained) => () => retained(next),
+      deliver,
+    );
+    void task().catch((error) => opts.onError?.(error));
   }
 
   return {
     add(msg) {
+      const retained = opts.retain?.();
       const existing = pending.get(msg.chatKey);
       if (!existing) {
         const timer = setTimeout(() => flush(msg.chatKey), opts.windowMs);
         timer.unref?.();
-        pending.set(msg.chatKey, { msgs: [msg], chars: msg.text.length, timer });
+        pending.set(msg.chatKey, {
+          msgs: [msg],
+          retained: retained ? [retained] : [],
+          chars: msg.text.length,
+          timer,
+        });
         return;
       }
       existing.msgs.push(msg);
+      if (retained) existing.retained.push(retained);
       existing.chars += msg.text.length;
       // Sliding quiet window: each fragment restarts the countdown.
       clearTimeout(existing.timer);

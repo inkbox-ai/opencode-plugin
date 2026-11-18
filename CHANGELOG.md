@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.26
+
+### Changed
+- Require Inkbox SDK 0.7.39 for durable messaging and remote tool handling.
+- Keep remote tool discovery available across long sessions with bounded catalog eviction.
+- Retire completed delivery receipts after fourteen days while retaining unresolved outcomes and duplicate protection.
+- Exclude settled failures from running work.
+
+## 0.2.25
+
+- Preserve durable admission response bodies and route retries through the admission callback.
+
+## 0.2.24
+
+- Make managed diagnostics use a recent runtime health report instead of terminal signing-key or ordinary webhook settings. Keep standalone checks and report unavailable runtime evidence.
+
+## 0.2.23
+
+- Accept empty MCP continuation input requests through the pinned SDK revision.
+
+- Keep contact and terminal-reply MCP arguments within the advertised schema while retaining durable operation identity and retry receipts.
+
+## 0.2.22
+
+- Retry incomplete live-test call cleanup and verify calls have ended between tests.
+
+## 0.2.21
+
+- Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.
+
+## 0.2.20 (unreleased)
+
+- Discover and execute current remote tools with complete schemas, native approvals, stable call identity and structured results.
+- Omit absent titles and attachment names from V2 tool results so structured remote responses reach the model.
+- Route contact aliases through canonical remote tools for claimed identities while preserving admin and unclaimed setup.
+- Add explicit final replies for incoming email and direct SMS with durable acceptance and uncertain-outcome protection.
+- Retain native background ownership through producer completion, including source-bound follow-up turns and cancellation.
+- Expose gateway admission and completion tracking for embedders, including queued bursts and background work.
+- Require OpenCode V1 1.17.18 or newer for asynchronous plugin approval; retain the V2 2.0.26–2.0.x contract.
+- Require SDK 0.7.38 and use a frozen pnpm source dependency until that SDK release is available.
+- Wait briefly for native plugin registration before declaring readiness, without retrying prompt submissions.
+- Keep attachment filename sanitization linear for long punctuation sequences.
+
 ## 0.2.19 (unreleased)
 
 - Show source-keyed inline reply context with quoted author, text, and attachment metadata; keep optional quote lookup failures nonblocking and preserve incoming conversation order.

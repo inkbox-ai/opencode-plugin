@@ -4,6 +4,7 @@ import { inkboxErrorMessage } from "../errors.js";
 import { formatWithHeader } from "../format.js";
 import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
+import { hostedDiagnostics } from "../hosted-diagnostics.js";
 import type { GatingSummary } from "./registry.js";
 import { describeGating } from "./registry.js";
 import type { RegisteredTool, ToolDeps } from "./types.js";
@@ -29,6 +30,13 @@ export function doctorTools(deps: ToolDeps, getGating: () => GatingSummary): Reg
         args: {},
         async execute() {
           const { config, runtime } = deps;
+          const hosted = hostedDiagnostics(config.identity, "opencode", config.signingKey);
+          if (hosted)
+            return {
+              title: hosted.ready ? "Inkbox doctor: runtime ready" : "Inkbox doctor: issues found",
+              output: JSON.stringify(hosted, null, 2),
+            };
+
           const findings: Finding[] = [];
           const report: Record<string, unknown> = {
             sdkVersion: SDK_VERSION,
