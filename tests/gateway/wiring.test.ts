@@ -1403,11 +1403,13 @@ it("holds a pending voice note while the webhook receiver accepts completion, th
     expect(hooks.inbound).not.toHaveBeenCalled();
     const completion = {
       ...envelope,
-      eventType: "imessage.transcription_finished",
+      eventType: "message.transcription_finished",
       body: {
         ...envelope.body,
-        event_type: "imessage.transcription_finished",
+        event_type: "message.transcription_finished",
         data: {
+          channel: "imessage",
+          message_id: message.id,
           message: {
             ...message,
             media: [

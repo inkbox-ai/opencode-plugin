@@ -4373,7 +4373,8 @@ it("keeps a pending voice initializer ahead of later live hydration", async () =
     expect(loadInitialization).not.toHaveBeenCalled();
     expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
     const completed = structuredClone(init.voiceNoteEvent);
-    completed.event_type = "text.transcription_finished";
+    completed.event_type = "message.transcription_finished";
+    Object.assign(completed.data, { channel: "text", message_id: completed.data.text_message.id });
     completed.data.text_message.media[0].transcription = {
       status: "completed",
       text: "Recorded source update.",
@@ -4514,7 +4515,8 @@ it.each([false, true])(
       expect(d.loadInitialization).not.toHaveBeenCalled();
       expect(d.opencode.session.promptAsync).not.toHaveBeenCalled();
       const done = structuredClone(d.c.voiceNoteEvent);
-      done.event_type = "whatsapp.transcription_finished";
+      done.event_type = "message.transcription_finished";
+      Object.assign(done.data, { channel: "whatsapp", message_id: done.data.message.id });
       done.data.message.media[0].transcription = {
         status: "completed",
         text: "Recorded group update.",

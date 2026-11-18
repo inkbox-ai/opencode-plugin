@@ -2,6 +2,7 @@ import type { AgentIdentity } from "@inkbox/sdk";
 import { IncomingCallAction } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
 import { reconcileSlackSubscription } from "../slack.js";
+import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import { WHATSAPP_EVENTS } from "../whatsapp-native.js";
 import type { GatewayDeps } from "./types.js";
 
@@ -13,13 +14,11 @@ export const CALL_MEDIA_WS_PATH = "/phone/media/ws";
 export const MAILBOX_EVENT_TYPES = ["message.received", "message.bounced", "message.failed"];
 export const PHONE_EVENT_TYPES = [
   "text.received",
-  "text.transcription_finished",
   "text.delivery_failed",
   "text.delivery_unconfirmed",
 ];
 export const IMESSAGE_EVENT_TYPES = [
   "imessage.received",
-  "imessage.transcription_finished",
   "imessage.reaction_received",
   "imessage.delivery_failed",
 ];
@@ -52,8 +51,12 @@ function sameEventTypes(a: string[], b: string[]): boolean {
   return setA.size === setB.size && [...setA].every((e) => setB.has(e));
 }
 
+function eventFamily(event: string): string {
+  return event === TRANSCRIPTION_FINISHED ? event : event.split(".", 1)[0]!;
+}
+
 function eventFamilies(eventTypes: string[]): Set<string> {
-  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+  return new Set(eventTypes.map(eventFamily));
 }
 
 function sameWebhookPath(left: string, right: string): boolean {
@@ -263,6 +266,7 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber) {
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
+  await reconcileOwner("transcription", { agentIdentityId: identity.id }, [TRANSCRIPTION_FINISHED]);
   await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
   await reconcileOwner("whatsapp", { agentIdentityId: identity.id }, WHATSAPP_EVENTS);
   if (identity.imessageEnabled) {
