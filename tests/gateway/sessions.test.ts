@@ -4524,9 +4524,7 @@ it.each([false, true])(
       const prompts = d.opencode.session.promptAsync.mock.calls.map((call) => JSON.stringify(call));
       expect(prompts[0].match(/Recorded group update\./g)).toHaveLength(1);
       expect(prompts[1]).toContain("Later typed group update");
-      const original = d.state
-        .listTurns()
-        .find((turn) => turn.id.endsWith(":event:source-1"))!;
+      const original = d.state.listTurns().find((turn) => turn.id.endsWith(":event:source-1"))!;
       expect(original).toBeDefined();
       expect(original.companion?.content).toBe(header);
       expect(original.companion?.whatsappSource).toEqual(d.c.whatsappSource);
