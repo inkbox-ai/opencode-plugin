@@ -4526,7 +4526,8 @@ it.each([false, true])(
       expect(prompts[1]).toContain("Later typed group update");
       const original = d.state
         .listTurns()
-        .find((turn) => turn.companion?.sourceId === "source-1" && turn.kind !== "capture")!;
+        .find((turn) => turn.id.endsWith(":event:source-1"))!;
+      expect(original).toBeDefined();
       expect(original.companion?.content).toBe(header);
       expect(original.companion?.whatsappSource).toEqual(d.c.whatsappSource);
       expect(poll).not.toHaveBeenCalled();
