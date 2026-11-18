@@ -112,6 +112,8 @@ export class VoiceNoteInbox {
     if (typeof event.event_type !== "string") return false;
     const id = key(event);
     if (!id) return false;
+    if (process.env.INKBOX_HOSTED_MODE === "1")
+      return event.event_type.endsWith(".transcription_finished");
     const completion = event.event_type.endsWith(".transcription_finished");
     if (completion) {
       if (this.saved.done[id]) return true;
@@ -149,6 +151,7 @@ export class VoiceNoteInbox {
     return true;
   }
   recover(): void {
+    if (process.env.INKBOX_HOSTED_MODE === "1") return;
     for (const id of Object.keys(this.saved.pending)) this.schedule(id);
   }
   private schedule(id: string): void {
