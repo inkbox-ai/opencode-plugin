@@ -1598,7 +1598,8 @@ it("does not hold a Slack voice note while Slack is disabled", async () => {
         },
       },
     };
-    expect(await hooks.server.onEvent(event)).toBe(true);
+    // The mocked dispatcher returns undefined; a held note would return true.
+    expect(await hooks.server.onEvent(event)).toBeUndefined();
     // Dispatch receives it at once; nothing is retained, held or polled.
     expect(hooks.inbound).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(70_000);
