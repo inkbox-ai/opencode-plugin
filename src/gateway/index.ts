@@ -486,7 +486,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         bursts,
         onExternal: g.externalEvents ? handleExternal : undefined,
         onHostedCallEnded: (event) => hostedCalls.ingest(event),
-        onInbound: inbound ? (event, run) => inbound.handle(event, run.runCapture) : undefined,
+        onInbound: inbound ? (event) => inbound.handle(event) : undefined,
       },
       event,
     );
@@ -865,6 +865,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             !(turn.state === "completed" && !turn.deliver),
         ).length,
       permissions: state.listPermissions().length,
+      inbound: inbound?.pending() ?? 0,
     }),
     ready: () => transport.ready?.() ?? true,
     async close() {

@@ -69,10 +69,16 @@ vi.mock("../../src/gateway/a2a.js", () => ({
 vi.mock("../../src/gateway/hosted-call-completion.js", () => ({
   createHostedCallCompletion: () => ({ catchUp: async () => {} }),
 }));
-vi.mock("../../src/gateway/dispatch.js", async (load) => ({
-  ...(await load<any>()),
-  dispatchEvent: (deps: any, event: any) => deps.sessions.handleInbound(event.body.message),
-}));
+vi.mock("../../src/gateway/dispatch.js", async (load) => {
+  const actual = await load<any>();
+  return {
+    ...actual,
+    dispatchEvent: (deps: any, event: any) =>
+      event.eventType === "inbound.received"
+        ? actual.dispatchEvent(deps, event)
+        : deps.sessions.handleInbound(event.body.message),
+  };
+});
 
 const dirs: string[] = [];
 const gateways: Awaited<ReturnType<typeof startGateway>>[] = [];
@@ -179,6 +185,53 @@ it("retains standalone subscription ownership and honors an external owner", asy
 it("registers no webhook URL in local delivery mode", async () => {
   await start(undefined, undefined, undefined, false, true);
   expect(hooks.subscriptions).not.toHaveBeenCalled();
+});
+
+it("acks a hosted inbound.received delivery once queued and counts its retry backoff as activity", async () => {
+  const { gateway, dir } = await start(undefined, undefined, undefined, false, true);
+  const id = `evt_${"b".repeat(64)}`;
+  const body = {
+    event_type: "inbound.received",
+    timestamp: "2026-11-19T12:00:00+00:00",
+    data: {
+      event_id: "inbev_2b7e9c1a-4d3f-4a5b-9c8d-7e6f5a4b3c2d",
+      delivery_id: "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b",
+      received_at: "2026-11-19T11:59:59+00:00",
+      source: {
+        id: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        name: "hooks",
+        instructions: null,
+      },
+      handler: { type: "script", command: `echo x >> ${path.join(dir, "runs")}; exit 1` },
+      signature_verified: false,
+      request: {
+        method: "POST",
+        query: {},
+        headers: {},
+        content_type: "text/plain",
+        body: "ping",
+        body_encoding: "utf8",
+      },
+    },
+    id,
+    hosted_delivery: {
+      version: 1,
+      activation_id: "3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a",
+      event_id: id,
+      starts_agent: true,
+    },
+  };
+  await gateway.dispatchVerified!(id, {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: id,
+    body,
+    headers: {},
+  } as never);
+  await vi.waitFor(() => expect(fs.existsSync(path.join(dir, "runs"))).toBe(true));
+  await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
+  expect(gateway.activity!()).toMatchObject({ inbound: 1 });
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {
