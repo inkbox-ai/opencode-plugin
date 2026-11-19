@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { bindHostState } from "../host/state.js";
@@ -38,7 +37,7 @@ import {
 } from "./response-policy.js";
 import { createWebhookServer, type WebhookAdmission } from "./server.js";
 import { createSessionManager, unsupportedWhatsAppTarget } from "./sessions.js";
-import { createStateStore } from "./state.js";
+import { createStateStore, voiceNotePath } from "./state.js";
 import { reconcileSubscriptions } from "./subscriptions.js";
 import { openTransport } from "./transport.js";
 import type { Channel, GatewayDeps, GatewayHandle, GatewayLogger, VerifiedEvent } from "./types.js";
@@ -285,9 +284,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   // forward to; dispatch is wired below once we can consume messages.
   let acceptingVoiceNotes = false;
   const voiceNotes = new VoiceNoteInbox({
-    path: `${state.filePath}.voice-notes-${createHash("sha256")
-      .update(JSON.stringify([opts.config.identity, opts.config.baseUrl]))
-      .digest("hex")}.json`,
+    path: voiceNotePath(state.filePath, opts.config.identity, opts.config.baseUrl),
     poll: (event) =>
       pollVoiceNote(event, { ...opts.config, identity: () => opts.inkbox.getIdentity() }),
     deliver: async (saved) => {

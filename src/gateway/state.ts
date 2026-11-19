@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -153,6 +154,13 @@ export interface StateStore {
   removePermission(permissionID: string): void;
   listPermissions(): DurablePermission[];
   readonly filePath: string;
+}
+
+export function voiceNotePath(filePath: string, identity?: string, baseUrl?: string): string {
+  const owner = createHash("sha256")
+    .update(JSON.stringify([identity, baseUrl]))
+    .digest("hex");
+  return `${filePath}.voice-notes-${owner}.json`;
 }
 
 export function gatewayHome(env: NodeJS.ProcessEnv = process.env): string {
