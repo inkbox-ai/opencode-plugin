@@ -1433,3 +1433,44 @@ it("holds a pending voice note while the webhook receiver accepts completion, th
     vi.useRealTimers();
   }
 });
+
+it("defers a resolved voice note received while gateway dispatch is starting", async () => {
+  const message = {
+    chatKey: "contact-voice",
+    from: "+15555550123",
+    channel: "sms",
+    text: "Caption",
+    rawText: "Caption",
+    mediaPaths: [],
+  };
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    headers: {},
+    eventType: "text.received",
+    body: {
+      event_type: "text.received",
+      message,
+      data: {
+        text_message: {
+          id: "starting-voice",
+          media: [{ id: "audio", transcription: { status: "completed", text: "Call tomorrow." } }],
+        },
+      },
+    },
+  };
+  vi.useFakeTimers();
+  try {
+    hooks.subscriptions.mockImplementationOnce(async () => {
+      expect(await hooks.server.onEvent(event)).toBe(true);
+      expect(hooks.inbound).not.toHaveBeenCalled();
+    });
+    await start();
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});

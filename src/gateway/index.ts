@@ -5,7 +5,7 @@ import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
-import { pollVoiceNote, VoiceNoteInbox } from "../voice-notes.js";
+import { pollVoiceNote, VoiceNoteInbox, VoiceNoteNotAdmitted } from "../voice-notes.js";
 import {
   UnsupportedWhatsAppGroupSDK,
   whatsappControlText,
@@ -283,6 +283,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   // Start the local webhook server first so the tunnel has something to
   // forward to; dispatch is wired below once we can consume messages.
+  let acceptingVoiceNotes = false;
   const voiceNotes = new VoiceNoteInbox({
     path: `${state.filePath}.voice-notes-${createHash("sha256")
       .update(JSON.stringify([opts.config.identity, opts.config.baseUrl]))
@@ -290,9 +291,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     poll: (event) =>
       pollVoiceNote(event, { ...opts.config, identity: () => opts.inkbox.getIdentity() }),
     deliver: async (saved) => {
+      if (!acceptingVoiceNotes) throw new VoiceNoteNotAdmitted("Gateway is not ready.");
       const { __voiceEnvelope, ...body } = saved;
-      const result = await dispatchRegular({ ...__voiceEnvelope, body, headers: {} });
-      if (result === false) throw new Error("Voice-note dispatch was not accepted.");
+      await dispatchRegular({ ...__voiceEnvelope, body, headers: {} });
     },
     warn: () => logger.warn("voice_note.delivery_retained", {}),
   });
@@ -432,6 +433,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         })
       : undefined;
 
+  acceptingVoiceNotes = true;
   voiceNotes.recover();
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
     if (
@@ -856,6 +858,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     }),
     ready: () => transport.ready?.() ?? true,
     async close() {
+      acceptingVoiceNotes = false;
       voiceNotes.close();
       sessions.freezeAdmission?.();
       await escalation
