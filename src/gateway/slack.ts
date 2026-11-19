@@ -1,13 +1,20 @@
+import { InkboxAPIError } from "@inkbox/sdk";
 import {
   ownSlackConnection,
   parseSlack,
   prepareSlackSource,
   resolveSlackAuthor,
+  SlackConnectionDenied,
   type SlackRoute,
   slackControlText,
   slackRouteKey,
 } from "../slack.js";
-import { VOICE_NOTE_WAIT_MS, voiceNoteContext, voiceNoteSourceId } from "../voice-notes.js";
+import {
+  VOICE_NOTE_WAIT_MS,
+  VoiceNoteNotAdmitted,
+  voiceNoteContext,
+  voiceNoteSourceId,
+} from "../voice-notes.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import type { DispatchDeps } from "./dispatch.js";
 import type { VerifiedEvent } from "./types.js";
@@ -33,7 +40,22 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
   const client = await deps.inkbox.getClient();
   const route = parseSlack(event.body, identity.id);
   if (!route) return true;
-  const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+  let connection: Awaited<ReturnType<typeof ownSlackConnection>>;
+  try {
+    connection = await ownSlackConnection(client, identity.id, route.connectionId);
+  } catch (error) {
+    // The connection is read before the turn is admitted. A temporary read
+    // failure leaves the message unadmitted so it can be delivered again; a
+    // denial or a rejected request stays final.
+    if (
+      error instanceof SlackConnectionDenied ||
+      (error instanceof InkboxAPIError && error.statusCode < 500 && error.statusCode !== 429)
+    )
+      throw error;
+    throw new VoiceNoteNotAdmitted("Slack connections are temporarily unavailable.", {
+      cause: error,
+    });
+  }
   route.connectionGeneration = connection.generation;
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack connection workspace mismatch.");

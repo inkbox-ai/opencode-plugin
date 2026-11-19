@@ -16,6 +16,7 @@ import {
 import { createSlackActivity } from "../../src/slack-activity.js";
 import { configureSlack } from "../../src/slack-setup.js";
 import { slackTools } from "../../src/tools/slack.js";
+import { VoiceNoteNotAdmitted } from "../../src/voice-notes.js";
 
 const identityId = "11111111-1111-4111-8111-111111111111",
   connectionId = "22222222-2222-4222-8222-222222222222",
@@ -439,6 +440,36 @@ describe("Slack signed source and published SDK contract", () => {
       expect(turn.sourceId).toBe(sourceId);
       expect(Boolean(turn.voiceNoteEvent)).toBe(waits);
       expect(typeof turn.voiceNoteDeadline === "number").toBe(waits);
+    },
+  );
+  it.each([
+    { failure: new TypeError("fetch failed"), retryable: true },
+    { failure: new InkboxAPIError(503, "Service unavailable"), retryable: true },
+    { failure: new InkboxAPIError(429, "Too many requests"), retryable: true },
+    { failure: new InkboxAPIError(403, "Forbidden"), retryable: false },
+    { failure: undefined, retryable: false },
+  ])(
+    "leaves a Slack turn unadmitted only on a temporary connection read failure ($failure)",
+    async ({ failure, retryable }) => {
+      const sdk = client(),
+        handleInbound = vi.fn();
+      if (failure) sdk.slack.listConnections.mockRejectedValueOnce(failure);
+      else sdk.slack.listConnections.mockResolvedValueOnce({ connections: [] });
+      const outcome = dispatchSlack(
+        {
+          config: {
+            gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+          },
+          inkbox: { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk },
+          sessions: { status: () => ({}), handleInbound },
+        } as any,
+        { body: event(), provider: "inkbox", verified: true, headers: {}, requestId: "read" },
+      );
+      const error = await outcome.catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(Error);
+      expect(error instanceof VoiceNoteNotAdmitted).toBe(retryable);
+      if (failure && !retryable) expect(error).toBe(failure);
+      expect(handleInbound).not.toHaveBeenCalled();
     },
   );
   it("labels a Slack voice-note transcript separately from the sender's text", async () => {
