@@ -134,7 +134,7 @@ export async function reconcileSubscriptions(
     eventTypes: string[],
     subscriptionUrl = webhookUrl,
     allowReactionFallback = true,
-    allowCreateConflictRetry = true,
+    createConflict?: Error,
   ): Promise<void> {
     const requestedEventTypes = eventTypes;
     try {
@@ -150,6 +150,8 @@ export async function reconcileSubscriptions(
           existing.filter((row) => row.url === subscriptionUrl).flatMap((row) => row.eventTypes),
         );
         eventTypes = eventTypes.filter((event) => !covered.has(event));
+        if (createConflict && eventTypes.length === requestedEventTypes.length)
+          throw createConflict;
         if (!eventTypes.length) {
           result.unchanged += 1;
           return;
@@ -177,8 +179,7 @@ export async function reconcileSubscriptions(
           })
           .catch(async (error: unknown) => {
             if (
-              (allowCreateConflictRetry ||
-                (kind === "whatsapp" && eventTypes.length < requestedEventTypes.length)) &&
+              (!createConflict || kind === "whatsapp") &&
               error instanceof Error &&
               "statusCode" in error &&
               Number(error.statusCode) === 409
@@ -189,7 +190,7 @@ export async function reconcileSubscriptions(
                 eventTypes,
                 subscriptionUrl,
                 allowReactionFallback,
-                false,
+                error,
               );
               return undefined;
             }

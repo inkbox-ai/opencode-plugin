@@ -688,7 +688,7 @@ it.each([true, false])(
     );
     if (visible) await expect(run).resolves.toMatchObject({ created: 0, unchanged: 3 });
     else await expect(run).rejects.toThrow("Conflict (409)");
-    expect(subscriptions.create).toHaveBeenCalledTimes(visible ? 1 : 2);
+    expect(subscriptions.create).toHaveBeenCalledTimes(1);
     expect(subscriptions.list).toHaveBeenCalledTimes(4);
   },
 );
@@ -808,4 +808,25 @@ it("starts twice without rewriting a shared WhatsApp receiver", async () => {
   expect(subscriptions.create).not.toHaveBeenCalled();
   expect(subscriptions.update).not.toHaveBeenCalled();
   expect(subscriptions.delete).not.toHaveBeenCalled();
+});
+
+it("adopts required events split between disjoint WhatsApp receivers", async () => {
+  const rows = [
+    [...A2A_EVENT_TYPES, "message.transcription_finished", WHATSAPP_EVENTS[0]!],
+    [...WHATSAPP_EVENTS.slice(1), "whatsapp.future"],
+  ].map((eventTypes, i) => ({
+    id: String(i),
+    url: WEBHOOK_URL,
+    agentIdentityId: "ident-1",
+    eventTypes,
+  }));
+  const subs = makeSubscriptions(rows);
+  const deps = makeDeps(
+    makeIdentity({ mailbox: null, phoneNumber: null, imessageEnabled: false }),
+    subs,
+  );
+  expect(await reconcileSubscriptions(deps, PUBLIC_URL)).toMatchObject({ unchanged: 3 });
+  expect(subs.create).not.toHaveBeenCalled();
+  expect(subs.update).not.toHaveBeenCalled();
+  expect(subs.delete).not.toHaveBeenCalled();
 });
