@@ -115,7 +115,7 @@ const LEASE_MS = 60_000;
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastMessageSequence = 0n;
 
-function retryableRead(error: unknown): boolean {
+export function retryableRead(error: unknown): boolean {
   if (error instanceof WhatsAppPreflightError) return retryableRead(error.cause);
   const err = error as {
     status?: number;
@@ -127,6 +127,7 @@ function retryableRead(error: unknown): boolean {
   } | null;
   const status = err?.status ?? err?.statusCode ?? err?.status_code;
   return (
+    status === 408 ||
     status === 429 ||
     (typeof status === "number" && status >= 500 && status < 600) ||
     ["TimeoutError", "AbortError", "NetworkError", "InkboxConnectionError"].includes(

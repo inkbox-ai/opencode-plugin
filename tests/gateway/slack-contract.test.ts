@@ -443,7 +443,12 @@ describe("Slack signed source and published SDK contract", () => {
     },
   );
   it.each([
-    { failure: new TypeError("fetch failed"), retryable: true },
+    {
+      failure: new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
+      retryable: true,
+    },
+    { failure: new TypeError("Cannot read properties of undefined"), retryable: false },
+    { failure: new InkboxAPIError(408, "Request timeout"), retryable: true },
     { failure: new InkboxAPIError(503, "Service unavailable"), retryable: true },
     { failure: new InkboxAPIError(429, "Too many requests"), retryable: true },
     { failure: new InkboxAPIError(403, "Forbidden"), retryable: false },

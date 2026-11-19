@@ -1,4 +1,3 @@
-import { InkboxAPIError } from "@inkbox/sdk";
 import {
   ownSlackConnection,
   parseSlack,
@@ -17,6 +16,7 @@ import {
 } from "../voice-notes.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import type { DispatchDeps } from "./dispatch.js";
+import { retryableRead } from "./sessions.js";
 import type { VerifiedEvent } from "./types.js";
 
 export function slackSenderAllowed(route: SlackRoute, config: DispatchDeps["config"]): boolean {
@@ -44,14 +44,10 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
   try {
     connection = await ownSlackConnection(client, identity.id, route.connectionId);
   } catch (error) {
-    // The connection is read before the turn is admitted. A temporary read
-    // failure leaves the message unadmitted so it can be delivered again; a
-    // denial or a rejected request stays final.
-    if (
-      error instanceof SlackConnectionDenied ||
-      (error instanceof InkboxAPIError && error.statusCode < 500 && error.statusCode !== 429)
-    )
-      throw error;
+    // The connection is read before the turn is admitted. A timeout, network
+    // failure, 408, 429 or 5xx leaves the message unadmitted so it can be
+    // delivered again; a denial and every other error stay final.
+    if (error instanceof SlackConnectionDenied || !retryableRead(error)) throw error;
     throw new VoiceNoteNotAdmitted("Slack connections are temporarily unavailable.", {
       cause: error,
     });
