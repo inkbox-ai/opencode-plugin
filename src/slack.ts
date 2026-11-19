@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Inkbox, SlackConnection } from "@inkbox/sdk";
+import { type Inkbox, InkboxAPIError, type SlackConnection } from "@inkbox/sdk";
 import { slackMrkdwn } from "./slack-style.js";
 import { TRANSCRIPTION_FINISHED, transcriptionEventUnsupported } from "./voice-notes.js";
 
@@ -165,37 +165,63 @@ export async function reconcileSlackSubscription(
   client: Inkbox,
   identityId: string,
   url: string,
-  completions = true,
 ): Promise<void> {
   const subscriptions = client.webhooks.subscriptions;
-  const rows = (
+  const all = (
     await subscriptions.list({ agentIdentityId: identityId, scope: "identity", url })
-  ).filter((s) => s.url === url && s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
+  ).filter((s) => s.url === url);
+  const rows = all.filter((s) => s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
   if (rows.some((s) => s.status !== "active"))
     throw new Error("The Slack subscription is paused; resume it before starting.");
-  // Slack voice-note completions reach only a subscription that also selects
-  // the original Slack message, so they ride on the Slack subscription.
-  const desired = completions
-    ? [...SLACK_SUBSCRIPTION_EVENTS, TRANSCRIPTION_FINISHED]
-    : SLACK_SUBSCRIPTION_EVENTS;
   const covered = new Set(rows.flatMap((s) => s.eventTypes));
-  const missing = desired.filter((e) => !covered.has(e));
-  if (!missing.length) return;
-  const messages = rows
-    .filter((s) => s.eventTypes.some((e) => (SLACK_EVENTS as readonly string[]).includes(e)))
-    .sort((a, b) => b.eventTypes.length - a.eventTypes.length);
+  const missing = SLACK_SUBSCRIPTION_EVENTS.filter((e) => !covered.has(e));
+  const incoming = (s: { eventTypes: string[] }) =>
+    s.eventTypes.filter((e) => (SLACK_EVENTS as readonly string[]).includes(e)).length;
+  const messages = rows.filter((s) => incoming(s) > 0);
+  // Slack voice-note completions reach only a subscription that also selects
+  // the original Slack message, so they ride on one Slack message subscription.
+  const target =
+    messages.find((s) => s.eventTypes.includes(TRANSCRIPTION_FINISHED)) ??
+    [...messages].sort((a, b) => incoming(b) - incoming(a))[0];
+  const finished = !target?.eventTypes.includes(TRANSCRIPTION_FINISHED);
+  if (!missing.length && !finished) return;
+  // Each event is held by one active subscription per URL, so move it here.
+  if (finished)
+    await releaseFinished(
+      client,
+      all.filter((s) => s !== target),
+    );
+  const apply = (wanted: string[]) =>
+    target
+      ? subscriptions.update(target.id, {
+          scope: "identity",
+          eventTypes: [...new Set([...target.eventTypes, ...wanted])],
+        })
+      : subscriptions.create({ agentIdentityId: identityId, url, eventTypes: wanted });
   try {
-    if (messages.length)
-      await subscriptions.update(messages[0]!.id, {
-        scope: "identity",
-        eventTypes: [...new Set([...messages[0]!.eventTypes, ...missing])],
-      });
-    else await subscriptions.create({ agentIdentityId: identityId, url, eventTypes: missing });
+    await apply([...missing, ...(finished ? [TRANSCRIPTION_FINISHED] : [])]);
   } catch (error) {
+    if (!finished || !transcriptionEventUnsupported(error)) throw error;
     // Keep Slack messages flowing on a server without transcription callbacks.
-    if (completions && transcriptionEventUnsupported(error))
-      return reconcileSlackSubscription(client, identityId, url, false);
-    throw error;
+    if (missing.length) await apply(missing);
+  }
+}
+async function releaseFinished(
+  client: Inkbox,
+  rows: { id: string; status: string; eventTypes: string[] }[],
+): Promise<void> {
+  for (const row of rows) {
+    if (row.status !== "active" || !row.eventTypes.includes(TRANSCRIPTION_FINISHED)) continue;
+    const remaining = row.eventTypes.filter((e) => e !== TRANSCRIPTION_FINISHED);
+    if (remaining.length)
+      await client.webhooks.subscriptions.update(row.id, {
+        scope: "identity",
+        eventTypes: remaining,
+      });
+    else
+      await client.webhooks.subscriptions.delete(row.id).catch((error: unknown) => {
+        if (!(error instanceof InkboxAPIError) || error.statusCode !== 404) throw error;
+      });
   }
 }
 export function slackText(text: string): void {

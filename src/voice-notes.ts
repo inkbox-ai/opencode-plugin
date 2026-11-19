@@ -25,6 +25,8 @@ const FAMILIES = new Set(["text", "imessage", "whatsapp", "slack"]);
 const slackReceived = (type: string) => (SLACK_EVENTS as readonly string[]).includes(type);
 
 export const TRANSCRIPTION_FINISHED = "message.transcription_finished";
+/** How long an inbound turn waits for its voice-note transcript. */
+export const VOICE_NOTE_WAIT_MS = 60_000;
 
 /** A server that predates transcription callbacks rejects only that event type. */
 export function transcriptionEventUnsupported(error: unknown): boolean {
@@ -280,14 +282,17 @@ export class VoiceNoteInbox {
     const cached = this.early.get(id);
     this.early.delete(id);
     const current = cached && Date.now() - cached.at < 300_000 ? merge(event, cached.event) : event;
-    this.saved.pending[id] = { event: current, deadline: Date.now() + 60_000 };
+    this.saved.pending[id] = { event: current, deadline: Date.now() + VOICE_NOTE_WAIT_MS };
     this.persist();
     if (pending(source(current))) this.schedule(id);
     else await this.launch(id, false);
     return true;
   }
   /** Resolve within an already-durable consumer without independently dispatching it. */
-  async resolve(event: VoiceEvent, deadline = Date.now() + 60_000): Promise<VoiceEvent> {
+  async resolve(
+    event: VoiceEvent,
+    deadline = Date.now() + VOICE_NOTE_WAIT_MS,
+  ): Promise<VoiceEvent> {
     if (this.stopped) throw new Error("Voice-note receiver is stopping.");
     if (process.env.INKBOX_HOSTED_MODE === "1") return event;
     const id = key(event);

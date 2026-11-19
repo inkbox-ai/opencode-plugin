@@ -160,14 +160,7 @@ export async function reconcileSubscriptions(
       const ours =
         kind === "whatsapp"
           ? undefined
-          : existing.find(
-              (sub) =>
-                sub.url === subscriptionUrl &&
-                belongsToDesiredChannel(sub) &&
-                // The Slack subscription carries its own completions; it is not
-                // the identity-wide completion subscription.
-                !(kind === "transcription" && sub.eventTypes.some((t) => t.startsWith("slack."))),
-            );
+          : existing.find((sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub));
       const staleOurs = existing.filter(
         (sub) =>
           !("agentIdentityId" in owner) &&

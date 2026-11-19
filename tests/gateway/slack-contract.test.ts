@@ -70,6 +70,37 @@ function client() {
     },
   };
 }
+/** One active subscription per URL may hold each event, as on the server. */
+function subscriptionServer(seed: { id: string; eventTypes: string[] }[]) {
+  const url = "https://receiver.test";
+  const rows = seed.map((row) => ({ ...row, url, status: "active" }));
+  const conflict = (id: string | undefined, eventTypes: string[]) => {
+    if (rows.some((row) => row.id !== id && row.eventTypes.some((e) => eventTypes.includes(e))))
+      throw new InkboxAPIError(409, "Subscription already exists");
+  };
+  const subscriptions = {
+    list: vi.fn(async () => rows.map((row) => ({ ...row, eventTypes: [...row.eventTypes] }))),
+    create: vi.fn(async (options: { eventTypes: string[] }) => {
+      conflict(undefined, options.eventTypes);
+      const row = { id: `created-${rows.length}`, url, status: "active", ...options };
+      rows.push(row);
+      return row;
+    }),
+    update: vi.fn(async (id: string, options: { eventTypes: string[] }) => {
+      conflict(id, options.eventTypes);
+      const row = rows.find((candidate) => candidate.id === id)!;
+      row.eventTypes = [...options.eventTypes];
+      return row;
+    }),
+    delete: vi.fn(async (id: string) => {
+      rows.splice(
+        rows.findIndex((row) => row.id === id),
+        1,
+      );
+    }),
+  };
+  return { rows, sdk: { webhooks: { subscriptions } } as any };
+}
 afterEach(() => vi.unstubAllGlobals());
 describe("Slack signed source and published SDK contract", () => {
   it("keeps ordinary approval authors stable when optional home-workspace profiles appear or disappear", () => {
@@ -298,38 +329,47 @@ describe("Slack signed source and published SDK contract", () => {
     });
     expect(create).not.toHaveBeenCalled();
   });
-  it("adds transcription completions to the Slack subscription, not the identity-wide row", async () => {
-    const update = vi.fn(),
-      create = vi.fn();
-    const sdk: any = {
-      webhooks: {
-        subscriptions: {
-          list: vi.fn(async () => [
-            {
-              id: "completions",
-              url: "https://receiver.test",
-              status: "active",
-              eventTypes: ["message.transcription_finished"],
-            },
-            {
-              id: "slack",
-              url: "https://receiver.test",
-              status: "active",
-              eventTypes: [...SLACK_SUBSCRIPTION_EVENTS],
-            },
-          ]),
-          update,
-          create,
+  it.each([
+    {
+      name: "upgrade: moves the standalone completion row onto the Slack row",
+      rows: [
+        { id: "completions", eventTypes: ["message.transcription_finished"] },
+        { id: "slack", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] },
+      ],
+      target: "slack",
+    },
+    {
+      name: "two Slack rows: completion joins the row with the most message kinds",
+      rows: [
+        { id: "channel", eventTypes: ["slack.channel_message_received"] },
+        {
+          id: "addressed",
+          eventTypes: SLACK_SUBSCRIPTION_EVENTS.filter(
+            (e) => e !== "slack.channel_message_received",
+          ),
         },
-      },
-    };
-    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith("slack", {
-      scope: "identity",
-      eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"],
-    });
-    expect(create).not.toHaveBeenCalled();
+        { id: "shared", eventTypes: ["message.transcription_finished", "a2a.task.created"] },
+      ],
+      target: "addressed",
+    },
+  ])("$name", async ({ rows, target }) => {
+    const server = subscriptionServer(rows);
+    await reconcileSlackSubscription(server.sdk, identityId, "https://receiver.test");
+    const holders = server.rows.filter((row) =>
+      row.eventTypes.includes("message.transcription_finished"),
+    );
+    expect(holders.map((row) => row.id)).toEqual([target]);
+    expect(server.rows.find((row) => row.id === "shared")?.eventTypes).toEqual(
+      rows.some((row) => row.id === "shared") ? ["a2a.task.created"] : undefined,
+    );
+    expect(server.rows.some((row) => row.id === "completions")).toBe(false);
+    expect(server.sdk.webhooks.subscriptions.create).not.toHaveBeenCalled();
+    // A restart finds the completion on the Slack row and changes nothing.
+    server.sdk.webhooks.subscriptions.update.mockClear();
+    server.sdk.webhooks.subscriptions.delete.mockClear();
+    await reconcileSlackSubscription(server.sdk, identityId, "https://receiver.test");
+    expect(server.sdk.webhooks.subscriptions.update).not.toHaveBeenCalled();
+    expect(server.sdk.webhooks.subscriptions.delete).not.toHaveBeenCalled();
   });
   it("keeps Slack messages when an older API rejects transcription completions", async () => {
     const create = vi.fn(async (options: { eventTypes: string[] }) => {
@@ -356,6 +396,51 @@ describe("Slack signed source and published SDK contract", () => {
       eventTypes: SLACK_SUBSCRIPTION_EVENTS,
     });
   });
+  it.each([
+    { messageId: undefined, waits: false },
+    { messageId: sourceId, waits: true },
+  ])(
+    "waits on a Companion voice note only with its source key ($messageId)",
+    async ({ messageId, waits }) => {
+      const acceptCompanion = vi.fn();
+      const body = {
+        ...event({
+          ...(messageId ? { message_id: messageId } : {}),
+          event: {
+            type: "message",
+            text: "<@UBOT> Hello",
+            files: [{ id: "FVOICE", transcription: { status: "pending" } }],
+          },
+        }),
+        companion: {
+          channel: "slack",
+          scope_id: "scope",
+          conversation_id: "conversation",
+          activation_id: "activation",
+          phase: "live",
+          sequence: 2,
+        },
+      };
+      await dispatchSlack(
+        {
+          config: {
+            gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+          },
+          inkbox: {
+            getIdentity: async () => ({ id: identityId, agentHandle: "example-agent" }),
+            getClient: async () => client(),
+          },
+          sessions: { acceptCompanion },
+        } as any,
+        { body, provider: "inkbox", verified: true, headers: {}, requestId: "companion-voice" },
+      );
+      expect(acceptCompanion).toHaveBeenCalledTimes(1);
+      const turn = acceptCompanion.mock.calls[0][0];
+      expect(turn.sourceId).toBe(sourceId);
+      expect(Boolean(turn.voiceNoteEvent)).toBe(waits);
+      expect(typeof turn.voiceNoteDeadline === "number").toBe(waits);
+    },
+  );
   it("labels a Slack voice-note transcript separately from the sender's text", async () => {
     const sdk = client(),
       handleInbound = vi.fn();
