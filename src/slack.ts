@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Inkbox, SlackConnection } from "@inkbox/sdk";
 import { slackMrkdwn } from "./slack-style.js";
+import { TRANSCRIPTION_FINISHED, transcriptionEventUnsupported } from "./voice-notes.js";
 
 export const SLACK_EVENTS = [
   "slack.dm_received",
@@ -164,6 +165,7 @@ export async function reconcileSlackSubscription(
   client: Inkbox,
   identityId: string,
   url: string,
+  completions = true,
 ): Promise<void> {
   const subscriptions = client.webhooks.subscriptions;
   const rows = (
@@ -171,18 +173,30 @@ export async function reconcileSlackSubscription(
   ).filter((s) => s.url === url && s.eventTypes.some((e) => SLACK_SUBSCRIPTION_EVENTS.includes(e)));
   if (rows.some((s) => s.status !== "active"))
     throw new Error("The Slack subscription is paused; resume it before starting.");
+  // Slack voice-note completions reach only a subscription that also selects
+  // the original Slack message, so they ride on the Slack subscription.
+  const desired = completions
+    ? [...SLACK_SUBSCRIPTION_EVENTS, TRANSCRIPTION_FINISHED]
+    : SLACK_SUBSCRIPTION_EVENTS;
   const covered = new Set(rows.flatMap((s) => s.eventTypes));
-  const missing = SLACK_SUBSCRIPTION_EVENTS.filter((e) => !covered.has(e));
+  const missing = desired.filter((e) => !covered.has(e));
   if (!missing.length) return;
   const messages = rows
     .filter((s) => s.eventTypes.some((e) => (SLACK_EVENTS as readonly string[]).includes(e)))
     .sort((a, b) => b.eventTypes.length - a.eventTypes.length);
-  if (messages.length)
-    await subscriptions.update(messages[0]!.id, {
-      scope: "identity",
-      eventTypes: [...new Set([...messages[0]!.eventTypes, ...missing])],
-    });
-  else await subscriptions.create({ agentIdentityId: identityId, url, eventTypes: missing });
+  try {
+    if (messages.length)
+      await subscriptions.update(messages[0]!.id, {
+        scope: "identity",
+        eventTypes: [...new Set([...messages[0]!.eventTypes, ...missing])],
+      });
+    else await subscriptions.create({ agentIdentityId: identityId, url, eventTypes: missing });
+  } catch (error) {
+    // Keep Slack messages flowing on a server without transcription callbacks.
+    if (completions && transcriptionEventUnsupported(error))
+      return reconcileSlackSubscription(client, identityId, url, false);
+    throw error;
+  }
 }
 export function slackText(text: string): void {
   if (!text || [...text].length > 12_000 || text.includes("\0"))

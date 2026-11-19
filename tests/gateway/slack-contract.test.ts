@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Inkbox } from "@inkbox/sdk";
+import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { dispatchSlack } from "../../src/gateway/slack.js";
@@ -297,6 +297,101 @@ describe("Slack signed source and published SDK contract", () => {
       eventTypes: expect.arrayContaining([...SLACK_SUBSCRIPTION_EVENTS, "text.received"]),
     });
     expect(create).not.toHaveBeenCalled();
+  });
+  it("adds transcription completions to the Slack subscription, not the identity-wide row", async () => {
+    const update = vi.fn(),
+      create = vi.fn();
+    const sdk: any = {
+      webhooks: {
+        subscriptions: {
+          list: vi.fn(async () => [
+            {
+              id: "completions",
+              url: "https://receiver.test",
+              status: "active",
+              eventTypes: ["message.transcription_finished"],
+            },
+            {
+              id: "slack",
+              url: "https://receiver.test",
+              status: "active",
+              eventTypes: [...SLACK_SUBSCRIPTION_EVENTS],
+            },
+          ]),
+          update,
+          create,
+        },
+      },
+    };
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith("slack", {
+      scope: "identity",
+      eventTypes: [...SLACK_SUBSCRIPTION_EVENTS, "message.transcription_finished"],
+    });
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("keeps Slack messages when an older API rejects transcription completions", async () => {
+    const create = vi.fn(async (options: { eventTypes: string[] }) => {
+      if (options.eventTypes.includes("message.transcription_finished"))
+        throw Object.assign(new InkboxAPIError(422, "Unknown event"), {
+          detail: [
+            {
+              type: "enum",
+              loc: ["body", "event_types", SLACK_SUBSCRIPTION_EVENTS.length],
+              input: "message.transcription_finished",
+            },
+          ],
+        });
+      return { id: "slack" };
+    });
+    const sdk: any = {
+      webhooks: { subscriptions: { list: vi.fn(async () => []), update: vi.fn(), create } },
+    };
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenLastCalledWith({
+      agentIdentityId: identityId,
+      url: "https://receiver.test",
+      eventTypes: SLACK_SUBSCRIPTION_EVENTS,
+    });
+  });
+  it("labels a Slack voice-note transcript separately from the sender's text", async () => {
+    const sdk = client(),
+      handleInbound = vi.fn();
+    const body = event({
+      message_id: sourceId,
+      event: {
+        type: "message",
+        text: "<@UBOT> Hello",
+        files: [
+          {
+            id: "FVOICE",
+            name: "voice.m4a",
+            mimetype: "audio/mp4",
+            transcription: { status: "completed", text: "Move the review to Thursday." },
+          },
+        ],
+      },
+    });
+    await dispatchSlack(
+      {
+        config: {
+          baseUrl: "https://example.com",
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk },
+        sessions: { status: () => ({}), handleInbound },
+      } as any,
+      { body, provider: "inkbox", verified: true, headers: {}, requestId: "voice" },
+    );
+    expect(handleInbound).toHaveBeenCalledTimes(1);
+    const text: string = handleInbound.mock.calls[0][0].text;
+    expect(text.startsWith("<@UBOT> Hello\nAttachment references (not downloaded):")).toBe(true);
+    expect(
+      text.endsWith("\n\n[Voice note 1 — automatically transcribed]\nMove the review to Thursday."),
+    ).toBe(true);
+    expect(handleInbound.mock.calls[0][0].rawText).toBe("Hello");
   });
   it("exercises real SDK snake-case routes, null thread and stable idempotency headers", async () => {
     const requests: { url: string; init?: RequestInit }[] = [];
