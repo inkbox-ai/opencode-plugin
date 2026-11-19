@@ -4491,8 +4491,7 @@ it.each([false, true])(
     const page: any = await d.loadInitialization();
     d.loadInitialization.mockClear();
     if (labelled) {
-      const text =
-        "hello\n\n[Voice note 1 — automatically transcribed]\nRecorded group update.";
+      const text = "hello\n\n[Voice note 1 — automatically transcribed]\nRecorded group update.";
       page.entries.find((entry: any) => entry.isTrigger).text = text;
       page.text = text;
     }
