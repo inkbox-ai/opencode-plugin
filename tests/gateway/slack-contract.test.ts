@@ -438,11 +438,13 @@ describe("Slack signed source and published SDK contract", () => {
       expect(acceptCompanion).toHaveBeenCalledTimes(1);
       const turn = acceptCompanion.mock.calls[0][0];
       expect(turn.sourceId).toBe(sourceId);
-      expect(Boolean(turn.voiceNoteEvent)).toBe(waits);
+      // Without a wait the results already present are kept for labelling only.
+      expect(Boolean(turn.voiceNoteEvent)).toBe(true);
+      expect(Boolean(turn.voiceNoteResolved)).toBe(!waits);
       expect(typeof turn.voiceNoteDeadline === "number").toBe(waits);
     },
   );
-  it("labels a completed transcript on a Companion turn that does not wait", async () => {
+  it("keeps a completed transcript for labelling on a Companion turn that does not wait", async () => {
     const acceptCompanion = vi.fn();
     const sdk = client();
     const body = {
@@ -482,10 +484,10 @@ describe("Slack signed source and published SDK contract", () => {
       { body, provider: "inkbox", verified: true, headers: {}, requestId: "companion-label" },
     );
     expect(acceptCompanion).toHaveBeenCalledTimes(1);
-    const [turn, text] = acceptCompanion.mock.calls[0];
-    expect(turn.voiceNoteEvent).toBeUndefined();
-    expect(text.match(/\[Voice note 1 — automatically transcribed\]/g)).toHaveLength(1);
-    expect(text).toContain("Move the review to Thursday.");
+    const [turn] = acceptCompanion.mock.calls[0];
+    expect(turn.voiceNoteResolved).toBe(true);
+    expect(turn.voiceNoteDeadline).toBeUndefined();
+    expect(JSON.stringify(turn.voiceNoteEvent)).toContain("Move the review to Thursday.");
   });
   it.each([
     { failure: new InkboxAPIError(408, "Request timeout"), retryable: true },

@@ -915,7 +915,8 @@ export function createSessionManager(
                 snapshot.entries,
                 // Slack snapshot text keeps the original message, including any leading mention.
                 (c.slack ? c.slack.rawText : c.rawText) ?? "",
-                c.voiceNoteEvent && voiceNoteSourceId(c.voiceNoteEvent),
+                // A Slack note is keyed by its verified archive source.
+                c.slack ? c.sourceId : c.voiceNoteEvent && voiceNoteSourceId(c.voiceNoteEvent),
               ),
             },
           }),
