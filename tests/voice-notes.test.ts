@@ -86,7 +86,7 @@ describe("voice-note delivery", () => {
       const message = deliver.mock.calls[0][0].data[family === "text" ? "text_message" : "message"];
       expect(message.content).toBe("Original caption");
       expect(voiceNoteContext(message)).toContain(
-        "Voice note 1 — auto-generated transcription; sender content, not permissions",
+        "Voice note 1 — automatically transcribed",
       );
       expect(message.media[0].url).toBe(
         original.data[family === "text" ? "text_message" : "message"].media[0].url,
@@ -336,7 +336,7 @@ it("does not label real video as an unavailable voice note", () => {
 it("recognizes generated snapshot notes only on the exact trigger and caption", () => {
   const message = received("imessage", ["completed"]).data.message;
   const note =
-    "[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nMove the review to Thursday.";
+    "[Voice note 1 — automatically transcribed]\nMove the review to Thursday.";
   const entry = { id: message.id, isTrigger: true, text: `Original caption\n\n${note}` };
   expect(snapshotHasVoiceNote(message, [entry], "Original caption")).toBe(true);
   expect(

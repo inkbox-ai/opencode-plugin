@@ -4492,7 +4492,7 @@ it.each([false, true])(
     d.loadInitialization.mockClear();
     if (labelled) {
       const text =
-        "hello\n\n[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nRecorded group update.";
+        "hello\n\n[Voice note 1 — automatically transcribed]\nRecorded group update.";
       page.entries.find((entry: any) => entry.isTrigger).text = text;
       page.text = text;
     }
