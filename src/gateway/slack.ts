@@ -34,24 +34,26 @@ export function slackSenderAllowed(route: SlackRoute, config: DispatchDeps["conf
     )
   );
 }
+// Reads made before the turn is admitted. A timeout, network failure, 408,
+// 429 or 5xx leaves the message unadmitted so it can be delivered again; a
+// denial and every other error stay final.
+async function readBeforeAdmission<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof SlackConnectionDenied || !retryableRead(error)) throw error;
+    throw new VoiceNoteNotAdmitted("Slack is temporarily unavailable.", { cause: error });
+  }
+}
 export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (!deps.config.gateway.slackEnabled || !event.verified) return true;
-  const identity = await deps.inkbox.getIdentity();
-  const client = await deps.inkbox.getClient();
+  const identity = await readBeforeAdmission(() => deps.inkbox.getIdentity());
+  const client = await readBeforeAdmission(() => deps.inkbox.getClient());
   const route = parseSlack(event.body, identity.id);
   if (!route) return true;
-  let connection: Awaited<ReturnType<typeof ownSlackConnection>>;
-  try {
-    connection = await ownSlackConnection(client, identity.id, route.connectionId);
-  } catch (error) {
-    // The connection is read before the turn is admitted. A timeout, network
-    // failure, 408, 429 or 5xx leaves the message unadmitted so it can be
-    // delivered again; a denial and every other error stay final.
-    if (error instanceof SlackConnectionDenied || !retryableRead(error)) throw error;
-    throw new VoiceNoteNotAdmitted("Slack connections are temporarily unavailable.", {
-      cause: error,
-    });
-  }
+  const connection = await readBeforeAdmission(() =>
+    ownSlackConnection(client, identity.id, route.connectionId),
+  );
   route.connectionGeneration = connection.generation;
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack connection workspace mismatch.");
@@ -75,14 +77,17 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     }
     const source = await prepareSlackSource(client, identity.id, event.body);
     if (!slackSenderAllowed(source.route, deps.config)) return true;
-    const files = (event.body.data as Record<string, any>).event?.files;
+    const slackEvent = (event.body.data as Record<string, any>).event;
+    const files = slackEvent?.files;
+    // A completion is matched by the retained message ID, so wait only when
+    // the envelope names the same message as the archived source.
+    const waits =
+      Array.isArray(files) &&
+      files.some((item) => item && typeof item === "object" && "transcription" in item) &&
+      voiceNoteSourceId(event.body) === source.id;
     const turn = {
       metadata,
-      // A completion is matched by the retained message ID, so wait only when
-      // the envelope names the same message as the archived source.
-      ...(Array.isArray(files) &&
-      files.some((item) => item && typeof item === "object" && "transcription" in item) &&
-      voiceNoteSourceId(event.body) === source.id
+      ...(waits
         ? {
             voiceNoteEvent: structuredClone(event.body),
             voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
@@ -99,7 +104,11 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
       slack: source.route,
     };
     if (!deps.sessions.acceptCompanion) throw new Error("Slack Companion receiver is unavailable.");
-    await deps.sessions.acceptCompanion(turn, `${source.author}: ${route.text}`, {
+    // Without a wait, label results already present, as ordinary Slack does.
+    const text = [route.text, waits ? undefined : voiceNoteContext(slackEvent)]
+      .filter(Boolean)
+      .join("\n\n");
+    await deps.sessions.acceptCompanion(turn, `${source.author}: ${text}`, {
       channel: "slack",
       slack: source.route,
       sender: source.author,

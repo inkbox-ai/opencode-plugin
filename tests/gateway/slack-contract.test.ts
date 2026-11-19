@@ -442,6 +442,83 @@ describe("Slack signed source and published SDK contract", () => {
       expect(typeof turn.voiceNoteDeadline === "number").toBe(waits);
     },
   );
+  it("labels a completed transcript on a Companion turn that does not wait", async () => {
+    const acceptCompanion = vi.fn();
+    const sdk = client();
+    const body = {
+      ...event({
+        message_id: "99999999-9999-4999-8999-999999999999",
+        event: {
+          type: "message",
+          text: "<@UBOT> Hello",
+          files: [
+            {
+              id: "FVOICE",
+              transcription: { status: "completed", text: "Move the review to Thursday." },
+            },
+          ],
+        },
+      }),
+      companion: {
+        channel: "slack",
+        scope_id: "scope",
+        conversation_id: "conversation",
+        activation_id: "activation",
+        phase: "live",
+        sequence: 2,
+      },
+    };
+    await dispatchSlack(
+      {
+        config: {
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: {
+          getIdentity: async () => ({ id: identityId, agentHandle: "example-agent" }),
+          getClient: async () => sdk,
+        },
+        sessions: { acceptCompanion },
+      } as any,
+      { body, provider: "inkbox", verified: true, headers: {}, requestId: "companion-label" },
+    );
+    expect(acceptCompanion).toHaveBeenCalledTimes(1);
+    const [turn, text] = acceptCompanion.mock.calls[0];
+    expect(turn.voiceNoteEvent).toBeUndefined();
+    expect(text.match(/\[Voice note 1 — automatically transcribed\]/g)).toHaveLength(1);
+    expect(text).toContain("Move the review to Thursday.");
+  });
+  it.each([
+    { failure: new InkboxAPIError(408, "Request timeout"), retryable: true },
+    { failure: new InkboxAPIError(403, "Forbidden"), retryable: false },
+  ])(
+    "leaves a Slack turn unadmitted when the identity read fails temporarily ($failure)",
+    async ({ failure, retryable }) => {
+      const sdk = client(),
+        handleInbound = vi.fn();
+      const getIdentity = vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue({ id: identityId });
+      const deps = {
+        config: {
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: { getIdentity, getClient: async () => sdk },
+        sessions: { status: () => ({}), handleInbound },
+      } as any;
+      const error = await dispatchSlack(deps, {
+        body: event(),
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "identity",
+      }).catch((value: unknown) => value);
+      expect(error instanceof VoiceNoteNotAdmitted).toBe(retryable);
+      if (!retryable) expect(error).toBe(failure);
+      expect(handleInbound).not.toHaveBeenCalled();
+      expect(sdk.slack.listConnections).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     {
       failure: new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
