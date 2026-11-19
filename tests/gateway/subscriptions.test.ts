@@ -522,6 +522,30 @@ describe("skipWebhookReconcile", () => {
 });
 
 describe("mixed identity subscription preservation", () => {
+  it("keeps the identity-wide completion row separate from the Slack row", async () => {
+    const subscriptions = makeSubscriptions([
+      {
+        id: "slack",
+        agentIdentityId: "ident-1",
+        url: WEBHOOK_URL,
+        eventTypes: ["slack.dm_received", "message.transcription_finished"],
+      },
+    ]);
+    await reconcileSubscriptions(
+      makeDeps(
+        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+        subscriptions,
+      ),
+      PUBLIC_URL,
+    );
+    expect(subscriptions.create).toHaveBeenCalledWith({
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: ["message.transcription_finished"],
+    });
+    expect(subscriptions.update).not.toHaveBeenCalledWith("slack", expect.anything());
+    expect(subscriptions.delete).not.toHaveBeenCalled();
+  });
   it("keeps Slack events when another identity family is reconciled", async () => {
     const subscriptions = makeSubscriptions([
       {

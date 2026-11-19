@@ -7,6 +7,7 @@ import {
   slackControlText,
   slackRouteKey,
 } from "../slack.js";
+import { voiceNoteContext } from "../voice-notes.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import type { DispatchDeps } from "./dispatch.js";
 import type { VerifiedEvent } from "./types.js";
@@ -56,8 +57,13 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     }
     const source = await prepareSlackSource(client, identity.id, event.body);
     if (!slackSenderAllowed(source.route, deps.config)) return true;
+    const files = (event.body.data as Record<string, any>).event?.files;
     const turn = {
       metadata,
+      ...(Array.isArray(files) &&
+      files.some((item) => item && typeof item === "object" && "transcription" in item)
+        ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+        : {}),
       identityId: identity.id,
       handle: identity.agentHandle,
       sourceId: source.id,
@@ -93,7 +99,9 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     from: route.author,
     messageId: route.sourceEventId,
     conversationId: route.conversationId,
-    text: route.text,
+    text: [route.text, voiceNoteContext((event.body.data as Record<string, any>).event)]
+      .filter(Boolean)
+      .join("\n\n"),
     rawText: nativeText,
     mediaPaths: [],
     contactId: route.contactId,
