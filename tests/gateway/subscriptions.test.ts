@@ -587,7 +587,9 @@ it.each([false, true])(
     );
     const result = await reconcileSubscriptions(deps, PUBLIC_URL);
     if (existing) {
-      expect(subs.update).toHaveBeenCalledTimes(1);
+      expect(subs.create).toHaveBeenCalledWith(
+        expect.objectContaining({ eventTypes: ["whatsapp.reaction_received"] }),
+      );
       expect(result).toMatchObject({ unchanged: 1 });
     } else {
       expect(subs.create).toHaveBeenCalledWith({
@@ -631,8 +633,12 @@ it("preserves mixed WhatsApp and A2A events across each identity reconciliation"
     ),
     PUBLIC_URL,
   );
-  expect(new Set(row.eventTypes)).toEqual(new Set([...A2A_EVENT_TYPES, ...WHATSAPP_EVENTS]));
-  expect(subscriptions.create).not.toHaveBeenCalled();
+  expect(new Set(row.eventTypes)).toEqual(new Set([...A2A_EVENT_TYPES, "whatsapp.received"]));
+  expect(subscriptions.create).toHaveBeenCalledWith({
+    agentIdentityId: "ident-1",
+    url: WEBHOOK_URL,
+    eventTypes: WHATSAPP_EVENTS.filter((e) => e !== "whatsapp.received"),
+  });
   expect(subscriptions.update).toHaveBeenCalledWith(
     "mixed-wa",
     expect.objectContaining({ scope: "identity" }),
@@ -731,6 +737,12 @@ it("keeps query-distinct A2A receivers when mixed WhatsApp reaction registration
       eventTypes: A2A_EVENT_TYPES,
     },
   ]);
+  const create = subscriptions.create.getMockImplementation()!;
+  subscriptions.create.mockImplementation(async (options) => {
+    if (options.eventTypes.includes("whatsapp.reaction_received"))
+      throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
+    return create(options);
+  });
   subscriptions.update.mockImplementation(async (id, options) => {
     if (options.eventTypes?.includes("whatsapp.reaction_received"))
       throw new InkboxAPIError(422, "Unknown event whatsapp.reaction_received");
@@ -745,13 +757,14 @@ it("keeps query-distinct A2A receivers when mixed WhatsApp reaction registration
     PUBLIC_URL,
   );
   expect(subscriptions.delete).not.toHaveBeenCalled();
-  expect(new Set(mixed.eventTypes)).toEqual(
-    new Set([
-      ...A2A_EVENT_TYPES,
-      ...WHATSAPP_EVENTS.filter((type) => type !== "whatsapp.reaction_received"),
-    ]),
+  expect(new Set(mixed.eventTypes)).toEqual(new Set([...A2A_EVENT_TYPES, "whatsapp.received"]));
+  expect(subscriptions.create).toHaveBeenCalledWith(
+    expect.objectContaining({
+      eventTypes: WHATSAPP_EVENTS.filter(
+        (e) => e !== "whatsapp.received" && e !== "whatsapp.reaction_received",
+      ),
+    }),
   );
-  expect(subscriptions.create).not.toHaveBeenCalled();
 });
 
 it("creates one shared completion subscription even without a mailbox, phone or iMessage", async () => {
@@ -770,4 +783,29 @@ it("creates one shared completion subscription even without a mailbox, phone or 
       eventTypes: ["message.transcription_finished"],
     },
   ]);
+});
+
+it("starts twice without rewriting a shared WhatsApp receiver", async () => {
+  const subscriptions = makeSubscriptions([
+    {
+      id: "mixed",
+      agentIdentityId: "ident-1",
+      url: WEBHOOK_URL,
+      eventTypes: [
+        ...WHATSAPP_EVENTS,
+        ...A2A_EVENT_TYPES,
+        "message.transcription_finished",
+        "whatsapp.future",
+      ],
+    },
+  ]);
+  const deps = makeDeps(
+    makeIdentity({ mailbox: null, phoneNumber: null, imessageEnabled: false }),
+    subscriptions,
+  );
+  await reconcileSubscriptions(deps, PUBLIC_URL);
+  await reconcileSubscriptions(deps, PUBLIC_URL);
+  expect(subscriptions.create).not.toHaveBeenCalled();
+  expect(subscriptions.update).not.toHaveBeenCalled();
+  expect(subscriptions.delete).not.toHaveBeenCalled();
 });

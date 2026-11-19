@@ -145,9 +145,20 @@ export async function reconcileSubscriptions(
       const desiredFamilies = eventFamilies(eventTypes);
       const belongsToDesiredChannel = (sub: { eventTypes: string[] }) =>
         [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family));
-      const ours = existing.find(
-        (sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub),
-      );
+      if (kind === "whatsapp") {
+        const covered = new Set(
+          existing.filter((row) => row.url === subscriptionUrl).flatMap((row) => row.eventTypes),
+        );
+        eventTypes = eventTypes.filter((event) => !covered.has(event));
+        if (!eventTypes.length) {
+          result.unchanged += 1;
+          return;
+        }
+      }
+      const ours =
+        kind === "whatsapp"
+          ? undefined
+          : existing.find((sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub));
       const staleOurs = existing.filter(
         (sub) =>
           !("agentIdentityId" in owner) &&
@@ -166,7 +177,8 @@ export async function reconcileSubscriptions(
           })
           .catch(async (error: unknown) => {
             if (
-              allowCreateConflictRetry &&
+              (allowCreateConflictRetry ||
+                (kind === "whatsapp" && eventTypes.length < requestedEventTypes.length)) &&
               error instanceof Error &&
               "statusCode" in error &&
               Number(error.statusCode) === 409
