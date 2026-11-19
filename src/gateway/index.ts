@@ -324,6 +324,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       logger,
     });
   } catch (err) {
+    voiceNotes.close();
     await server.close().catch(() => {});
     throw err;
   }
@@ -332,6 +333,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     if (!opts.subscriptionsManagedExternally)
       await reconcileSubscriptions(deps, transport.publicUrl);
   } catch (err) {
+    voiceNotes.close();
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
     await server.close().catch(() => {});
