@@ -141,6 +141,8 @@ export function slackControlText(route: SlackRoute, botUserId?: string): string 
     ? route.rawText.replace(new RegExp(`^\\s*<@${botUserId}>[,:]?\\s*`), "").trim()
     : route.rawText.trim();
 }
+/** The connection list was read and does not grant this identity the connection. */
+export class SlackConnectionDenied extends Error {}
 export async function ownSlackConnection(
   client: Inkbox,
   identityId: string,
@@ -158,7 +160,7 @@ export async function ownSlackConnection(
     (workspaceId !== undefined && matches[0]?.workspaceId !== workspaceId) ||
     (generation !== undefined && matches[0]?.generation !== generation)
   )
-    throw new Error("Slack connection is not connected to this identity.");
+    throw new SlackConnectionDenied("Slack connection is not connected to this identity.");
   return matches[0]!;
 }
 export async function reconcileSlackSubscription(

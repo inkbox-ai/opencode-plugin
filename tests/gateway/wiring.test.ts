@@ -1569,6 +1569,40 @@ it("holds a pending voice note while the webhook receiver accepts completion, th
   }
 });
 
+it("does not hold a Slack voice note while Slack is disabled", async () => {
+  const f = await start();
+  expect(f.config.gateway.slackEnabled).toBe(false);
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const event = {
+      provider: "inkbox",
+      verified: true,
+      headers: {},
+      eventType: "slack.mention_received",
+      body: {
+        event_type: "slack.mention_received",
+        message: { chatKey: "slack-disabled", channel: "slack", text: "", mediaPaths: [] },
+        data: {
+          connection_id: "connection",
+          message_id: "slack-voice",
+          event: { files: [{ id: "FVOICE", transcription: { status: "pending" } }] },
+        },
+      },
+    };
+    expect(await hooks.server.onEvent(event)).toBe(true);
+    // Dispatch receives it at once; nothing is retained, held or polled.
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  }
+});
+
 it("defers a resolved voice note received while gateway dispatch is starting", async () => {
   const message = {
     chatKey: "contact-voice",
