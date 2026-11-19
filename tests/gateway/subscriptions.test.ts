@@ -521,31 +521,113 @@ describe("skipWebhookReconcile", () => {
   });
 });
 
-describe("mixed identity subscription preservation", () => {
-  it("keeps the identity-wide completion row separate from the Slack row", async () => {
-    const subscriptions = makeSubscriptions([
-      {
-        id: "slack",
-        agentIdentityId: "ident-1",
-        url: WEBHOOK_URL,
-        eventTypes: ["slack.dm_received", "message.transcription_finished"],
-      },
-    ]);
-    await reconcileSubscriptions(
-      makeDeps(
-        makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
-        subscriptions,
+describe("Slack and identity-wide transcription completions", () => {
+  const SLACK = [
+    "slack.dm_received",
+    "slack.group_dm_received",
+    "slack.channel_message_received",
+    "slack.mention_received",
+    "slack.thread_reply_received",
+    "slack.session_stopped",
+  ];
+  /** The server lets one active row per owner and URL hold each event. */
+  function serverSubscriptions(seed: SubRow[]) {
+    const rows = seed.map((row) => ({ ...row, status: "active" }));
+    const owner = (row: Partial<SubRow>) =>
+      row.agentIdentityId ?? row.mailboxId ?? row.phoneNumberId;
+    const conflict = (candidate: SubRow) => {
+      if (
+        rows.some(
+          (row) =>
+            row.id !== candidate.id &&
+            owner(row) === owner(candidate) &&
+            row.url === candidate.url &&
+            row.eventTypes.some((e) => candidate.eventTypes.includes(e)),
+        )
+      )
+        throw new InkboxAPIError(409, "Subscription already exists");
+    };
+    let creates = 0;
+    const subscriptions = {
+      list: vi.fn(async (filters: Record<string, string | undefined>) =>
+        rows
+          .filter(
+            (row) =>
+              (filters.mailboxId === undefined || row.mailboxId === filters.mailboxId) &&
+              (filters.phoneNumberId === undefined ||
+                row.phoneNumberId === filters.phoneNumberId) &&
+              (filters.agentIdentityId === undefined ||
+                row.agentIdentityId === filters.agentIdentityId) &&
+              (filters.url === undefined || row.url === filters.url),
+          )
+          .map((row) => ({ ...row, eventTypes: [...row.eventTypes] })),
       ),
-      PUBLIC_URL,
+      create: vi.fn(async (options: Omit<SubRow, "id">) => {
+        const row = { ...options, id: `created-${++creates}`, status: "active" };
+        conflict(row);
+        rows.push(row);
+        return { ...row, signingKey: null };
+      }),
+      update: vi.fn(async (id: string, options: { eventTypes: string[] }) => {
+        const row = rows.find((candidate) => candidate.id === id)!;
+        conflict({ ...row, eventTypes: options.eventTypes });
+        row.eventTypes = [...options.eventTypes];
+        return row;
+      }),
+      delete: vi.fn(async (id: string) => {
+        rows.splice(
+          rows.findIndex((row) => row.id === id),
+          1,
+        );
+      }),
+    };
+    return { rows, subscriptions };
+  }
+  async function reconcile(server: ReturnType<typeof serverSubscriptions>) {
+    const deps = makeDeps(
+      makeIdentity({ mailbox: undefined, phoneNumber: undefined, imessageEnabled: false }),
+      server.subscriptions as unknown as ReturnType<typeof makeSubscriptions>,
     );
-    expect(subscriptions.create).toHaveBeenCalledWith({
-      agentIdentityId: "ident-1",
-      url: WEBHOOK_URL,
-      eventTypes: ["message.transcription_finished"],
-    });
-    expect(subscriptions.update).not.toHaveBeenCalledWith("slack", expect.anything());
-    expect(subscriptions.delete).not.toHaveBeenCalled();
+    (deps.config.gateway as { slackEnabled?: boolean }).slackEnabled = true;
+    await reconcileSubscriptions(deps, PUBLIC_URL);
+  }
+  function holders(server: ReturnType<typeof serverSubscriptions>) {
+    return server.rows.filter(
+      (row) => row.url === WEBHOOK_URL && row.eventTypes.includes("message.transcription_finished"),
+    );
+  }
+  it.each([
+    { name: "fresh install", seed: [] as SubRow[] },
+    {
+      name: "upgrade with a standalone completion row",
+      seed: [
+        {
+          id: "completions",
+          agentIdentityId: "ident-1",
+          url: WEBHOOK_URL,
+          eventTypes: ["message.transcription_finished"],
+        },
+        { id: "slack", agentIdentityId: "ident-1", url: WEBHOOK_URL, eventTypes: SLACK },
+      ],
+    },
+  ])("$name leaves one completion holder on the Slack row, stable on restart", async ({ seed }) => {
+    const server = serverSubscriptions(seed);
+    await reconcile(server);
+    const held = holders(server);
+    expect(held).toHaveLength(1);
+    expect(held[0]!.eventTypes).toEqual(expect.arrayContaining(SLACK));
+    expect(server.rows.some((row) => row.id === "completions")).toBe(false);
+    const snapshot = JSON.stringify(server.rows);
+    for (const fn of Object.values(server.subscriptions)) fn.mockClear();
+    await reconcile(server);
+    expect(JSON.stringify(server.rows)).toBe(snapshot);
+    expect(server.subscriptions.create).not.toHaveBeenCalled();
+    expect(server.subscriptions.update).not.toHaveBeenCalled();
+    expect(server.subscriptions.delete).not.toHaveBeenCalled();
   });
+});
+
+describe("mixed identity subscription preservation", () => {
   it("keeps Slack events when another identity family is reconciled", async () => {
     const subscriptions = makeSubscriptions([
       {

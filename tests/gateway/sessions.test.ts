@@ -2801,6 +2801,45 @@ describe("Slack native host lifecycle", () => {
       await d.mgr.close();
     },
   );
+  it("recognizes a snapshot transcript after the Slack trigger's leading mention", async () => {
+    const d = setup();
+    const c = {
+      ...d.c,
+      voiceNoteEvent: {
+        event_type: "slack.mention_received",
+        data: {
+          message_id: "source-1",
+          connection_id: d.route.connectionId,
+          conversation_id: d.route.conversationId,
+          event: {
+            type: "message",
+            text: d.route.rawText,
+            files: [
+              {
+                id: "FVOICE",
+                transcription: { status: "completed", text: "Recorded thread update." },
+              },
+            ],
+          },
+        },
+      },
+      voiceNoteDeadline: Date.now() + 60_000,
+    };
+    const page: any = await d.companionApi.loadInitialization();
+    const text = `${d.route.rawText}\n\n[Voice note 1 — automatically transcribed]\nRecorded thread update.`;
+    page.entries.find((entry: any) => entry.isTrigger).text = text;
+    page.text = text;
+    d.companionApi.loadInitialization.mockResolvedValue(page);
+    await d.mgr.acceptCompanion(c, "hello");
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    expect(
+      d.state.listTurns().find((turn) => turn.id.endsWith(":history"))?.companion
+        ?.voiceNoteInSnapshot,
+    ).toBe(true);
+    const prompt = JSON.stringify(d.opencode.session.promptAsync.mock.calls[0]);
+    expect(prompt.match(/Recorded thread update\./g)).toHaveLength(1);
+    await d.mgr.close();
+  });
   it("uses one channel-wide Companion history while delivering current thread and null-thread sources precisely", async () => {
     const d = setup();
     await d.mgr.acceptCompanion(d.c, "hello");

@@ -7,7 +7,7 @@ import {
   slackControlText,
   slackRouteKey,
 } from "../slack.js";
-import { voiceNoteContext } from "../voice-notes.js";
+import { VOICE_NOTE_WAIT_MS, voiceNoteContext, voiceNoteSourceId } from "../voice-notes.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import type { DispatchDeps } from "./dispatch.js";
 import type { VerifiedEvent } from "./types.js";
@@ -60,9 +60,15 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     const files = (event.body.data as Record<string, any>).event?.files;
     const turn = {
       metadata,
+      // A completion is matched by the retained message ID, so wait only when
+      // the envelope names the same message as the archived source.
       ...(Array.isArray(files) &&
-      files.some((item) => item && typeof item === "object" && "transcription" in item)
-        ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+      files.some((item) => item && typeof item === "object" && "transcription" in item) &&
+      voiceNoteSourceId(event.body) === source.id
+        ? {
+            voiceNoteEvent: structuredClone(event.body),
+            voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
+          }
         : {}),
       identityId: identity.id,
       handle: identity.agentHandle,

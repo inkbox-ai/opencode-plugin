@@ -912,7 +912,8 @@ export function createSessionManager(
               voiceNoteInSnapshot: snapshotHasVoiceNote(
                 c.voiceNoteEvent && voiceNoteMessage(c.voiceNoteEvent),
                 snapshot.entries,
-                c.rawText ?? "",
+                // Slack snapshot text keeps the original message, including any leading mention.
+                (c.slack ? c.slack.rawText : c.rawText) ?? "",
                 c.voiceNoteEvent && voiceNoteSourceId(c.voiceNoteEvent),
               ),
             },

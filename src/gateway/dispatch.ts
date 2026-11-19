@@ -2,7 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
-import { voiceNoteContext } from "../voice-notes.js";
+import { VOICE_NOTE_WAIT_MS, voiceNoteContext } from "../voice-notes.js";
 import {
   isWhatsAppGroup,
   mentionContext,
@@ -310,7 +310,10 @@ async function handleInbound(
         info.resource.media.some(
           (item) => item && typeof item === "object" && "transcription" in item,
         )
-          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          ? {
+              voiceNoteEvent: structuredClone(event.body),
+              voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
+            }
           : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
@@ -978,7 +981,10 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       {
         metadata: companion,
         ...(media.some((item) => item && typeof item === "object" && "transcription" in item)
-          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          ? {
+              voiceNoteEvent: structuredClone(event.body),
+              voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
+            }
           : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
