@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.28 (unreleased)
+
+### Added
+- `INKBOX_DELIVERY_MODE=local`: the gateway listens on 127.0.0.1 only, opens no tunnel, and registers no webhook URL. Signature verification is unchanged.
+- Handle `inbound.received` events in local delivery mode. `agent` sources run one turn per event in an `inbound:<source>` session with the body marked as untrusted. `script` sources run the command with the event on stdin (120-second timeout): empty output finishes the event, other output becomes an agent turn, and a failing script runs at most 5 times (retries after 10 s, 30 s, 2 min and 10 min) before the failure is reported to Inkbox. Request bodies in agent turns are capped at 64 KiB. Events are deduplicated by delivery ID (event ID when absent), so a replay runs again, and pending retries survive restarts.
+- Require `@inkbox/sdk` 0.7.41 or later. Outside local delivery mode these events are acknowledged and ignored.
+
 ## 0.2.27 (unreleased)
 
 - Keep reaction outcomes unconfirmed when the response has no receipt ID, including when response parsing tolerates missing fields.

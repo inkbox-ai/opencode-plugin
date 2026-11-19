@@ -814,3 +814,16 @@ it("hands WhatsApp Companion voice metadata to the durable consumer without eage
   expect(text).toContain("Local media:");
   expect(text).not.toContain("transcript unavailable");
 });
+
+it("routes inbound.received only when local delivery handles it", async () => {
+  const inboundEvent = event("inbound.received", { event_id: "inbev_1" });
+  const ignored = makeDeps();
+  expect(await dispatchEvent(ignored, inboundEvent)).toBe(true);
+  expect(ignored.sessions.runCapture).not.toHaveBeenCalled();
+  expect(ignored.sessions.handleInbound).not.toHaveBeenCalled();
+
+  const onInbound = vi.fn(async () => true);
+  const local = makeDeps({ onInbound });
+  expect(await dispatchEvent(local, inboundEvent)).toBe(true);
+  expect(onInbound).toHaveBeenCalledWith(inboundEvent, local.sessions);
+});

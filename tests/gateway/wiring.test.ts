@@ -91,6 +91,7 @@ async function start(
   existingDir?: string,
   native?: { messages: Map<string, any[]>; statuses: Record<string, { type: string }> },
   subscriptionsManagedExternally?: boolean,
+  localDelivery = false,
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
@@ -99,7 +100,12 @@ async function start(
     createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
   const gateway = defaultGatewayConfig();
   const config = {
-    gateway: { ...gateway, permissionTimeoutS: 1, voice: { ...gateway.voice, enabled: false } },
+    gateway: {
+      ...gateway,
+      localDelivery,
+      permissionTimeoutS: 1,
+      voice: { ...gateway.voice, enabled: false },
+    },
     outbound: { allowedRecipients: [] as string[], approval: "ask", askTimeoutMs: 1000 },
   } as ResolvedConfig;
   const identity = {
@@ -168,6 +174,11 @@ it("retains standalone subscription ownership and honors an external owner", asy
   expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
   await start(undefined, undefined, undefined, true);
   expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
+});
+
+it("registers no webhook URL in local delivery mode", async () => {
+  await start(undefined, undefined, undefined, false, true);
+  expect(hooks.subscriptions).not.toHaveBeenCalled();
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {
