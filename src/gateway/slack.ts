@@ -77,14 +77,13 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     }
     const source = await prepareSlackSource(client, identity.id, event.body);
     if (!slackSenderAllowed(source.route, deps.config)) return true;
-    const slackEvent = (event.body.data as Record<string, any>).event;
-    const files = slackEvent?.files;
+    const files = (event.body.data as Record<string, any>).event?.files;
     // A completion is matched by the retained message ID, so wait only when
     // the envelope names the same message as the archived source.
-    const waits =
+    const voice =
       Array.isArray(files) &&
-      files.some((item) => item && typeof item === "object" && "transcription" in item) &&
-      voiceNoteSourceId(event.body) === source.id;
+      files.some((item) => item && typeof item === "object" && "transcription" in item);
+    const waits = voice && voiceNoteSourceId(event.body) === source.id;
     const turn = {
       metadata,
       ...(waits
@@ -92,7 +91,10 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
             voiceNoteEvent: structuredClone(event.body),
             voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
           }
-        : {}),
+        : // Without a wait, results already present are labelled once, as for WhatsApp.
+          voice
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteResolved: true }
+          : {}),
       identityId: identity.id,
       handle: identity.agentHandle,
       sourceId: source.id,
@@ -104,11 +106,7 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
       slack: source.route,
     };
     if (!deps.sessions.acceptCompanion) throw new Error("Slack Companion receiver is unavailable.");
-    // Without a wait, label results already present, as ordinary Slack does.
-    const text = [route.text, waits ? undefined : voiceNoteContext(slackEvent)]
-      .filter(Boolean)
-      .join("\n\n");
-    await deps.sessions.acceptCompanion(turn, `${source.author}: ${text}`, {
+    await deps.sessions.acceptCompanion(turn, `${source.author}: ${route.text}`, {
       channel: "slack",
       slack: source.route,
       sender: source.author,

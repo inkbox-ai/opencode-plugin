@@ -2581,8 +2581,8 @@ describe("native iMessage durable source ownership", () => {
 });
 
 describe("Slack native host lifecycle", () => {
-  function setup(existingDir?: string) {
-    const d = makeManager(existingDir);
+  function setup(existingDir?: string, factory = createSessionManager) {
+    const d = makeManager(existingDir, factory);
     d.config.gateway.slackEnabled = true;
     const route: import("../../src/slack.js").SlackRoute = {
       identityId: "identity-1",
@@ -2840,6 +2840,51 @@ describe("Slack native host lifecycle", () => {
     expect(prompt.match(/Recorded thread update\./g)).toHaveLength(1);
     await d.mgr.close();
   });
+  it.each([false, true])(
+    "labels a Slack transcript once without waiting when the envelope names another message (snapshot labels=%s)",
+    async (labelled) => {
+      const resolveVoiceNote = vi.fn();
+      const d = setup(undefined, (deps) => createSessionManager({ ...deps, resolveVoiceNote }));
+      const c = {
+        ...d.c,
+        voiceNoteEvent: {
+          event_type: "slack.mention_received",
+          data: {
+            message_id: "another-message",
+            connection_id: d.route.connectionId,
+            conversation_id: d.route.conversationId,
+            event: {
+              type: "message",
+              text: d.route.rawText,
+              files: [
+                {
+                  id: "FVOICE",
+                  transcription: { status: "completed", text: "Recorded thread update." },
+                },
+              ],
+            },
+          },
+        },
+        voiceNoteResolved: true,
+      };
+      const page: any = await d.companionApi.loadInitialization();
+      if (labelled) {
+        const text = `${d.route.rawText}\n\n[Voice note 1 — automatically transcribed]\nRecorded thread update.`;
+        page.entries.find((entry: any) => entry.isTrigger).text = text;
+        page.text = text;
+      }
+      d.companionApi.loadInitialization.mockResolvedValue(page);
+      try {
+        await d.mgr.acceptCompanion(c, "hello");
+        await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        const prompt = JSON.stringify(d.opencode.session.promptAsync.mock.calls);
+        expect(prompt.match(/Recorded thread update\./g)).toHaveLength(1);
+        expect(resolveVoiceNote).not.toHaveBeenCalled();
+      } finally {
+        await d.mgr.close();
+      }
+    },
+  );
   it("uses one channel-wide Companion history while delivering current thread and null-thread sources precisely", async () => {
     const d = setup();
     await d.mgr.acceptCompanion(d.c, "hello");
