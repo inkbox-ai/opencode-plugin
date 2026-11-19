@@ -16,6 +16,7 @@ import { createSlackActivity } from "../slack-activity.js";
 import { createSlackProgress } from "../slack-progress.js";
 import { SLACK_STYLE_PROMPT } from "../slack-style.js";
 import { replyState } from "../terminal-reply.js";
+import { snapshotHasVoiceNote, type VoiceEvent, voiceNoteContext } from "../voice-notes.js";
 import {
   authorizeWhatsAppCompanion,
   WhatsAppPreflightError,
@@ -78,6 +79,7 @@ export interface SessionManagerDeps {
   reconcilePermissions?(force?: boolean): Promise<void>;
   cancelPending?(chatKey: string, target: ReplyTarget): void;
   companionSenderAllowed?(from: string, requireReply?: boolean): Promise<boolean>;
+  resolveVoiceNote?(event: VoiceEvent, deadline?: number): Promise<VoiceEvent>;
   companionContactId?(from: string): Promise<string | undefined>;
   companionLocalAllowed?(
     from: string,
@@ -750,7 +752,33 @@ export function createSessionManager(
     );
   }
 
+  async function resolveCompanionVoiceNote(turn: DurableTurn): Promise<DurableTurn> {
+    const c = turn.companion;
+    if (!c?.voiceNoteEvent || c.hydrated || c.voiceNoteResolved || !deps.resolveVoiceNote)
+      return turn;
+    const identity = await deps.inkbox.getIdentity();
+    if (identity.id !== c.identityId || identity.agentHandle !== c.handle)
+      throw new Error("Companion identity changed; queued context is paused.");
+    const event = await deps.resolveVoiceNote(c.voiceNoteEvent, c.voiceNoteDeadline);
+    if (closing) throw new HostedCaptureDeferredError();
+    const message = event.data?.[event.event_type.startsWith("text.") ? "text_message" : "message"];
+    if (message?.id !== c.sourceId) throw new Error("Companion voice note source changed.");
+    const content = c.whatsappSource
+      ? (c.content ?? turn.text)
+      : `${c.from} at ${message.created_at ?? event.timestamp ?? "unknown time"}: ${c.rawText ?? ""}\n${JSON.stringify(message.media ?? [])}`;
+    if (!deps.state.claimTurn(turn.id, ownerId, LEASE_MS))
+      throw new Error("Durable turn lease was lost.");
+    const latest = deps.state.getTurn(turn.id);
+    if (latest?.state !== "hydrating") return latest ?? turn;
+    return (
+      deps.state.updateTurn(turn.id, {
+        companion: { ...c, voiceNoteEvent: event, voiceNoteResolved: true, content },
+      }) ?? turn
+    );
+  }
+
   async function hydrateCompanion(turn: DurableTurn): Promise<DurableTurn> {
+    turn = await resolveCompanionVoiceNote(turn);
     turn = await resolveCompanionMessage(turn);
     const c = turn.companion;
     if (!c || c.hydrated || TERMINAL.has(turn.state)) return turn;
@@ -869,7 +897,17 @@ export function createSessionManager(
             state: "context_only",
             historySourceIds: snapshot.entries.map((entry) => entry.id),
             historyTriggerId: trigger.id,
-            companion: { ...c, hydrated: true },
+            companion: {
+              ...c,
+              hydrated: true,
+              voiceNoteInSnapshot: snapshotHasVoiceNote(
+                c.voiceNoteEvent?.data?.[
+                  c.voiceNoteEvent.event_type.startsWith("text.") ? "text_message" : "message"
+                ],
+                snapshot.entries,
+                c.rawText ?? "",
+              ),
+            },
           }),
         ])[0];
       }
@@ -923,7 +961,7 @@ export function createSessionManager(
       (contactId ? map[contactId] : undefined) ?? map[channel];
     const wakes = companionWakes(c, deps.config.gateway);
     const text = companionFrame(
-      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
+      `${override(deps.config.gateway.channelPrompts) ?? ""}\n${liveContent}${c.voiceNoteEvent && !(history?.companion?.sourceId === c.sourceId && history.companion.voiceNoteInSnapshot) ? `\n${voiceNoteContext(c.voiceNoteEvent.data?.[c.voiceNoteEvent.event_type.startsWith("text.") ? "text_message" : "message"])}` : ""}${c.whatsappSource?.replyContext ? `\n${c.whatsappSource.replyContext}` : ""}`,
       target,
     );
     const next = deps.state.transitionTurn(

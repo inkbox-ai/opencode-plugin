@@ -378,6 +378,23 @@ export function whatsappTools(deps: ToolDeps): RegisteredTool[] {
                   : { customEmoji: args.customEmoji }),
                 idempotencyKey: args.idempotencyKey,
               });
+          const candidate: unknown = result;
+          const receipt =
+            candidate &&
+            typeof candidate === "object" &&
+            "reaction" in candidate &&
+            candidate.reaction &&
+            typeof candidate.reaction === "object"
+              ? candidate.reaction
+              : candidate;
+          if (
+            !receipt ||
+            typeof receipt !== "object" ||
+            !("id" in receipt) ||
+            typeof receipt.id !== "string" ||
+            !receipt.id.trim()
+          )
+            throw new Error("WhatsApp reaction receipt is missing.");
           store.updateWhatsAppSend(key, () => ({ ...entry, state: "accepted", result }));
           return result;
         } catch (error) {

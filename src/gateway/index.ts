@@ -4,6 +4,7 @@ import { bindHostState } from "../host/state.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { checkOutboundRecipient } from "../permissions.js";
 import { slackRouteKey } from "../slack.js";
+import { pollVoiceNote, VoiceNoteInbox, VoiceNoteNotAdmitted } from "../voice-notes.js";
 import {
   UnsupportedWhatsAppGroupSDK,
   whatsappControlText,
@@ -36,7 +37,7 @@ import {
 } from "./response-policy.js";
 import { createWebhookServer, type WebhookAdmission } from "./server.js";
 import { createSessionManager, unsupportedWhatsAppTarget } from "./sessions.js";
-import { createStateStore } from "./state.js";
+import { createStateStore, voiceNotePath } from "./state.js";
 import { reconcileSubscriptions } from "./subscriptions.js";
 import { openTransport } from "./transport.js";
 import type { Channel, GatewayDeps, GatewayHandle, GatewayLogger, VerifiedEvent } from "./types.js";
@@ -110,6 +111,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   };
 
   const sessions = createSessionManager({
+    resolveVoiceNote: (event, deadline) => voiceNotes.resolve(event, deadline),
     opencode: opts.opencode,
     inkbox: opts.inkbox,
     config: opts.config,
@@ -280,6 +282,19 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   // Start the local webhook server first so the tunnel has something to
   // forward to; dispatch is wired below once we can consume messages.
+  let acceptingVoiceNotes = false;
+  const voiceNotes = new VoiceNoteInbox({
+    path: voiceNotePath(state.filePath, opts.config.identity, opts.config.baseUrl),
+    poll: (event) =>
+      pollVoiceNote(event, { ...opts.config, identity: () => opts.inkbox.getIdentity() }),
+    deliver: async (saved) => {
+      if (!acceptingVoiceNotes) throw new VoiceNoteNotAdmitted("Gateway is not ready.");
+      const { __voiceEnvelope, ...body } = saved;
+      await dispatchRegular({ ...__voiceEnvelope, body, headers: {} });
+    },
+    warn: () => logger.warn("voice_note.delivery_retained", {}),
+  });
+
   const server = createWebhookServer({
     config: opts.config,
     logger,
@@ -306,6 +321,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       logger,
     });
   } catch (err) {
+    voiceNotes.close();
     await server.close().catch(() => {});
     throw err;
   }
@@ -314,6 +330,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     if (!opts.subscriptionsManagedExternally)
       await reconcileSubscriptions(deps, transport.publicUrl);
   } catch (err) {
+    voiceNotes.close();
     logger.error("subscriptions.failed", { error: String(err) });
     await transport.close().catch(() => {});
     await server.close().catch(() => {});
@@ -415,7 +432,26 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         })
       : undefined;
 
+  acceptingVoiceNotes = true;
+  voiceNotes.recover();
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
+    if (
+      event.provider === "inkbox" &&
+      event.verified &&
+      (await voiceNotes.accept({
+        ...event.body,
+        __voiceEnvelope: {
+          provider: event.provider,
+          verified: true,
+          eventType: event.eventType,
+          requestId: event.requestId,
+        },
+      }))
+    )
+      return true;
+    return dispatchRegular(event);
+  }
+  async function dispatchRegular(event: VerifiedEvent): Promise<boolean | undefined> {
     if (a2a.handles(event)) return a2a.handle(event);
     const wrapped = wrapSessions();
     return dispatchEvent(
@@ -821,6 +857,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     }),
     ready: () => transport.ready?.() ?? true,
     async close() {
+      acceptingVoiceNotes = false;
+      voiceNotes.close();
       sessions.freezeAdmission?.();
       await escalation
         .close()

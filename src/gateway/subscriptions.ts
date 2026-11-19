@@ -1,9 +1,28 @@
 import type { AgentIdentity } from "@inkbox/sdk";
-import { IncomingCallAction } from "@inkbox/sdk";
+import { IncomingCallAction, InkboxAPIError } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
 import { reconcileSlackSubscription } from "../slack.js";
+import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import { WHATSAPP_EVENTS } from "../whatsapp-native.js";
 import type { GatewayDeps } from "./types.js";
+
+function transcriptionEventUnsupported(error: unknown): boolean {
+  if (!(error instanceof InkboxAPIError) || error.statusCode !== 422) return false;
+  const issues = error.detail;
+  return (
+    Array.isArray(issues) &&
+    issues.length > 0 &&
+    issues.every(
+      (issue) =>
+        issue?.type === "enum" &&
+        issue.input === TRANSCRIPTION_FINISHED &&
+        Array.isArray(issue.loc) &&
+        issue.loc[0] === "body" &&
+        issue.loc[1] === "event_types" &&
+        issue.loc[2] === 0,
+    )
+  );
+}
 
 // Path (under the public URL) all gateway webhook subscriptions target.
 export const WEBHOOK_PATH = "/webhook";
@@ -50,8 +69,12 @@ function sameEventTypes(a: string[], b: string[]): boolean {
   return setA.size === setB.size && [...setA].every((e) => setB.has(e));
 }
 
+function eventFamily(event: string): string {
+  return event === TRANSCRIPTION_FINISHED ? event : event.split(".", 1)[0]!;
+}
+
 function eventFamilies(eventTypes: string[]): Set<string> {
-  return new Set(eventTypes.map((eventType) => eventType.split(".", 1)[0]));
+  return new Set(eventTypes.map(eventFamily));
 }
 
 function sameWebhookPath(left: string, right: string): boolean {
@@ -129,7 +152,7 @@ export async function reconcileSubscriptions(
     eventTypes: string[],
     subscriptionUrl = webhookUrl,
     allowReactionFallback = true,
-    allowCreateConflictRetry = true,
+    createConflict?: Error,
   ): Promise<void> {
     const requestedEventTypes = eventTypes;
     try {
@@ -140,9 +163,22 @@ export async function reconcileSubscriptions(
       const desiredFamilies = eventFamilies(eventTypes);
       const belongsToDesiredChannel = (sub: { eventTypes: string[] }) =>
         [...eventFamilies(sub.eventTypes)].some((family) => desiredFamilies.has(family));
-      const ours = existing.find(
-        (sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub),
-      );
+      if (kind === "whatsapp") {
+        const covered = new Set(
+          existing.filter((row) => row.url === subscriptionUrl).flatMap((row) => row.eventTypes),
+        );
+        eventTypes = eventTypes.filter((event) => !covered.has(event));
+        if (createConflict && eventTypes.length === requestedEventTypes.length)
+          throw createConflict;
+        if (!eventTypes.length) {
+          result.unchanged += 1;
+          return;
+        }
+      }
+      const ours =
+        kind === "whatsapp"
+          ? undefined
+          : existing.find((sub) => sub.url === subscriptionUrl && belongsToDesiredChannel(sub));
       const staleOurs = existing.filter(
         (sub) =>
           !("agentIdentityId" in owner) &&
@@ -161,7 +197,7 @@ export async function reconcileSubscriptions(
           })
           .catch(async (error: unknown) => {
             if (
-              allowCreateConflictRetry &&
+              (!createConflict || kind === "whatsapp") &&
               error instanceof Error &&
               "statusCode" in error &&
               Number(error.statusCode) === 409
@@ -172,7 +208,7 @@ export async function reconcileSubscriptions(
                 eventTypes,
                 subscriptionUrl,
                 allowReactionFallback,
-                false,
+                error,
               );
               return undefined;
             }
@@ -215,6 +251,10 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (kind === "transcription" && transcriptionEventUnsupported(err)) {
+        deps.logger.warn("Transcription callbacks are unavailable on this API version");
+        return;
+      }
       if (
         kind === "whatsapp" &&
         /whatsapp/i.test(inkboxErrorMessage(err)) &&
@@ -261,6 +301,7 @@ export async function reconcileSubscriptions(
   if (identity.phoneNumber) {
     await reconcileOwner("phone", { phoneNumberId: identity.phoneNumber.id }, PHONE_EVENT_TYPES);
   }
+  await reconcileOwner("transcription", { agentIdentityId: identity.id }, [TRANSCRIPTION_FINISHED]);
   await reconcileOwner("a2a", { agentIdentityId: identity.id }, A2A_EVENT_TYPES);
   await reconcileOwner("whatsapp", { agentIdentityId: identity.id }, WHATSAPP_EVENTS);
   if (identity.imessageEnabled) {

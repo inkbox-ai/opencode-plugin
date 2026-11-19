@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.27 (unreleased)
+
+- Keep reaction outcomes unconfirmed when the response has no receipt ID, including when response parsing tolerates missing fields.
+- Exercise the newest supported V2 host in loader checks without silently expanding the declared host-version range.
+
+- Wait for voice-note transcription completion before waking the agent, with a 60-second wait and one bounded message poll before the original-attachment fallback.
+- Register transcription completion notifications automatically and label transcripts separately from sender text.
+
 ## 0.2.26
 
 ### Changed

@@ -1013,6 +1013,23 @@ it.each([false, true])(
     expect(f.fetch).toHaveBeenCalledTimes(2);
   },
 );
+it.each([false, true])(
+  "does not confirm a parsed reaction without a receipt ID (remove: %s)",
+  async (remove) => {
+    const f = v2Tools();
+    const method = remove ? f.identity.removeWhatsAppReaction : f.identity.sendWhatsAppReaction;
+    method.mockResolvedValueOnce({ id: undefined, status: "queued" });
+    const tool = remove ? "remove_whatsapp_reaction" : "send_whatsapp_reaction";
+    const args = remove
+      ? { reactionId: "revision-1", idempotencyKey: "missing-receipt" }
+      : { messageId: source, reaction: "eyes", idempotencyKey: "missing-receipt" };
+    await expect(f.execute(tool, args)).rejects.toThrow("not confirmed");
+    expect(Object.values(createStateStore().read().whatsappSends as object)).toEqual([
+      expect.objectContaining({ state: "started", idempotencyKey: args.idempotencyKey }),
+    ]);
+  },
+);
+
 it("reads nullable unthreaded envelopes without inventing thread IDs", async () => {
   const f = v2Tools();
   expect(await f.execute("get_whatsapp_thread", { messageId: source, limit: 50 })).toContain(

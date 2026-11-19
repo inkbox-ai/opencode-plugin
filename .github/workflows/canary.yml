@@ -60,7 +60,10 @@ jobs:
           cache: pnpm
       - run: |
           bash tests/ci/npm_with_retry.sh ci
-      - run: bash tests/ci/npm_with_retry.sh install -g @opencode/cli@latest
+      - name: Install latest supported V2 host
+        run: |
+          HOST_PACKAGE=$(node scripts/opencode-v2-package.mjs latest)
+          bash tests/ci/npm_with_retry.sh install -g "$HOST_PACKAGE"
       - run: pnpm build
       - run: |
           ARCHIVE=$(npm pack --silent | tail -1)

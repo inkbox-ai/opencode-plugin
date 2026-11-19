@@ -1370,3 +1370,107 @@ it("does not consume an AUTO group approval addressed to another native mention 
   await waInput("allow", "+15550000001", "literal-approval", true);
   expect(await next).toBe("allow");
 });
+
+it("holds a pending voice note while the webhook receiver accepts completion, then wakes once", async () => {
+  await start();
+  vi.useFakeTimers();
+  try {
+    const message = {
+      id: "voice-source",
+      conversation_id: "conversation-voice",
+      direction: "inbound",
+      media: [{ id: "audio-1", transcription: { status: "pending" } }],
+    };
+    const envelope = {
+      provider: "inkbox",
+      verified: true,
+      headers: {},
+      eventType: "imessage.received",
+      body: {
+        event_type: "imessage.received",
+        data: { message },
+        message: {
+          chatKey: "contact-voice",
+          from: "+15555550123",
+          channel: "imessage",
+          text: "Original caption",
+          rawText: "Original caption",
+          mediaPaths: [],
+        },
+      },
+    };
+    expect(await hooks.server.onEvent(envelope)).toBe(true);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    const completion = {
+      ...envelope,
+      eventType: "message.transcription_finished",
+      body: {
+        ...envelope.body,
+        event_type: "message.transcription_finished",
+        data: {
+          channel: "imessage",
+          message_id: message.id,
+          message: {
+            ...message,
+            media: [
+              {
+                id: "audio-1",
+                transcription: { status: "completed", text: "Please move the review." },
+              },
+            ],
+          },
+        },
+      },
+    };
+    await hooks.server.onEvent(completion);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+    await hooks.server.onEvent(completion);
+    await hooks.server.onEvent(envelope);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("defers a resolved voice note received while gateway dispatch is starting", async () => {
+  const message = {
+    chatKey: "contact-voice",
+    from: "+15555550123",
+    channel: "sms",
+    text: "Caption",
+    rawText: "Caption",
+    mediaPaths: [],
+  };
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    headers: {},
+    eventType: "text.received",
+    body: {
+      event_type: "text.received",
+      message,
+      data: {
+        text_message: {
+          id: "starting-voice",
+          media: [{ id: "audio", transcription: { status: "completed", text: "Call tomorrow." } }],
+        },
+      },
+    },
+  };
+  vi.useFakeTimers();
+  try {
+    hooks.subscriptions.mockImplementationOnce(async () => {
+      expect(await hooks.server.onEvent(event)).toBe(true);
+      expect(hooks.inbound).not.toHaveBeenCalled();
+    });
+    await start();
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(hooks.inbound).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hooks.inbound).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});

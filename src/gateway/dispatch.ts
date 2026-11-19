@@ -2,6 +2,7 @@ import type { CallEndedWebhookPayload } from "@inkbox/sdk";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig, ResolvedGatewayConfig } from "../config.js";
 import { noteNativeFailure, ownsNativeFailure } from "../imessage-native.js";
+import { voiceNoteContext } from "../voice-notes.js";
 import {
   isWhatsAppGroup,
   mentionContext,
@@ -299,6 +300,12 @@ async function handleInbound(
     await deps.sessions.acceptCompanion(
       {
         metadata,
+        ...(Array.isArray(info.resource?.media) &&
+        info.resource.media.some(
+          (item) => item && typeof item === "object" && "transcription" in item,
+        )
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
         rawText: info.text,
@@ -444,7 +451,7 @@ async function handleInbound(
       : {}),
     ...(contactMemories.length ? { contactMemories } : {}),
     ...(senderAgent ? { senderAgent } : {}),
-    text: info.text,
+    text: [info.text, voiceNoteContext(info.resource)].filter(Boolean).join("\n\n"),
     rawText: info.text,
     mediaPaths,
     ...(participants > 1
@@ -956,6 +963,7 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
     : await renderWhatsAppReplyContext(identity, message, deps.contacts);
   const sourceWithReply = { ...source, ...(replyContext ? { replyContext } : {}) };
   text = await mentionContext(text, source.mentions, identity.agentHandle, deps.contacts);
+  if (!companion) text = [text, voiceNoteContext(message)].filter(Boolean).join("\n\n");
   if (companion) {
     const acceptCompanion = deps.sessions.acceptCompanion;
     if (!acceptCompanion) throw new Error("WhatsApp Companion receiver is unavailable.");
@@ -963,6 +971,9 @@ async function handleWhatsApp(deps: DispatchDeps, event: VerifiedEvent): Promise
       deps.sessions,
       {
         metadata: companion,
+        ...(media.some((item) => item && typeof item === "object" && "transcription" in item)
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteDeadline: Date.now() + 60_000 }
+          : {}),
         identityId: identity.id,
         environment: deps.config.baseUrl,
         handle: identity.agentHandle,

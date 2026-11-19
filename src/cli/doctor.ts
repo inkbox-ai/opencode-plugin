@@ -4,9 +4,11 @@ import type { ResolvedConfig } from "../config.js";
 import { inkboxErrorMessage } from "../errors.js";
 import { channelReadiness } from "../gateway/channel-readiness.js";
 import { queueReadiness } from "../gateway/readiness.js";
+import { createStateStore, gatewayHome, voiceNotePath } from "../gateway/state.js";
 import { CALL_MEDIA_WS_PATH, WEBHOOK_PATH } from "../gateway/subscriptions.js";
 import type { HostClient as OpencodeClient } from "../host/types.js";
 import { hostedDiagnostics } from "../hosted-diagnostics.js";
+import { unconfirmedVoiceNoteIds } from "../voice-notes.js";
 import { envFileCandidates, readEnvFile } from "./env-file.js";
 import { DEFAULT_OPENCODE_SERVER_URL, opencodeBinAvailable, opencodeReachable } from "./serve.js";
 import { hostMajor, incompatibleWrappers } from "./wrappers.js";
@@ -88,6 +90,20 @@ export async function runDoctor(
         identity: config.identity,
         baseUrl: config.baseUrl,
       }));
+    try {
+      const path = voiceNotePath(
+        createStateStore(gatewayHome(deps.env)).filePath,
+        config.identity,
+        config.baseUrl,
+      );
+      const ids = unconfirmedVoiceNoteIds(path);
+      add(
+        ids.length ? "warning" : "info",
+        `Unconfirmed voice notes (${ids.length}): ${ids.join(", ") || "none"}`,
+      );
+    } catch {
+      add("error", "Unconfirmed voice notes: local inbox unreadable.");
+    }
     findings.push(...(await channelReadiness(config, runtime)));
     try {
       const inkbox = await runtime.getClient();
