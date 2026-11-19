@@ -9,6 +9,7 @@ import {
   MAX_STDOUT_BYTES,
   RETRY_DELAYS_MS,
   SCRIPT_TIMEOUT_MS,
+  TURN_TIMEOUT_MS,
 } from "../../src/gateway/inbound.js";
 import type { VerifiedEvent } from "../../src/gateway/types.js";
 
@@ -199,6 +200,31 @@ it("reports a failed agent turn with the delivery id", async () => {
   );
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
   expect(sessions.runInbound).toHaveBeenCalledTimes(1);
+});
+
+it("reports an agent turn that does not finish within 30 minutes", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const report = vi.fn(async () => undefined);
+  const { dir, handler, sessions } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  sessions.runInbound.mockImplementationOnce(() => new Promise(() => {}));
+  await handler.handle(inboundEvent({ type: "agent" }));
+  await vi.advanceTimersByTimeAsync(0);
+  // vi.waitFor would advance the fake clock.
+  while (!sessions.runInbound.mock.calls.length) await new Promise((r) => setImmediate(r));
+  await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_MS - 1);
+  expect(report).not.toHaveBeenCalled();
+  expect(handler.pending()).toBe(1);
+  await vi.advanceTimersByTimeAsync(1);
+  await vi.waitFor(() =>
+    expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
+      status: "failed",
+      error: "Error: agent turn did not finish within 30 minutes",
+      deliveryId: DELIVERY,
+    }),
+  );
+  await vi.waitFor(() => expect(job(dir).status).toBe("done"));
 });
 
 it("acks a script event before running it and passes the event on stdin", async () => {

@@ -17,6 +17,7 @@ import type { InkboxRuntime } from "../client.js";
 import type { GatewayLogger, SessionManager, VerifiedEvent } from "./types.js";
 
 export const SCRIPT_TIMEOUT_MS = 120_000;
+export const TURN_TIMEOUT_MS = 30 * 60_000;
 export const RETRY_DELAYS_MS = [10_000, 30_000, 120_000, 600_000];
 export const AGENT_BODY_MAX_BYTES = 64 * 1024;
 export const MAX_STDOUT_BYTES = 64 * 1024;
@@ -165,9 +166,22 @@ export function createInboundHandler(deps: {
     }
     if (job.status === "agent" && job.message !== undefined) {
       write(id, { ...job, started: true });
+      let bound: ReturnType<typeof setTimeout> | undefined;
       try {
-        // Keyed by delivery so a restart rejoins the session queue's turn instead of starting another.
-        await deps.sessions.runInbound(`inbound:${job.source}`, job.message, id);
+        await Promise.race([
+          // Keyed by delivery so a restart rejoins the session queue's turn instead of starting another.
+          deps.sessions.runInbound(`inbound:${job.source}`, job.message, id),
+          new Promise<never>((_, reject) => {
+            bound = setTimeout(
+              () =>
+                reject(
+                  new Error(`agent turn did not finish within ${TURN_TIMEOUT_MS / 60_000} minutes`),
+                ),
+              TURN_TIMEOUT_MS,
+            );
+            bound.unref?.();
+          }),
+        ]);
       } catch (error) {
         if (closed) return;
         deps.logger.error("inbound.turn_failed", {
@@ -175,6 +189,8 @@ export function createInboundHandler(deps: {
           error: String(error),
         });
         return fail(id, job, String(error) || "Agent turn failed.");
+      } finally {
+        clearTimeout(bound);
       }
       // A closing session manager may skip the turn; the next start rejoins it.
       if (closed) return;
