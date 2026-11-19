@@ -139,6 +139,28 @@ function allLoggedText(logger: { [K in keyof GatewayLogger]: ReturnType<typeof v
 }
 
 describe("reconcileSubscriptions", () => {
+  it("keeps existing channels when an older API rejects transcription callbacks", async () => {
+    const subs = makeSubscriptions();
+    const create = subs.create.getMockImplementation()!;
+    subs.create.mockImplementation(async (options) => {
+      if (options.eventTypes.includes("message.transcription_finished"))
+        throw Object.assign(new InkboxAPIError(422, "Unknown event"), {
+          detail: [
+            {
+              type: "enum",
+              loc: ["body", "event_types", 0, "MailWebhookEventType"],
+              input: "message.transcription_finished",
+            },
+          ],
+        });
+      return create(options);
+    });
+    await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);
+    expect(subs.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventTypes: IMESSAGE_EVENT_TYPES }),
+    );
+  });
+
   it("creates mailbox, phone, and imessage subscriptions when none exist", async () => {
     const subs = makeSubscriptions();
     const result = await reconcileSubscriptions(makeDeps(makeIdentity(), subs), PUBLIC_URL);

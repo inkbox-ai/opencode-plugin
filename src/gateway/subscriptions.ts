@@ -1,10 +1,28 @@
 import type { AgentIdentity } from "@inkbox/sdk";
-import { IncomingCallAction } from "@inkbox/sdk";
+import { IncomingCallAction, InkboxAPIError } from "@inkbox/sdk";
 import { inkboxErrorMessage } from "../errors.js";
 import { reconcileSlackSubscription } from "../slack.js";
 import { TRANSCRIPTION_FINISHED } from "../voice-notes.js";
 import { WHATSAPP_EVENTS } from "../whatsapp-native.js";
 import type { GatewayDeps } from "./types.js";
+
+function transcriptionEventUnsupported(error: unknown): boolean {
+  if (!(error instanceof InkboxAPIError) || error.statusCode !== 422) return false;
+  const issues = error.detail;
+  return (
+    Array.isArray(issues) &&
+    issues.length > 0 &&
+    issues.every(
+      (issue) =>
+        issue?.type === "enum" &&
+        issue.input === TRANSCRIPTION_FINISHED &&
+        Array.isArray(issue.loc) &&
+        issue.loc[0] === "body" &&
+        issue.loc[1] === "event_types" &&
+        issue.loc[2] === 0,
+    )
+  );
+}
 
 // Path (under the public URL) all gateway webhook subscriptions target.
 export const WEBHOOK_PATH = "/webhook";
@@ -233,6 +251,10 @@ export async function reconcileSubscriptions(
         });
       }
     } catch (err) {
+      if (kind === "transcription" && transcriptionEventUnsupported(err)) {
+        deps.logger.warn("Transcription callbacks are unavailable on this API version");
+        return;
+      }
       if (
         kind === "whatsapp" &&
         /whatsapp/i.test(inkboxErrorMessage(err)) &&
