@@ -327,14 +327,15 @@ it("retries a failed report with backoff without re-running the script, and trea
   );
   const handler = make();
   handler.recover();
-  expect(handler.pending()).toBe(1);
+  // A pending failure report does not keep the agent awake.
+  expect(handler.pending()).toBe(0);
   await vi.advanceTimersByTimeAsync(0);
   await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(job(dir).attempts).toBe(1));
   await vi.advanceTimersByTimeAsync(10_000);
   await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
   await vi.waitFor(() => expect(job(dir).attempts).toBe(2));
-  expect(handler.pending()).toBe(1);
+  expect(handler.pending()).toBe(0);
   await vi.advanceTimersByTimeAsync(20_000);
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
   expect(report).toHaveBeenCalledTimes(3);
@@ -422,8 +423,11 @@ it("resumes queued scripts and agent turns after a restart", async () => {
   expect(logger.error).not.toHaveBeenCalled();
 });
 
-it("leaves an agent turn queued when the gateway closes during it", async () => {
-  const { dir, handler, sessions } = setup();
+it("reports an agent turn interrupted by a restart instead of repeating it", async () => {
+  const report = vi.fn(async () => undefined);
+  const { dir, handler, sessions, make } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
   const turn = deferred();
   sessions.runCapture.mockImplementationOnce(() => turn.promise);
   await handler.handle(inboundEvent({ type: "agent" }));
@@ -431,7 +435,70 @@ it("leaves an agent turn queued when the gateway closes during it", async () => 
   handler.close();
   turn.resolve(undefined);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(job(dir).status).toBe("agent");
+  expect(job(dir)).toMatchObject({ status: "agent", started: true });
+  make().recover();
+  await vi.waitFor(() => expect(job(dir).status).toBe("done"));
+  expect(sessions.runCapture).toHaveBeenCalledTimes(1);
+  expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
+    status: "failed",
+    error: "Agent turn was interrupted by a restart.",
+    deliveryId: DELIVERY,
+  });
+});
+
+it("reports a failed turn on script output without re-running the script", async () => {
+  const report = vi.fn(async () => undefined);
+  const { dir, handler, sessions } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  sessions.runCapture.mockRejectedValueOnce(new Error("model unavailable"));
+  const marker = path.join(dir, "runs");
+  await handler.handle(
+    inboundEvent({ type: "script", command: `echo x >> ${marker}; echo summary` }),
+  );
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(job(dir).status).toBe("done"));
+  expect(fs.readFileSync(marker, "utf-8")).toBe("x\n");
+  expect(sessions.runCapture).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [400, false],
+  [404, false],
+  [422, false],
+  [408, true],
+  [429, true],
+  [500, true],
+])("ends report retries on HTTP %s unless retryable (%s)", async (status, retried) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const report = vi.fn(async () => {
+    throw apiError(status);
+  });
+  const { dir, make } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  fs.writeFileSync(
+    jobFile(dir),
+    JSON.stringify({
+      status: "report",
+      deliveryId: DELIVERY,
+      eventId: EVENT,
+      sourceId: SOURCE,
+      source: "payments",
+      error: "boom",
+      attempts: 0,
+      nextAt: 0,
+      reportSince: Date.now(),
+      updatedAt: Date.now(),
+    }),
+  );
+  make().recover();
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(job(dir).status === "done" || job(dir).attempts === 1).toBe(true));
+  expect(job(dir).status).toBe(retried ? "report" : "done");
+  await vi.advanceTimersByTimeAsync(10_000);
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(retried ? 2 : 1));
 });
 
 it("finishes an unrunnable record instead of keeping it pending", async () => {

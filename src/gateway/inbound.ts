@@ -27,6 +27,8 @@ interface Job {
   command?: string;
   input?: string;
   message?: string;
+  /** Set before the agent turn starts; an interrupted turn is reported, never repeated. */
+  started?: boolean;
   error?: string;
   attempts: number;
   nextAt: number;
@@ -52,7 +54,7 @@ export function createInboundHandler(deps: {
   const now = deps.now ?? Date.now;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const children = new Set<ReturnType<typeof spawn>>();
-  const open = new Set<string>();
+  const open = new Map<string, Job["status"]>();
   let closed = false;
   // Work outlives the delivery that queued it; keep it out of that delivery's tracking context.
   const detached = AsyncResource.bind((fn: () => void) => fn());
@@ -73,7 +75,7 @@ export function createInboundHandler(deps: {
     });
     renameSync(temporary, file(id));
     if (job.status === "done") open.delete(id);
-    else open.add(id);
+    else open.set(id, job.status);
   };
 
   function schedule(id: string, at: number): void {
@@ -139,6 +141,8 @@ export function createInboundHandler(deps: {
       return schedule(id, now() + delay);
     }
     if (job.status === "agent" && job.message !== undefined) {
+      if (job.started) return fail(id, job, "Agent turn was interrupted by a restart.");
+      write(id, { ...job, started: true });
       try {
         await deps.sessions.runCapture(`inbound:${job.source}`, job.message);
       } catch (error) {
@@ -149,7 +153,7 @@ export function createInboundHandler(deps: {
         });
         return fail(id, job, String(error) || "Agent turn failed.");
       }
-      // A closing session manager skips the turn; leave it queued for the next start.
+      // A closing session manager may skip the turn; the next start reports it as interrupted.
       if (closed) return;
       return write(id, { ...job, status: "done", message: undefined });
     }
@@ -159,8 +163,15 @@ export function createInboundHandler(deps: {
         return write(id, { ...job, status: "done" });
       } catch (error) {
         const status = (error as { statusCode?: unknown }).statusCode;
-        // 409 means a newer delivery of this event exists; 404 means it is gone.
-        if (status === 409 || status === 404) return write(id, { ...job, status: "done" });
+        // 409 means a newer delivery of this event exists; other client errors cannot succeed later.
+        if (
+          typeof status === "number" &&
+          status >= 400 &&
+          status < 500 &&
+          status !== 408 &&
+          status !== 429
+        )
+          return write(id, { ...job, status: "done" });
         const delay = Math.min(RETRY_DELAYS_MS[0]! * 2 ** job.attempts, REPORT_MAX_DELAY_MS);
         if (now() + delay - (job.reportSince ?? now()) > REPORT_DEADLINE_MS) {
           deps.logger.error("inbound.report_gave_up", {
@@ -236,7 +247,8 @@ export function createInboundHandler(deps: {
       schedule(id, job.nextAt);
       return true;
     },
-    pending: () => open.size,
+    // Pending failure reports do not keep the agent awake.
+    pending: () => [...open.values()].filter((status) => status !== "report").length,
     recover() {
       let names: string[] = [];
       try {
@@ -247,7 +259,7 @@ export function createInboundHandler(deps: {
         const id = name.slice(0, -5);
         const job = read(id);
         if (job && job.status !== "done") {
-          open.add(id);
+          open.set(id, job.status);
           schedule(id, job.nextAt);
         } else if (!job || job.updatedAt < now() - RECORD_TTL_MS) rmSync(file(id), { force: true });
       }
