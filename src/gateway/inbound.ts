@@ -1,6 +1,16 @@
 import { AsyncResource } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { InkboxRuntime } from "../client.js";
@@ -11,7 +21,7 @@ export const RETRY_DELAYS_MS = [10_000, 30_000, 120_000, 600_000];
 export const AGENT_BODY_MAX_BYTES = 64 * 1024;
 export const MAX_STDOUT_BYTES = 64 * 1024;
 export const MAX_STDERR_BYTES = 4 * 1024;
-export const REPORT_DEADLINE_MS = 24 * 3600_000;
+export const REPORT_ERROR_MAX_CHARS = 2000;
 const REPORT_MAX_DELAY_MS = 3600_000;
 const RECORD_TTL_MS = 14 * 86400_000;
 const RECORD_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -27,12 +37,11 @@ interface Job {
   command?: string;
   input?: string;
   message?: string;
-  /** Set before the agent turn starts; an interrupted turn is reported, never repeated. */
+  /** Set before the agent turn starts; after a restart the session queue's turn decides the outcome. */
   started?: boolean;
   error?: string;
   attempts: number;
   nextAt: number;
-  reportSince?: number;
   updatedAt: number;
 }
 
@@ -46,7 +55,7 @@ export interface InboundHandler {
 export function createInboundHandler(deps: {
   dir: string;
   inkbox: InkboxRuntime;
-  sessions: Pick<SessionManager, "runCapture">;
+  sessions: Pick<SessionManager, "runInbound">;
   logger: GatewayLogger;
   cwd?: string;
   now?: () => number;
@@ -70,10 +79,20 @@ export function createInboundHandler(deps: {
   };
   const write = (id: string, job: Job) => {
     const temporary = `${file(id)}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ ...job, updatedAt: now() }), {
-      mode: 0o600,
-    });
+    const fd = openSync(temporary, "w", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify({ ...job, updatedAt: now() }));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temporary, file(id));
+    const dir = openSync(deps.dir, "r");
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
     if (job.status === "done") open.delete(id);
     else open.set(id, job.status);
   };
@@ -104,7 +123,6 @@ export function createInboundHandler(deps: {
       message: undefined,
       attempts: 0,
       nextAt: now(),
-      reportSince: now(),
     });
     schedule(id, now());
   }
@@ -113,6 +131,11 @@ export function createInboundHandler(deps: {
     const job = read(id);
     if (!job || closed) return;
     if (job.status === "queued" && job.command) {
+      if (job.attempts > RETRY_DELAYS_MS.length)
+        return fail(id, job, "Script run was interrupted by a restart.");
+      // Counted before the run so a crash mid-run still uses up the attempt.
+      const attempts = job.attempts + 1;
+      write(id, { ...job, attempts });
       const result = await runScript(
         job.command,
         job.input ?? "",
@@ -125,13 +148,13 @@ export function createInboundHandler(deps: {
         if (!output) return write(id, { ...job, status: "done", input: undefined });
         write(id, {
           ...job,
+          attempts,
           status: "agent",
           input: undefined,
           message: agentMessage(job.source, job.instructions, result.stdout),
         });
         return schedule(id, now());
       }
-      const attempts = job.attempts + 1;
       const delay = RETRY_DELAYS_MS[attempts - 1];
       if (delay === undefined) {
         deps.logger.warn("inbound.script_gave_up", { eventId: job.eventId });
@@ -141,10 +164,10 @@ export function createInboundHandler(deps: {
       return schedule(id, now() + delay);
     }
     if (job.status === "agent" && job.message !== undefined) {
-      if (job.started) return fail(id, job, "Agent turn was interrupted by a restart.");
       write(id, { ...job, started: true });
       try {
-        await deps.sessions.runCapture(`inbound:${job.source}`, job.message);
+        // Keyed by delivery so a restart rejoins the session queue's turn instead of starting another.
+        await deps.sessions.runInbound(`inbound:${job.source}`, job.message, id);
       } catch (error) {
         if (closed) return;
         deps.logger.error("inbound.turn_failed", {
@@ -153,7 +176,7 @@ export function createInboundHandler(deps: {
         });
         return fail(id, job, String(error) || "Agent turn failed.");
       }
-      // A closing session manager may skip the turn; the next start reports it as interrupted.
+      // A closing session manager may skip the turn; the next start rejoins it.
       if (closed) return;
       return write(id, { ...job, status: "done", message: undefined });
     }
@@ -173,13 +196,6 @@ export function createInboundHandler(deps: {
         )
           return write(id, { ...job, status: "done" });
         const delay = Math.min(RETRY_DELAYS_MS[0]! * 2 ** job.attempts, REPORT_MAX_DELAY_MS);
-        if (now() + delay - (job.reportSince ?? now()) > REPORT_DEADLINE_MS) {
-          deps.logger.error("inbound.report_gave_up", {
-            eventId: job.eventId,
-            error: String(error),
-          });
-          return write(id, { ...job, status: "done" });
-        }
         write(id, {
           ...job,
           attempts: job.attempts + 1,
@@ -219,6 +235,15 @@ export function createInboundHandler(deps: {
       };
       const body = typeof request.body === "string" ? request.body : "";
       const encoding = request.body_encoding === "base64" ? "base64" : "utf8";
+      let text: string | undefined = body;
+      if (encoding === "base64") {
+        try {
+          // Text can arrive base64-encoded too; only bytes that are not UTF-8 are withheld.
+          text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(body, "base64"));
+        } catch {
+          text = undefined;
+        }
+      }
       if (handler?.type === "script" && typeof handler.command === "string") {
         write(id, {
           ...job,
@@ -238,9 +263,8 @@ export function createInboundHandler(deps: {
           message: agentMessage(
             source.name,
             job.instructions,
-            encoding === "utf8"
-              ? body
-              : `[Binary body, ${Buffer.byteLength(body, "base64")} bytes (${String(request.content_type ?? "unknown type")}); not shown.]`,
+            text ??
+              `[Binary body, ${Buffer.byteLength(body, "base64")} bytes (${String(request.content_type ?? "unknown type")}); not shown.]`,
           ),
         });
       } else return true;
@@ -376,7 +400,7 @@ async function reportFailure(inkbox: InkboxRuntime, job: Job): Promise<void> {
   const identity = await inkbox.getIdentity();
   await client.inbound.reportInboundEventResult(identity.agentHandle, job.sourceId, job.eventId, {
     status: "failed",
-    error: job.error ?? "",
+    error: (job.error ?? "").slice(-REPORT_ERROR_MAX_CHARS),
     deliveryId: job.deliveryId,
   });
 }

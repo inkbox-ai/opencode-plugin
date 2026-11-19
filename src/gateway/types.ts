@@ -189,6 +189,10 @@ export interface SessionManager {
   handleInbound(msg: InboundMessage): Promise<void>;
   // Run a capture turn; resolves with the assistant text (not delivered).
   runCapture(chatKey: string, text: string): Promise<string | undefined>;
+  // Run an inbound-source capture turn keyed by delivery id. A turn already
+  // recorded for that delivery is rejoined (after a restart) rather than repeated;
+  // rejects if that turn failed or was interrupted.
+  runInbound(chatKey: string, text: string, deliveryId: string): Promise<string | undefined>;
   // Run an already-framed turn and return the assistant text without
   // delivering it anywhere (used by the voice bridge to speak the reply).
   runText(chatKey: string, framedText: string): Promise<string | undefined>;

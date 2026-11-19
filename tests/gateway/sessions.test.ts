@@ -1417,6 +1417,67 @@ describe("capture turns", () => {
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
   });
 
+  it("runs an inbound turn once per delivery and rejoins it after a restart", async () => {
+    const d = makeManager();
+    expect(await d.mgr.runInbound("inbound:payments", "event", "delivery-1")).toBe("reply");
+    expect(await d.mgr.runInbound("inbound:payments", "event", "delivery-1")).toBe("reply");
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    await d.mgr.close();
+
+    // A turn the previous process left mid-flight is resumed by the queue and joined, not repeated.
+    const restarted = makeManager(d.dir);
+    restarted.state.saveTurn({
+      id: "inbound-pending",
+      messageID: "inbound-pending",
+      chatKey: "inbound:payments",
+      state: "completed",
+      kind: "capture",
+      text: "event",
+      deliver: false,
+      output: "finished before the restart",
+      inboundDeliveryId: "delivery-2",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await restarted.mgr.catchUp();
+    expect(await restarted.mgr.runInbound("inbound:payments", "event", "delivery-2")).toBe(
+      "finished before the restart",
+    );
+    restarted.state.saveTurn({
+      id: "inbound-failed",
+      messageID: "inbound-failed",
+      chatKey: "inbound:payments",
+      state: "failed",
+      kind: "capture",
+      text: "event",
+      deliver: false,
+      error: "model unavailable",
+      inboundDeliveryId: "delivery-3",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await expect(
+      restarted.mgr.runInbound("inbound:payments", "event", "delivery-3"),
+    ).rejects.toThrow("model unavailable");
+    expect(restarted.opencode.session.promptAsync).not.toHaveBeenCalled();
+    restarted.state.saveTurn({
+      id: "inbound-queued",
+      messageID: "inbound-queued",
+      chatKey: "inbound:other",
+      state: "queued",
+      kind: "capture",
+      text: "event",
+      deliver: false,
+      inboundDeliveryId: "delivery-4",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await restarted.mgr.catchUp();
+    expect(await restarted.mgr.runInbound("inbound:other", "event", "delivery-4")).toBe("reply");
+    expect(restarted.opencode.session.promptAsync).toHaveBeenCalledTimes(1);
+    await restarted.mgr.close();
+  });
+
   it("builds A2A progress in an isolated tool-free side session", async () => {
     const d = makeManager();
     const context = {

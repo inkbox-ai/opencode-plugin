@@ -48,6 +48,7 @@ function makeDeps(over: Partial<DispatchDeps> = {}): DispatchDeps {
     sessions: {
       handleInbound: vi.fn(async () => {}),
       runCapture: vi.fn(async () => undefined),
+      runInbound: vi.fn(async () => undefined),
       runText: vi.fn(async () => undefined),
       runA2A: vi.fn(async () => undefined),
       abortA2A: vi.fn(async () => false),

@@ -7,7 +7,6 @@ import {
   createInboundHandler,
   MAX_STDERR_BYTES,
   MAX_STDOUT_BYTES,
-  REPORT_DEADLINE_MS,
   RETRY_DELAYS_MS,
   SCRIPT_TIMEOUT_MS,
 } from "../../src/gateway/inbound.js";
@@ -25,8 +24,9 @@ function setup(client: Record<string, unknown> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inbound-"));
   dirs.push(dir);
   const sessions = {
-    runCapture: vi.fn(
-      async (_key: string, _text: string): Promise<string | undefined> => undefined,
+    runInbound: vi.fn(
+      async (_key: string, _text: string, _deliveryId: string): Promise<string | undefined> =>
+        undefined,
     ),
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -119,11 +119,11 @@ const apiError = (statusCode: number) =>
 it("persists an agent event, acks it, and finishes it only after the turn succeeds", async () => {
   const { dir, handler, sessions } = setup();
   const turn = deferred();
-  sessions.runCapture.mockImplementationOnce(() => turn.promise);
+  sessions.runInbound.mockImplementationOnce(() => turn.promise);
   expect(await handler.handle(inboundEvent({ type: "agent" }))).toBe(true);
   expect(job(dir).status).toBe("agent");
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1));
-  const [key, text] = sessions.runCapture.mock.calls[0]!;
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
+  const [key, text] = sessions.runInbound.mock.calls[0]!;
   expect(key).toBe("inbound:payments");
   expect(text).toMatch(/^UNTRUSTED EXTERNAL CONTENT from inbound source "payments"/);
   expect(text.indexOf("Log each payment.")).toBeLessThan(text.indexOf('{"amount":5}'));
@@ -142,7 +142,7 @@ it("dedupes on delivery_id: a retry is skipped, a replay runs again", async () =
   await handler.handle(
     inboundEvent({ type: "agent" }, {}, true, "7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"),
   );
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(2));
 });
 
 it("ignores events that are unverified, not from Inkbox, or lack a delivery_id", async () => {
@@ -156,15 +156,15 @@ it("ignores events that are unverified, not from Inkbox, or lack a delivery_id",
   ).toBe(true);
   expect(await handler.handle(inboundEvent({ type: "agent" }, {}, true, null))).toBe(true);
   expect(fs.readdirSync(path.join(dir, "events"))).toEqual([]);
-  expect(sessions.runCapture).not.toHaveBeenCalled();
+  expect(sessions.runInbound).not.toHaveBeenCalled();
 });
 
 it("caps the agent body at 64 KiB on a character boundary", async () => {
   const { handler, sessions } = setup();
   const body = `${"a".repeat(AGENT_BODY_MAX_BYTES - 1)}é tail`;
   await handler.handle(inboundEvent({ type: "agent" }, { body }));
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1));
-  const text = sessions.runCapture.mock.calls[0]![1];
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
+  const text = sessions.runInbound.mock.calls[0]![1];
   expect(text.endsWith(`${"a".repeat(AGENT_BODY_MAX_BYTES - 1)}\n(truncated)`)).toBe(true);
   expect(text).not.toContain("�");
 });
@@ -174,11 +174,11 @@ it("describes a binary body instead of including it", async () => {
   await handler.handle(
     inboundEvent(
       { type: "agent" },
-      { body: Buffer.from("abc").toString("base64"), body_encoding: "base64" },
+      { body: Buffer.from([0xff, 0xfe, 0]).toString("base64"), body_encoding: "base64" },
     ),
   );
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1));
-  expect(sessions.runCapture.mock.calls[0]![1]).toContain(
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
+  expect(sessions.runInbound.mock.calls[0]![1]).toContain(
     "[Binary body, 3 bytes (application/json); not shown.]",
   );
 });
@@ -188,7 +188,7 @@ it("reports a failed agent turn with the delivery id", async () => {
   const { dir, handler, sessions } = setup({
     inbound: { reportInboundEventResult: report },
   });
-  sessions.runCapture.mockRejectedValueOnce(new Error("model unavailable"));
+  sessions.runInbound.mockRejectedValueOnce(new Error("model unavailable"));
   await handler.handle(inboundEvent({ type: "agent" }));
   await vi.waitFor(() =>
     expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
@@ -198,7 +198,7 @@ it("reports a failed agent turn with the delivery id", async () => {
     }),
   );
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
-  expect(sessions.runCapture).toHaveBeenCalledTimes(1);
+  expect(sessions.runInbound).toHaveBeenCalledTimes(1);
 });
 
 it("acks a script event before running it and passes the event on stdin", async () => {
@@ -216,14 +216,14 @@ it("acks a script event before running it and passes the event on stdin", async 
     body: '{"amount":5}',
     body_encoding: "utf8",
   });
-  expect(sessions.runCapture).not.toHaveBeenCalled();
+  expect(sessions.runInbound).not.toHaveBeenCalled();
 });
 
 it("turns script stdout into an agent turn and finishes after it", async () => {
   const { dir, handler, sessions } = setup();
   await handler.handle(inboundEvent({ type: "script", command: "echo 'refund requested'" }));
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1));
-  const [key, text] = sessions.runCapture.mock.calls[0]!;
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
+  const [key, text] = sessions.runInbound.mock.calls[0]!;
   expect(key).toBe("inbound:payments");
   expect(text).toContain("refund requested");
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
@@ -242,11 +242,11 @@ it("drains large output, keeps 64 KiB of stdout, and passes the full body on std
       { body },
     ),
   );
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1), {
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1), {
     timeout: 10_000,
   });
   expect(JSON.parse(fs.readFileSync(out, "utf-8")).body).toBe(body);
-  const text = sessions.runCapture.mock.calls[0]![1];
+  const text = sessions.runInbound.mock.calls[0]![1];
   expect(text).toContain(`${"x".repeat(MAX_STDOUT_BYTES)}\n(truncated)`);
   expect(text).not.toContain("x".repeat(MAX_STDOUT_BYTES + 1));
 });
@@ -268,8 +268,8 @@ it("runs a failing script 5 times on the backoff schedule, counts it as pending,
   await vi.advanceTimersByTimeAsync(0);
   await vi.waitFor(() => expect(runs()).toBe(1));
   for (const [index, delay] of RETRY_DELAYS_MS.entries()) {
-    await vi.waitFor(() => expect(job(dir).attempts).toBe(index + 1));
-    expect(job(dir).nextAt - job(dir).updatedAt).toBe(delay);
+    await vi.waitFor(() => expect(job(dir).nextAt - job(dir).updatedAt).toBe(delay));
+    expect(job(dir).attempts).toBe(index + 1);
     expect(handler.pending()).toBe(1);
     expect(runs()).toBe(index + 1);
     await vi.advanceTimersByTimeAsync(delay);
@@ -321,7 +321,6 @@ it("retries a failed report with backoff without re-running the script, and trea
       error: "boom",
       attempts: 0,
       nextAt: 0,
-      reportSince: Date.now(),
       updatedAt: Date.now(),
     }),
   );
@@ -343,7 +342,7 @@ it("retries a failed report with backoff without re-running the script, and trea
   expect(handler.pending()).toBe(0);
 });
 
-it("stops retrying a report after 24 hours", async () => {
+it("keeps retrying a report past 24 hours until it is accepted", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   const report = vi.fn(async () => {
     throw apiError(503);
@@ -362,16 +361,17 @@ it("stops retrying a report after 24 hours", async () => {
       error: "boom",
       attempts: 0,
       nextAt: 0,
-      reportSince: Date.now(),
       updatedAt: Date.now(),
     }),
   );
   make().recover();
-  await vi.advanceTimersByTimeAsync(REPORT_DEADLINE_MS + 3_600_000);
+  await vi.advanceTimersByTimeAsync(30 * 3_600_000);
+  expect(job(dir).status).toBe("report");
+  expect(report.mock.calls.length).toBeGreaterThan(20);
+  report.mockResolvedValue(undefined as never);
+  await vi.advanceTimersByTimeAsync(3_600_000);
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
-  expect(logger.error).toHaveBeenCalledWith("inbound.report_gave_up", expect.anything());
-  expect(report.mock.calls.length).toBeGreaterThan(5);
-  expect(report.mock.calls.length).toBeLessThan(40);
+  expect(logger.error).not.toHaveBeenCalled();
 });
 
 it("kills a script at the timeout and counts it as a failed attempt", async () => {
@@ -417,33 +417,134 @@ it("resumes queued scripts and agent turns after a restart", async () => {
   expect(handler.pending()).toBe(2);
   await vi.waitFor(() => expect(fs.existsSync(path.join(dir, "resumed"))).toBe(true));
   await vi.waitFor(() =>
-    expect(sessions.runCapture).toHaveBeenCalledWith("inbound:payments", "resumed turn"),
+    expect(sessions.runInbound).toHaveBeenCalledWith("inbound:payments", "resumed turn", "agent-1"),
   );
   await vi.waitFor(() => expect(handler.pending()).toBe(0));
   expect(logger.error).not.toHaveBeenCalled();
 });
 
-it("reports an agent turn interrupted by a restart instead of repeating it", async () => {
+it("rejoins the session turn for a started agent job after a restart", async () => {
   const report = vi.fn(async () => undefined);
   const { dir, handler, sessions, make } = setup({
     inbound: { reportInboundEventResult: report },
   });
   const turn = deferred();
-  sessions.runCapture.mockImplementationOnce(() => turn.promise);
+  sessions.runInbound.mockImplementationOnce(() => turn.promise);
   await handler.handle(inboundEvent({ type: "agent" }));
-  await vi.waitFor(() => expect(sessions.runCapture).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
   handler.close();
   turn.resolve(undefined);
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(job(dir)).toMatchObject({ status: "agent", started: true });
   make().recover();
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
-  expect(sessions.runCapture).toHaveBeenCalledTimes(1);
+  // The same delivery id lets the session queue return its recorded turn instead of a new one.
+  expect(sessions.runInbound).toHaveBeenCalledTimes(2);
+  expect(sessions.runInbound.mock.calls[1]![2]).toBe(DELIVERY);
+  expect(report).not.toHaveBeenCalled();
+});
+
+it("reports a started turn the session queue recorded as failed", async () => {
+  const report = vi.fn(async () => undefined);
+  const { dir, sessions, make } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  fs.mkdirSync(path.join(dir, "events"), { recursive: true });
+  fs.writeFileSync(
+    jobFile(dir),
+    JSON.stringify({
+      status: "agent",
+      deliveryId: DELIVERY,
+      eventId: EVENT,
+      sourceId: SOURCE,
+      source: "payments",
+      message: "turn",
+      started: true,
+      attempts: 0,
+      nextAt: 0,
+      updatedAt: Date.now(),
+    }),
+  );
+  sessions.runInbound.mockRejectedValueOnce(new Error("Agent turn was interrupted."));
+  make().recover();
+  await vi.waitFor(() => expect(job(dir).status).toBe("done"));
   expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
     status: "failed",
-    error: "Agent turn was interrupted by a restart.",
+    error: "Error: Agent turn was interrupted.",
     deliveryId: DELIVERY,
   });
+});
+
+it("counts a script run before it starts and never runs a sixth time after a restart", async () => {
+  const report = vi.fn(async () => undefined);
+  const { dir, handler, make } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  const seen = path.join(dir, "seen");
+  await handler.handle(
+    inboundEvent({ type: "script", command: `cat ${jobFile(dir)} > ${seen}; exit 1` }),
+  );
+  await vi.waitFor(() => expect(fs.existsSync(seen)).toBe(true));
+  expect(JSON.parse(fs.readFileSync(seen, "utf-8")).attempts).toBe(1);
+  handler.close();
+  const marker = path.join(dir, "runs");
+  // Five runs have started; the fifth was cut off by a restart.
+  fs.writeFileSync(
+    jobFile(dir),
+    JSON.stringify({
+      ...job(dir),
+      status: "queued",
+      attempts: 5,
+      nextAt: 0,
+      command: `echo x >> ${marker}`,
+    }),
+  );
+  make().recover();
+  await vi.waitFor(() => expect(job(dir).status).toBe("done"));
+  expect(fs.existsSync(marker)).toBe(false);
+  expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
+    status: "failed",
+    error: "Script run was interrupted by a restart.",
+    deliveryId: DELIVERY,
+  });
+});
+
+it("sends at most 2000 characters of error text", async () => {
+  const report = vi.fn(async () => undefined);
+  const { dir, handler } = setup({
+    inbound: { reportInboundEventResult: report },
+  });
+  await handler.handle(
+    inboundEvent({
+      type: "script",
+      command: "head -c 3000 /dev/zero | tr '\\0' e >&2; echo END >&2; exit 1",
+    }),
+  );
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  for (const delay of RETRY_DELAYS_MS) {
+    await vi.waitFor(() => expect(job(dir).nextAt).toBeGreaterThan(Date.now()));
+    await vi.advanceTimersByTimeAsync(delay);
+  }
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1));
+  const result = (
+    report.mock.calls[0] as unknown as [string, string, string, { error: string }]
+  )[3];
+  expect(result.error).toHaveLength(2000);
+  expect(result.error.endsWith("END")).toBe(true);
+  expect(job(dir).error.length).toBeGreaterThan(2000);
+});
+
+it("shows a base64 body that decodes to UTF-8 as text", async () => {
+  const { handler, sessions } = setup();
+  await handler.handle(
+    inboundEvent(
+      { type: "agent" },
+      { body: Buffer.from('{"note":"café"}').toString("base64"), body_encoding: "base64" },
+    ),
+  );
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
+  expect(sessions.runInbound.mock.calls[0]![1]).toContain('{"note":"café"}');
+  expect(sessions.runInbound.mock.calls[0]![1]).not.toContain("Binary body");
 });
 
 it("reports a failed turn on script output without re-running the script", async () => {
@@ -451,7 +552,7 @@ it("reports a failed turn on script output without re-running the script", async
   const { dir, handler, sessions } = setup({
     inbound: { reportInboundEventResult: report },
   });
-  sessions.runCapture.mockRejectedValueOnce(new Error("model unavailable"));
+  sessions.runInbound.mockRejectedValueOnce(new Error("model unavailable"));
   const marker = path.join(dir, "runs");
   await handler.handle(
     inboundEvent({ type: "script", command: `echo x >> ${marker}; echo summary` }),
@@ -459,7 +560,7 @@ it("reports a failed turn on script output without re-running the script", async
   await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1));
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
   expect(fs.readFileSync(marker, "utf-8")).toBe("x\n");
-  expect(sessions.runCapture).toHaveBeenCalledTimes(1);
+  expect(sessions.runInbound).toHaveBeenCalledTimes(1);
 });
 
 it.each([
@@ -488,7 +589,6 @@ it.each([
       error: "boom",
       attempts: 0,
       nextAt: 0,
-      reportSince: Date.now(),
       updatedAt: Date.now(),
     }),
   );

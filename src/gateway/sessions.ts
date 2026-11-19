@@ -2115,6 +2115,30 @@ export function createSessionManager(
       return this.runText(chatKey, frameCapture("event", text));
     },
 
+    async runInbound(chatKey, text, deliveryId) {
+      if (closing) return undefined;
+      const existing = deps.state
+        .listTurns()
+        .filter((turn) => turn.inboundDeliveryId === deliveryId)
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      if (existing?.state === "failed" || existing?.state === "interrupted")
+        throw new Error(existing.error ?? "Agent turn was interrupted.");
+      // Capture turns deliver nothing, so "completed" is their final state.
+      if (existing && (existing.state === "completed" || TERMINAL.has(existing.state)))
+        return existing.output;
+      return promiseFor(
+        existing ??
+          makeTurn(
+            chatKey,
+            "capture",
+            frameCapture("event", text),
+            false,
+            deps.state.getReplyTarget(chatKey),
+            { inboundDeliveryId: deliveryId },
+          ),
+      );
+    },
+
     async runText(chatKey, text) {
       if (closing) return undefined;
       return promiseFor(
