@@ -5,15 +5,15 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@inkbox/sdk': github:inkbox-ai/inkbox#84386f5ea022a9594fb901894f927ee444c2cf91&path:/sdk/typescript
+  '@inkbox/sdk': github:inkbox-ai/inkbox#c173831c7ac6a78649090741e06977627568ce95&path:/sdk/typescript
 
 importers:
 
   .:
     dependencies:
       '@inkbox/sdk':
-        specifier: github:inkbox-ai/inkbox#84386f5ea022a9594fb901894f927ee444c2cf91&path:/sdk/typescript
-        version: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/84386f5ea022a9594fb901894f927ee444c2cf91#path:/sdk/typescript
+        specifier: github:inkbox-ai/inkbox#c173831c7ac6a78649090741e06977627568ce95&path:/sdk/typescript
+        version: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript
       '@opencode-ai/sdk':
         specifier: '>=1.17.18 <1.19.0'
         version: 1.18.35
@@ -412,9 +412,9 @@ packages:
     resolution: {integrity: sha512-GmzA9ckNokPypTg10pgpeHNQe7ph+iIKKmhKu3Ob9ANkswreCx7R3cKmY781K8QK3AqVL3xVh9A42JvIAbkkSA==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/84386f5ea022a9594fb901894f927ee444c2cf91#path:/sdk/typescript':
-    resolution: {path: /sdk/typescript, tarball: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/84386f5ea022a9594fb901894f927ee444c2cf91}
-    version: 0.7.39
+  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript':
+    resolution: {path: /sdk/typescript, tarball: https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95}
+    version: 0.7.41
     engines: {node: '>=22'}
 
   '@isaacs/cliui@8.0.2':
@@ -2305,7 +2305,7 @@ snapshots:
 
   '@gar/promise-retry@1.0.3': {}
 
-  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/84386f5ea022a9594fb901894f927ee444c2cf91#path:/sdk/typescript':
+  '@inkbox/sdk@https://codeload.github.com/inkbox-ai/inkbox/tar.gz/c173831c7ac6a78649090741e06977627568ce95#path:/sdk/typescript':
     dependencies:
       '@peculiar/x509': 2.2.0
       ajv: 8.20.0
