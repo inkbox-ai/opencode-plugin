@@ -1478,6 +1478,32 @@ describe("capture turns", () => {
     await restarted.mgr.close();
   });
 
+  it("times an inbound turn from when it starts and stops it on timeout", async () => {
+    const d = makeManager();
+    d.setAutoComplete(false);
+    const first = d.mgr.runInbound("inbound:src", "first", "delivery-a", 300);
+    const second = d.mgr.runInbound("inbound:src", "second", "delivery-b", 300);
+    const outcome = (promise: Promise<unknown>) =>
+      promise.then(
+        () => "resolved",
+        (error) => String(error),
+      );
+    const firstOutcome = outcome(first);
+    const secondOutcome = outcome(second);
+    expect(await firstOutcome).toContain("did not finish within");
+    const turnFor = (deliveryId: string) =>
+      d.state.listTurns().find((turn) => turn.inboundDeliveryId === deliveryId);
+    await vi.waitFor(() => expect(turnFor("delivery-a")?.state).toBe("interrupted"));
+    expect(d.opencode.session.abort).toHaveBeenCalled();
+    // Queue wait behind the first turn does not count toward the second turn's limit.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(turnFor("delivery-b")?.state).not.toBe("interrupted");
+    expect(await secondOutcome).toContain("did not finish within");
+    await vi.waitFor(() => expect(turnFor("delivery-b")?.state).toBe("interrupted"));
+    expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(2);
+    await d.mgr.close();
+  });
+
   it("builds A2A progress in an isolated tool-free side session", async () => {
     const d = makeManager();
     const context = {

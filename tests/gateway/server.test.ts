@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedConfig } from "../../src/config.js";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { createRequestDedup } from "../../src/gateway/dedup.js";
+import { InboundQueueFullError } from "../../src/gateway/inbound.js";
 import type { WebhookServer } from "../../src/gateway/server.js";
 import { createWebhookServer } from "../../src/gateway/server.js";
 import type { WebhookProvider } from "../../src/gateway/types.js";
@@ -224,6 +225,27 @@ describe("POST /webhook", () => {
 
     expect(res.status).toBe(500);
     expect(rollback).toHaveBeenCalledWith("req-fail");
+  });
+
+  it("returns 503 and rolls back the request id when the inbound queue is full", async () => {
+    const dedup = createRequestDedup();
+    const rollback = vi.spyOn(dedup, "rollback");
+    const deps = baseDeps({
+      dedup,
+      onEvent: vi.fn(async () => {
+        throw new InboundQueueFullError();
+      }),
+    });
+    const url = await start(deps);
+
+    const res = await fetch(`${url}/webhook`, {
+      method: "POST",
+      headers: { ...WEBHOOK_HEADERS, "x-inkbox-request-id": "req-full" },
+      body: JSON.stringify({ event_type: "inbound.received" }),
+    });
+
+    expect(res.status).toBe(503);
+    expect(rollback).toHaveBeenCalledWith("req-full");
   });
 });
 

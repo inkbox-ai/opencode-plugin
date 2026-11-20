@@ -21,7 +21,7 @@ import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
 import { normalizePermission, subscribePermissionEvents } from "./events.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
-import { createInboundHandler } from "./inbound.js";
+import { createInboundHandler, InboundQueueFullError } from "./inbound.js";
 import { createPendingReplies } from "./pending.js";
 import {
   createNativePermissionInventory,
@@ -851,6 +851,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       const reference = call?.id
         ? { identityId: (await opts.inkbox.getIdentity()).id, callId: call.id }
         : undefined;
+      // Refuse before a delivery record exists so the retry runs it.
+      if (
+        event.eventType === "inbound.received" &&
+        inbound &&
+        deliveries.status(id) === "absent" &&
+        !inbound.admits(event)
+      )
+        throw new InboundQueueFullError();
       return deliveries.dispatch(id, () => onEvent(event), reference);
     },
     eventState: (id) => deliveries.status(id),

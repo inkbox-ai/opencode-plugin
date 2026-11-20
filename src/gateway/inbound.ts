@@ -23,9 +23,22 @@ export const AGENT_BODY_MAX_BYTES = 64 * 1024;
 export const MAX_STDOUT_BYTES = 64 * 1024;
 export const MAX_STDERR_BYTES = 4 * 1024;
 export const REPORT_ERROR_MAX_CHARS = 2000;
+export const MAX_PENDING_EVENTS = 100;
+export const MAX_PENDING_BYTES = 64 * 1024 * 1024;
+export const MAX_CONCURRENT_SCRIPTS = 4;
 const REPORT_MAX_DELAY_MS = 3600_000;
+const STORE_RETRY_MS = 60_000;
 const RECORD_TTL_MS = 14 * 86400_000;
 const RECORD_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const STATUSES = new Set(["queued", "agent", "report", "done"]);
+
+/** The local queue is full; the delivery is not acknowledged and should be retried later. */
+export class InboundQueueFullError extends Error {
+  readonly status = 503;
+  constructor() {
+    super("Inbound queue is full.");
+  }
+}
 
 // queued: script to run; agent: turn to run; report: failure to report; done: finished.
 interface Job {
@@ -48,6 +61,8 @@ interface Job {
 
 export interface InboundHandler {
   handle(event: VerifiedEvent): Promise<boolean>;
+  /** False when a new delivery would not fit in the queue; duplicates always fit. */
+  admits(event: VerifiedEvent): boolean;
   pending(): number;
   recover(): void;
   close(): void;
@@ -64,25 +79,38 @@ export function createInboundHandler(deps: {
   const now = deps.now ?? Date.now;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const children = new Set<ReturnType<typeof spawn>>();
-  const open = new Map<string, Job["status"]>();
+  // Unfinished records and their stored size.
+  const open = new Map<string, { status: Job["status"]; bytes: number }>();
+  const scriptWaiters: (() => void)[] = [];
+  let scripts = 0;
   let closed = false;
   // Work outlives the delivery that queued it; keep it out of that delivery's tracking context.
   const detached = AsyncResource.bind((fn: () => void) => fn());
   mkdirSync(deps.dir, { recursive: true, mode: 0o700 });
 
   const file = (id: string) => path.join(deps.dir, `${id}.json`);
-  const read = (id: string): Job | undefined => {
+  // undefined: no record. "invalid": unparseable or malformed. Other read errors throw.
+  const read = (id: string): Job | undefined | "invalid" => {
+    let raw: string;
     try {
-      return JSON.parse(readFileSync(file(id), "utf-8")) as Job;
+      raw = readFileSync(file(id), "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    try {
+      const job = JSON.parse(raw) as Job;
+      return job && typeof job === "object" && STATUSES.has(job.status) ? job : "invalid";
     } catch {
-      return undefined;
+      return "invalid";
     }
   };
   const write = (id: string, job: Job) => {
+    const data = JSON.stringify({ ...job, updatedAt: now() });
     const temporary = `${file(id)}.${process.pid}.tmp`;
     const fd = openSync(temporary, "w", 0o600);
     try {
-      writeFileSync(fd, JSON.stringify({ ...job, updatedAt: now() }));
+      writeFileSync(fd, data);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -95,8 +123,31 @@ export function createInboundHandler(deps: {
       closeSync(dir);
     }
     if (job.status === "done") open.delete(id);
-    else open.set(id, job.status);
+    else open.set(id, { status: job.status, bytes: Buffer.byteLength(data) });
   };
+  // Failure reports are small and retried indefinitely, so they count toward bytes only.
+  const fits = (bytes: number) => {
+    let count = 0;
+    let total = bytes;
+    for (const entry of open.values()) {
+      if (entry.status !== "report") count++;
+      total += entry.bytes;
+    }
+    return count < MAX_PENDING_EVENTS && total <= MAX_PENDING_BYTES;
+  };
+
+  async function scriptSlot(): Promise<void> {
+    if (scripts < MAX_CONCURRENT_SCRIPTS) {
+      scripts++;
+      return;
+    }
+    await new Promise<void>((resolve) => scriptWaiters.push(resolve));
+  }
+  function releaseScript(): void {
+    const next = scriptWaiters.shift();
+    if (next) next();
+    else scripts--;
+  }
 
   function schedule(id: string, at: number): void {
     if (closed || timers.has(id)) return;
@@ -104,9 +155,10 @@ export function createInboundHandler(deps: {
       const timer = setTimeout(
         () => {
           timers.delete(id);
-          void step(id).catch((error) =>
-            deps.logger.error("inbound.step_failed", { error: String(error) }),
-          );
+          void step(id).catch((error) => {
+            deps.logger.error("inbound.step_failed", { error: String(error) });
+            schedule(id, now() + STORE_RETRY_MS);
+          });
         },
         Math.max(0, at - now()),
       );
@@ -129,20 +181,29 @@ export function createInboundHandler(deps: {
   }
 
   async function step(id: string): Promise<void> {
+    if (closed) return;
     const job = read(id);
-    if (!job || closed) return;
+    if (job === "invalid") {
+      deps.logger.warn("inbound.record_invalid", { id });
+      rmSync(file(id), { force: true });
+      open.delete(id);
+      return;
+    }
+    if (!job) return;
     if (job.status === "queued" && job.command) {
       if (job.attempts > RETRY_DELAYS_MS.length)
         return fail(id, job, "Script run was interrupted by a restart.");
-      // Counted before the run so a crash mid-run still uses up the attempt.
+      await scriptSlot();
+      let result: ScriptResult;
+      try {
+        if (closed) return;
+        // Counted before the run so a crash mid-run still uses up the attempt.
+        write(id, { ...job, attempts: job.attempts + 1 });
+        result = await runScript(job.command, job.input ?? "", deps.cwd ?? os.homedir(), children);
+      } finally {
+        releaseScript();
+      }
       const attempts = job.attempts + 1;
-      write(id, { ...job, attempts });
-      const result = await runScript(
-        job.command,
-        job.input ?? "",
-        deps.cwd ?? os.homedir(),
-        children,
-      );
       if (closed && result.interrupted) return;
       if (result.ok) {
         const output = result.stdout.trim();
@@ -164,24 +225,11 @@ export function createInboundHandler(deps: {
       write(id, { ...job, attempts, nextAt: now() + delay });
       return schedule(id, now() + delay);
     }
-    if (job.status === "agent" && job.message !== undefined) {
+    if (job.status === "agent" && job.message !== undefined && job.sourceId) {
       write(id, { ...job, started: true });
-      let bound: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([
-          // Keyed by delivery so a restart rejoins the session queue's turn instead of starting another.
-          deps.sessions.runInbound(`inbound:${job.source}`, job.message, id),
-          new Promise<never>((_, reject) => {
-            bound = setTimeout(
-              () =>
-                reject(
-                  new Error(`agent turn did not finish within ${TURN_TIMEOUT_MS / 60_000} minutes`),
-                ),
-              TURN_TIMEOUT_MS,
-            );
-            bound.unref?.();
-          }),
-        ]);
+        // Keyed by delivery so a restart rejoins the session queue's turn instead of starting another.
+        await deps.sessions.runInbound(`inbound:${job.sourceId}`, job.message, id, TURN_TIMEOUT_MS);
       } catch (error) {
         if (closed) return;
         deps.logger.error("inbound.turn_failed", {
@@ -189,8 +237,6 @@ export function createInboundHandler(deps: {
           error: String(error),
         });
         return fail(id, job, String(error) || "Agent turn failed.");
-      } finally {
-        clearTimeout(bound);
       }
       // A closing session manager may skip the turn; the next start rejoins it.
       if (closed) return;
@@ -224,44 +270,42 @@ export function createInboundHandler(deps: {
     write(id, { ...job, status: "done" });
   }
 
-  return {
-    async handle(event) {
-      const data = record(event.body.data);
-      const source = record(data?.source);
-      const handler = record(data?.handler);
-      const request = record(data?.request);
-      const eventId = data?.event_id;
-      // Stable across retries of one delivery and new per replay, so a replay runs again.
-      const id = data?.delivery_id;
-      if (!event.verified || event.provider !== "inkbox") return true;
-      if (typeof eventId !== "string" || typeof id !== "string" || !RECORD_ID.test(id)) return true;
-      if (typeof source?.name !== "string" || !request || read(id)) return true;
-      const job: Job = {
-        status: "agent",
-        deliveryId: id,
-        eventId,
-        sourceId: String(source.id ?? ""),
-        source: source.name,
-        ...(typeof source.instructions === "string" && source.instructions
-          ? { instructions: source.instructions }
-          : {}),
-        attempts: 0,
-        nextAt: now(),
-        updatedAt: now(),
-      };
-      const body = typeof request.body === "string" ? request.body : "";
-      const encoding = request.body_encoding === "base64" ? "base64" : "utf8";
-      let text: string | undefined = body;
-      if (encoding === "base64") {
-        try {
-          // Text can arrive base64-encoded too; only bytes that are not UTF-8 are withheld.
-          text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(body, "base64"));
-        } catch {
-          text = undefined;
-        }
-      }
-      if (handler?.type === "script" && typeof handler.command === "string") {
-        write(id, {
+  // The record to store for a new delivery; undefined for a duplicate or an event to ignore.
+  function prepare(event: VerifiedEvent): { id: string; job: Job } | undefined {
+    const data = record(event.body.data);
+    const source = record(data?.source);
+    const handler = record(data?.handler);
+    const request = record(data?.request);
+    const eventId = data?.event_id;
+    // Stable across retries of one delivery and new per replay, so a replay runs again.
+    const id = data?.delivery_id;
+    if (!event.verified || event.provider !== "inkbox") return undefined;
+    if (typeof eventId !== "string" || typeof id !== "string" || !RECORD_ID.test(id))
+      return undefined;
+    if (typeof source?.name !== "string" || typeof source.id !== "string" || !source.id)
+      return undefined;
+    if (!request) return undefined;
+    const existing = read(id);
+    if (existing && existing !== "invalid") return undefined;
+    const job: Job = {
+      status: "agent",
+      deliveryId: id,
+      eventId,
+      sourceId: source.id,
+      source: source.name,
+      ...(typeof source.instructions === "string" && source.instructions
+        ? { instructions: source.instructions }
+        : {}),
+      attempts: 0,
+      nextAt: now(),
+      updatedAt: now(),
+    };
+    const body = typeof request.body === "string" ? request.body : "";
+    const encoding = request.body_encoding === "base64" ? "base64" : "utf8";
+    if (handler?.type === "script" && typeof handler.command === "string") {
+      return {
+        id,
+        job: {
           ...job,
           status: "queued",
           command: handler.command,
@@ -272,23 +316,50 @@ export function createInboundHandler(deps: {
             body,
             body_encoding: encoding,
           }),
-        });
-      } else if (handler?.type === "agent") {
-        write(id, {
-          ...job,
-          message: agentMessage(
-            source.name,
-            job.instructions,
-            text ??
-              `[Binary body, ${Buffer.byteLength(body, "base64")} bytes (${String(request.content_type ?? "unknown type")}); not shown.]`,
-          ),
-        });
-      } else return true;
-      schedule(id, job.nextAt);
+        },
+      };
+    }
+    if (handler?.type !== "agent") return undefined;
+    let text: string | undefined = body;
+    if (encoding === "base64") {
+      try {
+        // Text can arrive base64-encoded too; only bytes that are not UTF-8 are withheld.
+        text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(body, "base64"));
+      } catch {
+        text = undefined;
+      }
+    }
+    return {
+      id,
+      job: {
+        ...job,
+        message: agentMessage(
+          source.name,
+          job.instructions,
+          text ??
+            `[Binary body, ${Buffer.byteLength(body, "base64")} bytes (${String(request.content_type ?? "unknown type")}); not shown.]`,
+        ),
+      },
+    };
+  }
+
+  const size = (job: Job) => Buffer.byteLength(JSON.stringify({ ...job, updatedAt: now() }));
+
+  return {
+    async handle(event) {
+      const prepared = prepare(event);
+      if (!prepared) return true;
+      if (!fits(size(prepared.job))) throw new InboundQueueFullError();
+      write(prepared.id, prepared.job);
+      schedule(prepared.id, prepared.job.nextAt);
       return true;
     },
+    admits(event) {
+      const prepared = prepare(event);
+      return !prepared || fits(size(prepared.job));
+    },
     // Pending failure reports do not keep the agent awake.
-    pending: () => [...open.values()].filter((status) => status !== "report").length,
+    pending: () => [...open.values()].filter((entry) => entry.status !== "report").length,
     recover() {
       let names: string[] = [];
       try {
@@ -297,11 +368,23 @@ export function createInboundHandler(deps: {
       for (const name of names) {
         if (!name.endsWith(".json")) continue;
         const id = name.slice(0, -5);
-        const job = read(id);
-        if (job && job.status !== "done") {
-          open.set(id, job.status);
+        let job: ReturnType<typeof read>;
+        try {
+          job = read(id);
+        } catch (error) {
+          // Unreadable for now: keep the record and retry it.
+          deps.logger.warn("inbound.record_unreadable", { id, error: String(error) });
+          open.set(id, { status: "queued", bytes: 0 });
+          schedule(id, now() + STORE_RETRY_MS);
+          continue;
+        }
+        if (job === "invalid") {
+          deps.logger.warn("inbound.record_invalid", { id });
+          rmSync(file(id), { force: true });
+        } else if (job && job.status !== "done") {
+          open.set(id, { status: job.status, bytes: Buffer.byteLength(JSON.stringify(job)) });
           schedule(id, job.nextAt);
-        } else if (!job || job.updatedAt < now() - RECORD_TTL_MS) rmSync(file(id), { force: true });
+        } else if (job && job.updatedAt < now() - RECORD_TTL_MS) rmSync(file(id), { force: true });
       }
     },
     close() {
@@ -401,18 +484,7 @@ function kill(child: ReturnType<typeof spawn>): void {
 }
 
 async function reportFailure(inkbox: InkboxRuntime, job: Job): Promise<void> {
-  const client = (await inkbox.getClient()) as unknown as {
-    inbound?: {
-      reportInboundEventResult?(
-        handle: string,
-        sourceId: string,
-        eventId: string,
-        result: { status: "failed"; error: string; deliveryId: string },
-      ): Promise<unknown>;
-    };
-  };
-  // Older SDK releases cannot report results; the event then stays pending upstream.
-  if (typeof client.inbound?.reportInboundEventResult !== "function") return;
+  const client = await inkbox.getClient();
   const identity = await inkbox.getIdentity();
   await client.inbound.reportInboundEventResult(identity.agentHandle, job.sourceId, job.eventId, {
     status: "failed",

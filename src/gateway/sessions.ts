@@ -1418,6 +1418,7 @@ export function createSessionManager(
       entry.runningId = id;
       let retry = false;
       try {
+        turnStarted.get(id)?.();
         await process(id);
       } catch (error) {
         const current = deps.state.getTurn(id);
@@ -1499,6 +1500,9 @@ export function createSessionManager(
       ...extra,
     };
   }
+
+  // Notified when the queue starts running a turn.
+  const turnStarted = new Map<string, () => void>();
 
   function promiseFor(turn: DurableTurn, hosted = false): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -2115,7 +2119,7 @@ export function createSessionManager(
       return this.runText(chatKey, frameCapture("event", text));
     },
 
-    async runInbound(chatKey, text, deliveryId) {
+    async runInbound(chatKey, text, deliveryId, timeoutMs) {
       if (closing) return undefined;
       const existing = deps.state
         .listTurns()
@@ -2126,17 +2130,39 @@ export function createSessionManager(
       // Capture turns deliver nothing, so "completed" is their final state.
       if (existing && (existing.state === "completed" || TERMINAL.has(existing.state)))
         return existing.output;
-      return promiseFor(
+      const turn =
         existing ??
-          makeTurn(
-            chatKey,
-            "capture",
-            frameCapture("event", text),
-            false,
-            deps.state.getReplyTarget(chatKey),
-            { inboundDeliveryId: deliveryId },
-          ),
-      );
+        makeTurn(
+          chatKey,
+          "capture",
+          frameCapture("event", text),
+          false,
+          deps.state.getReplyTarget(chatKey),
+          { inboundDeliveryId: deliveryId },
+        );
+      if (!timeoutMs) return promiseFor(turn);
+      // The limit counts from when the turn starts running, not from when it was queued.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_, reject) => {
+        const arm = () => {
+          turnStarted.delete(turn.id);
+          timer = setTimeout(() => {
+            this.abortTurn(chatKey, undefined, undefined, [turn.id]).catch((error) =>
+              deps.logger.error("inbound.abort_failed", { error: String(error) }),
+            );
+            reject(new Error(`agent turn did not finish within ${timeoutMs / 60_000} minutes`));
+          }, timeoutMs);
+          timer.unref?.();
+        };
+        if (existing && existing.state !== "queued") arm();
+        else turnStarted.set(turn.id, arm);
+      });
+      try {
+        return await Promise.race([promiseFor(turn), expired]);
+      } finally {
+        clearTimeout(timer);
+        turnStarted.delete(turn.id);
+      }
     },
 
     async runText(chatKey, text) {

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import type { CompanionTurn } from "../../src/gateway/companion.js";
+import { InboundQueueFullError, MAX_PENDING_EVENTS } from "../../src/gateway/inbound.js";
 import { startGateway } from "../../src/gateway/index.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
@@ -232,6 +233,50 @@ it("acks a hosted inbound.received delivery once queued and counts its retry bac
   await vi.waitFor(() => expect(fs.existsSync(path.join(dir, "runs"))).toBe(true));
   await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
   expect(gateway.activity!()).toMatchObject({ inbound: 1 });
+});
+
+it("refuses a hosted inbound.received delivery without recording it when the queue is full", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
+  dirs.push(dir);
+  const queue = path.join(dir, "state.json.inbound-deliveries");
+  fs.mkdirSync(queue, { recursive: true });
+  for (let n = 0; n < MAX_PENDING_EVENTS; n++)
+    fs.writeFileSync(
+      path.join(queue, `held-${n}.json`),
+      JSON.stringify({
+        status: "agent",
+        deliveryId: `held-${n}`,
+        eventId: "inbev_held",
+        sourceId: "inbsrc_held",
+        source: "held",
+        message: "held",
+        attempts: 0,
+        nextAt: Date.now() + 86400_000,
+        updatedAt: Date.now(),
+      }),
+    );
+  const { gateway } = await start(undefined, dir, undefined, false, true);
+  const id = `evt_${"c".repeat(64)}`;
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: id,
+    body: {
+      event_type: "inbound.received",
+      data: {
+        event_id: "inbev_new",
+        delivery_id: "new-delivery",
+        source: { id: "inbsrc_new", name: "hooks" },
+        handler: { type: "agent" },
+        request: { body: "ping", body_encoding: "utf8" },
+      },
+      id,
+    },
+    headers: {},
+  } as never;
+  await expect(gateway.dispatchVerified!(id, event)).rejects.toBeInstanceOf(InboundQueueFullError);
+  expect(gateway.eventState!(id)).toBe("absent");
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {

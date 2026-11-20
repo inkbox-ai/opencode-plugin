@@ -5,6 +5,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   AGENT_BODY_MAX_BYTES,
   createInboundHandler,
+  InboundQueueFullError,
+  MAX_CONCURRENT_SCRIPTS,
+  MAX_PENDING_BYTES,
+  MAX_PENDING_EVENTS,
   MAX_STDERR_BYTES,
   MAX_STDOUT_BYTES,
   RETRY_DELAYS_MS,
@@ -26,8 +30,12 @@ function setup(client: Record<string, unknown> = {}) {
   dirs.push(dir);
   const sessions = {
     runInbound: vi.fn(
-      async (_key: string, _text: string, _deliveryId: string): Promise<string | undefined> =>
-        undefined,
+      async (
+        _key: string,
+        _text: string,
+        _deliveryId: string,
+        _timeoutMs?: number,
+      ): Promise<string | undefined> => undefined,
     ),
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -125,7 +133,7 @@ it("persists an agent event, acks it, and finishes it only after the turn succee
   expect(job(dir).status).toBe("agent");
   await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
   const [key, text] = sessions.runInbound.mock.calls[0]!;
-  expect(key).toBe("inbound:payments");
+  expect(key).toBe(`inbound:${SOURCE}`);
   expect(text).toMatch(/^UNTRUSTED EXTERNAL CONTENT from inbound source "payments"/);
   expect(text.indexOf("Log each payment.")).toBeLessThan(text.indexOf('{"amount":5}'));
   expect(job(dir).status).toBe("agent");
@@ -202,21 +210,15 @@ it("reports a failed agent turn with the delivery id", async () => {
   expect(sessions.runInbound).toHaveBeenCalledTimes(1);
 });
 
-it("reports an agent turn that does not finish within 30 minutes", async () => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+it("gives the session queue the 30-minute turn limit and reports a turn it stops", async () => {
   const report = vi.fn(async () => undefined);
   const { dir, handler, sessions } = setup({
     inbound: { reportInboundEventResult: report },
   });
-  sessions.runInbound.mockImplementationOnce(() => new Promise(() => {}));
+  sessions.runInbound.mockRejectedValueOnce(
+    new Error("agent turn did not finish within 30 minutes"),
+  );
   await handler.handle(inboundEvent({ type: "agent" }));
-  await vi.advanceTimersByTimeAsync(0);
-  // vi.waitFor would advance the fake clock.
-  while (!sessions.runInbound.mock.calls.length) await new Promise((r) => setImmediate(r));
-  await vi.advanceTimersByTimeAsync(TURN_TIMEOUT_MS - 1);
-  expect(report).not.toHaveBeenCalled();
-  expect(handler.pending()).toBe(1);
-  await vi.advanceTimersByTimeAsync(1);
   await vi.waitFor(() =>
     expect(report).toHaveBeenCalledWith("agent", SOURCE, EVENT, {
       status: "failed",
@@ -224,7 +226,128 @@ it("reports an agent turn that does not finish within 30 minutes", async () => {
       deliveryId: DELIVERY,
     }),
   );
+  expect(sessions.runInbound.mock.calls[0]![3]).toBe(TURN_TIMEOUT_MS);
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
+});
+
+it("keys the session on the source id, so sources sharing a name stay separate", async () => {
+  const { handler, sessions } = setup();
+  const other = "inbsrc_9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a";
+  const event = inboundEvent({ type: "agent" });
+  const renamed = inboundEvent({ type: "agent" }, {}, true, "7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
+  (renamed.body.data as { source: { id: string } }).source.id = other;
+  await handler.handle(event);
+  await handler.handle(renamed);
+  await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(2));
+  expect(sessions.runInbound.mock.calls.map((call) => call[0]).sort()).toEqual(
+    [`inbound:${SOURCE}`, `inbound:${other}`].sort(),
+  );
+});
+
+it("refuses a new delivery once the queue holds the maximum number of events", async () => {
+  const { handler, sessions } = setup();
+  sessions.runInbound.mockImplementation(() => new Promise(() => {}));
+  const id = (n: number) => `delivery-${n}`;
+  for (let n = 0; n < MAX_PENDING_EVENTS; n++)
+    await handler.handle(inboundEvent({ type: "agent" }, {}, true, id(n)));
+  expect(handler.pending()).toBe(MAX_PENDING_EVENTS);
+  // A retry of a stored delivery is still acknowledged.
+  expect(handler.admits(inboundEvent({ type: "agent" }, {}, true, id(0)))).toBe(true);
+  await expect(handler.handle(inboundEvent({ type: "agent" }, {}, true, id(0)))).resolves.toBe(
+    true,
+  );
+  const extra = inboundEvent({ type: "agent" }, {}, true, "delivery-extra");
+  expect(handler.admits(extra)).toBe(false);
+  await expect(handler.handle(extra)).rejects.toBeInstanceOf(InboundQueueFullError);
+});
+
+it("refuses a new delivery that would exceed the stored byte limit", async () => {
+  const { handler, sessions } = setup();
+  sessions.runInbound.mockImplementation(() => new Promise(() => {}));
+  const large = "x".repeat(Math.floor(MAX_PENDING_BYTES / 2));
+  await handler.handle(
+    inboundEvent({ type: "script", command: "sleep 30" }, { body: large }, true, "big-1"),
+  );
+  await expect(
+    handler.handle(
+      inboundEvent({ type: "script", command: "sleep 30" }, { body: large }, true, "big-2"),
+    ),
+  ).rejects.toBeInstanceOf(InboundQueueFullError);
+  await expect(handler.handle(inboundEvent({ type: "agent" }, {}, true, "small"))).resolves.toBe(
+    true,
+  );
+});
+
+it("runs at most four scripts at once", async () => {
+  const { dir, handler } = setup();
+  const log = path.join(dir, "log");
+  const command = `echo start >> ${log}; sleep 0.3; echo end >> ${log}`;
+  for (let n = 0; n < MAX_CONCURRENT_SCRIPTS + 2; n++)
+    await handler.handle(inboundEvent({ type: "script", command }, {}, true, `script-${n}`));
+  await vi.waitFor(
+    () => {
+      const lines = fs.existsSync(log) ? fs.readFileSync(log, "utf-8").trim().split("\n") : [];
+      expect(lines.filter((line) => line === "end")).toHaveLength(MAX_CONCURRENT_SCRIPTS + 2);
+    },
+    { timeout: 5000 },
+  );
+  let running = 0;
+  let peak = 0;
+  for (const line of fs.readFileSync(log, "utf-8").trim().split("\n")) {
+    running += line === "start" ? 1 : -1;
+    peak = Math.max(peak, running);
+  }
+  expect(peak).toBe(MAX_CONCURRENT_SCRIPTS);
+  await vi.waitFor(() => expect(handler.pending()).toBe(0));
+});
+
+it("keeps a record it cannot read at startup and retries it later", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const { dir, make, sessions } = setup();
+  fs.mkdirSync(path.join(dir, "events"), { recursive: true });
+  // A directory in place of the record makes the read fail with an I/O error.
+  fs.mkdirSync(jobFile(dir));
+  const handler = make();
+  handler.recover();
+  expect(fs.existsSync(jobFile(dir))).toBe(true);
+  expect(handler.pending()).toBe(1);
+  fs.rmdirSync(jobFile(dir));
+  fs.writeFileSync(
+    jobFile(dir),
+    JSON.stringify({
+      status: "agent",
+      deliveryId: DELIVERY,
+      eventId: EVENT,
+      sourceId: SOURCE,
+      source: "payments",
+      message: "turn",
+      attempts: 0,
+      nextAt: 0,
+      updatedAt: Date.now(),
+    }),
+  );
+  await vi.advanceTimersByTimeAsync(60_000);
+  while (job(dir).status !== "done") await new Promise((r) => setImmediate(r));
+  expect(sessions.runInbound).toHaveBeenCalledTimes(1);
+  expect(handler.pending()).toBe(0);
+});
+
+it("discards a record that is not valid JSON", async () => {
+  const { dir, make } = setup();
+  fs.mkdirSync(path.join(dir, "events"), { recursive: true });
+  fs.writeFileSync(jobFile(dir), "{not json");
+  const handler = make();
+  handler.recover();
+  expect(fs.existsSync(jobFile(dir))).toBe(false);
+  expect(handler.pending()).toBe(0);
+});
+
+it("does not treat an unreadable existing record as a new delivery", async () => {
+  const { dir, handler, sessions } = setup();
+  fs.mkdirSync(jobFile(dir));
+  await expect(handler.handle(inboundEvent({ type: "agent" }))).rejects.toThrow();
+  expect(fs.statSync(jobFile(dir)).isDirectory()).toBe(true);
+  expect(sessions.runInbound).not.toHaveBeenCalled();
 });
 
 it("acks a script event before running it and passes the event on stdin", async () => {
@@ -250,7 +373,7 @@ it("turns script stdout into an agent turn and finishes after it", async () => {
   await handler.handle(inboundEvent({ type: "script", command: "echo 'refund requested'" }));
   await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(1));
   const [key, text] = sessions.runInbound.mock.calls[0]!;
-  expect(key).toBe("inbound:payments");
+  expect(key).toBe(`inbound:${SOURCE}`);
   expect(text).toContain("refund requested");
   await vi.waitFor(() => expect(job(dir).status).toBe("done"));
 });
@@ -443,7 +566,12 @@ it("resumes queued scripts and agent turns after a restart", async () => {
   expect(handler.pending()).toBe(2);
   await vi.waitFor(() => expect(fs.existsSync(path.join(dir, "resumed"))).toBe(true));
   await vi.waitFor(() =>
-    expect(sessions.runInbound).toHaveBeenCalledWith("inbound:payments", "resumed turn", "agent-1"),
+    expect(sessions.runInbound).toHaveBeenCalledWith(
+      `inbound:${SOURCE}`,
+      "resumed turn",
+      "agent-1",
+      TURN_TIMEOUT_MS,
+    ),
   );
   await vi.waitFor(() => expect(handler.pending()).toBe(0));
   expect(logger.error).not.toHaveBeenCalled();
