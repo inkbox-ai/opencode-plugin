@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.29 (unreleased)
+
+- Wait for Slack voice-note transcripts the same way as MMS, iMessage, and WhatsApp audio, keyed by the received event's `data.message_id`; the Slack subscription now includes `message.transcription_finished`.
+
 ## 0.2.28 (unreleased)
 
 ### Added
