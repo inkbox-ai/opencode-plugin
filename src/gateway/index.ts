@@ -267,8 +267,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         inkbox: opts.inkbox,
         sessions,
         logger,
+        bounded: !opts.admitVerified,
       })
     : undefined;
+  const admitVerified = opts.admitVerified;
   const hostedCalls = createHostedCallCompletion({
     inkbox: opts.inkbox,
     contacts,
@@ -309,7 +311,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     logger,
     dedup,
     onEvent,
-    admitVerified: opts.admitVerified,
+    // Refused before admission so the sender retries; an admitted delivery is always stored.
+    admitVerified: admitVerified
+      ? async (event) => {
+          if (event.eventType === "inbound.received" && inbound && !inbound.admits(event))
+            throw new InboundQueueFullError();
+          return admitVerified(event);
+        }
+      : undefined,
     ...(callBridge
       ? { onCallUpgrade: (req, socket, head) => void callBridge.handleUpgrade(req, socket, head) }
       : {}),
@@ -851,14 +860,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
       const reference = call?.id
         ? { identityId: (await opts.inkbox.getIdentity()).id, callId: call.id }
         : undefined;
-      // Refuse before a delivery record exists so the retry runs it.
-      if (
-        event.eventType === "inbound.received" &&
-        inbound &&
-        deliveries.status(id) === "absent" &&
-        !inbound.admits(event)
-      )
-        throw new InboundQueueFullError();
       return deliveries.dispatch(id, () => onEvent(event), reference);
     },
     eventState: (id) => deliveries.status(id),

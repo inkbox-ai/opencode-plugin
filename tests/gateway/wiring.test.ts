@@ -99,6 +99,7 @@ async function start(
   native?: { messages: Map<string, any[]>; statuses: Record<string, { type: string }> },
   subscriptionsManagedExternally?: boolean,
   localDelivery = false,
+  admitVerified?: (event: unknown) => Promise<boolean>,
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
@@ -156,6 +157,7 @@ async function start(
       ownsProcess: false,
       subscriptionsManagedExternally,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      ...(admitVerified ? { admitVerified } : {}),
     }),
   );
   return { config, identity, inkbox, dir, opencode, messages, statuses, gateway: gateways.at(-1)! };
@@ -235,7 +237,7 @@ it("acks a hosted inbound.received delivery once queued and counts its retry bac
   expect(gateway.activity!()).toMatchObject({ inbound: 1 });
 });
 
-it("refuses a hosted inbound.received delivery without recording it when the queue is full", async () => {
+it("refuses a hosted inbound.received delivery before admission when the queue is full, never after", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   dirs.push(dir);
   const queue = path.join(dir, "state.json.inbound-deliveries");
@@ -255,7 +257,8 @@ it("refuses a hosted inbound.received delivery without recording it when the que
         updatedAt: Date.now(),
       }),
     );
-  const { gateway } = await start(undefined, dir, undefined, false, true);
+  const admit = vi.fn(async () => true);
+  const { gateway } = await start(undefined, dir, undefined, false, true, admit);
   const id = `evt_${"c".repeat(64)}`;
   const event = {
     provider: "inkbox",
@@ -275,8 +278,12 @@ it("refuses a hosted inbound.received delivery without recording it when the que
     },
     headers: {},
   } as never;
-  await expect(gateway.dispatchVerified!(id, event)).rejects.toBeInstanceOf(InboundQueueFullError);
-  expect(gateway.eventState!(id)).toBe("absent");
+  await expect(hooks.server.admitVerified(event)).rejects.toBeInstanceOf(InboundQueueFullError);
+  expect(admit).not.toHaveBeenCalled();
+  // Admitted before the queue filled: it is stored past the cap.
+  await gateway.dispatchVerified!(id, event);
+  await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
+  expect(gateway.activity!()).toMatchObject({ inbound: MAX_PENDING_EVENTS + 1 });
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {

@@ -75,6 +75,8 @@ export function createInboundHandler(deps: {
   logger: GatewayLogger;
   cwd?: string;
   now?: () => number;
+  /** False when deliveries are acknowledged upstream after `admits`; an acknowledged one is never refused. */
+  bounded?: boolean;
 }): InboundHandler {
   const now = deps.now ?? Date.now;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -349,7 +351,7 @@ export function createInboundHandler(deps: {
     async handle(event) {
       const prepared = prepare(event);
       if (!prepared) return true;
-      if (!fits(size(prepared.job))) throw new InboundQueueFullError();
+      if (deps.bounded !== false && !fits(size(prepared.job))) throw new InboundQueueFullError();
       write(prepared.id, prepared.job);
       schedule(prepared.id, prepared.job.nextAt);
       return true;
