@@ -358,3 +358,206 @@ it("recognizes generated snapshot notes only on the exact trigger and caption", 
     ),
   ).toBe(false);
 });
+
+describe("Slack voice notes", () => {
+  const slackReceived = (
+    statuses = ["pending"],
+    eventType = "slack.dm_received",
+    extra: Record<string, unknown> = {},
+  ): VoiceEvent => ({
+    id: "slack-event-1",
+    event_type: eventType,
+    data: {
+      identity_id: "agent-1",
+      connection_id: "connection-1",
+      workspace_id: "T1",
+      conversation_id: "D1",
+      actor_id: "U1",
+      message_ts: "1770000000.000100",
+      thread_ts: null,
+      message_id: "slack-message-1",
+      message_kinds: ["dm"],
+      event: {
+        type: "message",
+        text: "Original caption",
+        files: statuses.map((status, index) => ({
+          id: `F${index}`,
+          name: "voice.m4a",
+          mimetype: "audio/mp4",
+          transcription: {
+            status,
+            text: status === "completed" ? "Move the review to Thursday." : null,
+            error_code: status === "failed" ? "transcription_failed" : null,
+          },
+        })),
+      },
+      ...extra,
+    },
+  });
+  const slackCompletion = (
+    statuses = ["completed"],
+    extra: Record<string, unknown> = {},
+  ): VoiceEvent => ({
+    id: "slack-finished-1",
+    event_type: "message.transcription_finished",
+    data: { ...slackReceived(statuses, "slack.dm_received", extra).data, channel: "slack" },
+  });
+
+  it.each([
+    "slack.dm_received",
+    "slack.group_dm_received",
+    "slack.channel_message_received",
+    "slack.mention_received",
+    "slack.thread_reply_received",
+  ])("waits for the %s completion by message_id and wakes once", async (eventType) => {
+    const { inbox, deliver, poll } = setup();
+    const original = slackReceived(["pending"], eventType);
+    expect(await inbox.accept(original)).toBe(true);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await inbox.accept(slackCompletion(["completed"], { connection_id: "other" }))).toBe(
+      true,
+    );
+    expect(
+      await inbox.accept(slackCompletion(["completed"], { message_id: "another-message" })),
+    ).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliver).not.toHaveBeenCalled();
+    await inbox.accept(slackCompletion());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const delivered = deliver.mock.calls[0][0];
+    expect(delivered.event_type).toBe(eventType);
+    expect(delivered.data.event.text).toBe("Original caption");
+    expect(delivered.data.event.files[0].name).toBe("voice.m4a");
+    expect(voiceNoteContext(delivered.data.event)).toBe(
+      "[Voice note 1 — automatically transcribed]\nMove the review to Thursday.",
+    );
+    await inbox.accept(slackCompletion());
+    await inbox.accept(slackReceived(["pending"], eventType));
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(poll).not.toHaveBeenCalled();
+  });
+  it("uses an early Slack completion without a standalone wake", async () => {
+    const { inbox, deliver } = setup();
+    await inbox.accept(slackCompletion());
+    expect(deliver).not.toHaveBeenCalled();
+    await inbox.accept(slackReceived());
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0][0].data.event.files[0].transcription.status).toBe("completed");
+  });
+  it("polls once at 60 seconds and uses the polled Slack result", async () => {
+    const { inbox, deliver, poll } = setup({ poll: async () => slackCompletion() });
+    await inbox.accept(slackReceived());
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(poll).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(voiceNoteContext(deliver.mock.calls[0][0].data.event)).toContain(
+      "automatically transcribed",
+    );
+    await inbox.accept(slackCompletion());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+  it("falls back to the original Slack attachment after an empty poll", async () => {
+    const { inbox, deliver, poll } = setup();
+    await inbox.accept(slackReceived());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(voiceNoteContext(deliver.mock.calls[0][0].data.event)).toBe(
+      "[Voice note 1 — transcript unavailable] Process the original attachment as usual.",
+    );
+  });
+  it("delivers a failed Slack transcript as the original attachment", async () => {
+    const { inbox, deliver, poll } = setup();
+    await inbox.accept(slackReceived(["pending", "pending"]));
+    await inbox.accept(slackCompletion(["failed", "completed"]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(poll).not.toHaveBeenCalled();
+    expect(voiceNoteContext(deliver.mock.calls[0][0].data.event)).toBe(
+      "[Voice note 1 — transcript unavailable] Process the original attachment as usual.\n\n" +
+        "[Voice note 2 — automatically transcribed]\nMove the review to Thursday.",
+    );
+  });
+  it("leaves Slack messages without a transcript or retained ID on the usual path", async () => {
+    const { inbox, deliver } = setup();
+    const legacy = slackReceived();
+    delete legacy.data.event.files[0].transcription;
+    expect(await inbox.accept(legacy)).toBe(false);
+    const unretained = slackReceived();
+    delete unretained.data.message_id;
+    expect(await inbox.accept(unretained)).toBe(false);
+    expect(await inbox.accept(slackReceived(["pending"], "slack.message_updated"))).toBe(false);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+  it("resolves a Slack Companion receipt without dispatch", async () => {
+    const { inbox, deliver } = setup();
+    const original = { ...slackReceived(), companion: { phase: "live", sequence: 2 } };
+    expect(await inbox.accept(original)).toBe(false);
+    const result = inbox.resolve(original);
+    await inbox.accept(slackCompletion());
+    await vi.advanceTimersByTimeAsync(0);
+    const resolved = await result;
+    expect(resolved.companion).toEqual(original.companion);
+    expect(resolved.data.event.files[0].transcription.status).toBe("completed");
+    expect(deliver).not.toHaveBeenCalled();
+  });
+  it("polls the retained Slack message by message_id", async () => {
+    const files = slackCompletion().data.event.files;
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          messages: [
+            {
+              id: "slack-message-1",
+              connection_id: "connection-1",
+              conversation_id: "D1",
+              files,
+            },
+          ],
+          next_cursor: null,
+        }),
+      ),
+    );
+    const identity = vi.fn();
+    const event = await pollVoiceNote(slackReceived(), {
+      apiKey: "synthetic-key",
+      baseUrl: "https://example.com/",
+      identity,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe(
+      "https://example.com/api/v1/slack/connections/connection-1/archive/messages?message_id=slack-message-1",
+    );
+    expect(fetch.mock.calls[0][1]).toMatchObject({ headers: { "X-Api-Key": "synthetic-key" } });
+    expect(identity).not.toHaveBeenCalled();
+    expect(event?.data.event.files[0].transcription.status).toBe("completed");
+    expect(event?.data.event.text).toBe("Original caption");
+    fetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          messages: [{ id: "slack-message-1", connection_id: "other", files }],
+        }),
+      ),
+    );
+    expect(
+      await pollVoiceNote(slackReceived(), { apiKey: "synthetic-key", identity }),
+    ).toBeUndefined();
+  });
+  it("recognizes a Slack snapshot note by the retained message ID", () => {
+    const original = slackCompletion();
+    const entry = {
+      id: "slack-message-1",
+      isTrigger: true,
+      text: "Original caption\n\n[Voice note 1 — automatically transcribed]\nMove the review to Thursday.",
+    };
+    expect(
+      snapshotHasVoiceNote(original.data.event, [entry], "Original caption", "slack-message-1"),
+    ).toBe(true);
+    expect(snapshotHasVoiceNote(original.data.event, [entry], "Original caption")).toBe(false);
+  });
+});

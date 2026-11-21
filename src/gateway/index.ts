@@ -454,9 +454,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   voiceNotes.recover();
   inbound?.recover();
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
+    // A disabled channel is acknowledged by dispatch without waiting on a transcript.
+    const slackDisabled =
+      !opts.config.gateway.slackEnabled &&
+      String(event.eventType ?? event.body.event_type ?? "").startsWith("slack.");
     if (
       event.provider === "inkbox" &&
       event.verified &&
+      !slackDisabled &&
       (await voiceNotes.accept({
         ...event.body,
         __voiceEnvelope: {
