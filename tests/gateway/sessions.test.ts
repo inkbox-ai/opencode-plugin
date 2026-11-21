@@ -1481,6 +1481,11 @@ describe("capture turns", () => {
   it("times an inbound turn from when it starts and stops it on timeout", async () => {
     const d = makeManager();
     d.setAutoComplete(false);
+    const abort = d.opencode.session.abort.getMockImplementation();
+    d.opencode.session.abort.mockImplementation(async (input: any) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return abort?.(input) ?? { data: true };
+    });
     const first = d.mgr.runInbound("inbound:src", "first", "delivery-a", 300);
     const second = d.mgr.runInbound("inbound:src", "second", "delivery-b", 300);
     const outcome = (promise: Promise<unknown>) =>
@@ -1493,7 +1498,8 @@ describe("capture turns", () => {
     expect(await firstOutcome).toContain("did not finish within");
     const turnFor = (deliveryId: string) =>
       d.state.listTurns().find((turn) => turn.inboundDeliveryId === deliveryId);
-    await vi.waitFor(() => expect(turnFor("delivery-a")?.state).toBe("interrupted"));
+    // The timeout is reported only after the stop has fenced the turn.
+    expect(turnFor("delivery-a")?.state).toBe("interrupted");
     expect(d.opencode.session.abort).toHaveBeenCalled();
     // Queue wait behind the first turn does not count toward the second turn's limit.
     await new Promise((resolve) => setTimeout(resolve, 150));

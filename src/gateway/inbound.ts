@@ -40,6 +40,14 @@ export class InboundQueueFullError extends Error {
   }
 }
 
+/** The event is not a well-formed `inbound.received`; retrying it cannot succeed. */
+export class InboundEventInvalidError extends Error {
+  readonly status = 400;
+  constructor() {
+    super("Invalid inbound event.");
+  }
+}
+
 // queued: script to run; agent: turn to run; report: failure to report; done: finished.
 interface Job {
   status: "queued" | "agent" | "report" | "done";
@@ -61,7 +69,7 @@ interface Job {
 
 export interface InboundHandler {
   handle(event: VerifiedEvent): Promise<boolean>;
-  /** False when a new delivery would not fit in the queue; duplicates always fit. */
+  /** False when a new delivery would not fit in the queue; duplicates always fit. Throws for a malformed event. */
   admits(event: VerifiedEvent): boolean;
   pending(): number;
   recover(): void;
@@ -273,7 +281,7 @@ export function createInboundHandler(deps: {
   }
 
   // The record to store for a new delivery; undefined for a duplicate or an event to ignore.
-  function prepare(event: VerifiedEvent): { id: string; job: Job } | undefined {
+  function prepare(event: VerifiedEvent): { id: string; job: Job } | "invalid" | undefined {
     const data = record(event.body.data);
     const source = record(data?.source);
     const handler = record(data?.handler);
@@ -283,10 +291,10 @@ export function createInboundHandler(deps: {
     const id = data?.delivery_id;
     if (!event.verified || event.provider !== "inkbox") return undefined;
     if (typeof eventId !== "string" || typeof id !== "string" || !RECORD_ID.test(id))
-      return undefined;
+      return "invalid";
     if (typeof source?.name !== "string" || typeof source.id !== "string" || !source.id)
-      return undefined;
-    if (!request) return undefined;
+      return "invalid";
+    if (!request) return "invalid";
     const existing = read(id);
     if (existing && existing !== "invalid") return undefined;
     const job: Job = {
@@ -321,7 +329,7 @@ export function createInboundHandler(deps: {
         },
       };
     }
-    if (handler?.type !== "agent") return undefined;
+    if (handler?.type !== "agent") return "invalid";
     let text: string | undefined = body;
     if (encoding === "base64") {
       try {
@@ -350,6 +358,7 @@ export function createInboundHandler(deps: {
   return {
     async handle(event) {
       const prepared = prepare(event);
+      if (prepared === "invalid") throw new InboundEventInvalidError();
       if (!prepared) return true;
       if (deps.bounded !== false && !fits(size(prepared.job))) throw new InboundQueueFullError();
       write(prepared.id, prepared.job);
@@ -358,6 +367,7 @@ export function createInboundHandler(deps: {
     },
     admits(event) {
       const prepared = prepare(event);
+      if (prepared === "invalid") throw new InboundEventInvalidError();
       return !prepared || fits(size(prepared.job));
     },
     // Pending failure reports do not keep the agent awake.

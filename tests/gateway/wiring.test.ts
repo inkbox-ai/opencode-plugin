@@ -4,7 +4,11 @@ import * as path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import type { CompanionTurn } from "../../src/gateway/companion.js";
-import { InboundQueueFullError, MAX_PENDING_EVENTS } from "../../src/gateway/inbound.js";
+import {
+  InboundEventInvalidError,
+  InboundQueueFullError,
+  MAX_PENDING_EVENTS,
+} from "../../src/gateway/inbound.js";
 import { startGateway } from "../../src/gateway/index.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
@@ -284,6 +288,21 @@ it("refuses a hosted inbound.received delivery before admission when the queue i
   await gateway.dispatchVerified!(id, event);
   await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
   expect(gateway.activity!()).toMatchObject({ inbound: MAX_PENDING_EVENTS + 1 });
+});
+
+it("refuses a malformed hosted inbound.received delivery before admission", async () => {
+  const admit = vi.fn(async () => true);
+  await start(undefined, undefined, undefined, false, true, admit);
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: "req-malformed",
+    body: { event_type: "inbound.received", data: { event_id: "inbev_bad" } },
+    headers: {},
+  } as never;
+  await expect(hooks.server.admitVerified(event)).rejects.toBeInstanceOf(InboundEventInvalidError);
+  expect(admit).not.toHaveBeenCalled();
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {

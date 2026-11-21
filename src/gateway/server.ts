@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { ResolvedConfig } from "../config.js";
 import type { RequestDedup } from "./dedup.js";
-import { InboundQueueFullError } from "./inbound.js";
+import { InboundEventInvalidError, InboundQueueFullError } from "./inbound.js";
 import { matchProvider, resolveProviderSecret } from "./providers.js";
 import type { GatewayLogger, VerifiedEvent, WebhookProvider } from "./types.js";
 
@@ -150,6 +150,7 @@ export function createWebhookServer(deps: WebhookServerDeps): WebhookServer {
     } catch (err) {
       if (!externalAdmission) deps.dedup.rollback(dedupId);
       if (err instanceof InboundQueueFullError) return send(res, 503, err.message);
+      if (err instanceof InboundEventInvalidError) return send(res, 400, err.message);
       deps.logger.error("webhook.dispatch_error", { error: String(err) });
       return send(res, 500, "dispatch error");
     }

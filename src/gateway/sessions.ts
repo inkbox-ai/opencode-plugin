@@ -2143,22 +2143,31 @@ export function createSessionManager(
       if (!timeoutMs) return promiseFor(turn);
       // The limit counts from when the turn starts running, not from when it was queued.
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       const expired = new Promise<never>((_, reject) => {
         const arm = () => {
           turnStarted.delete(turn.id);
           timer = setTimeout(() => {
-            this.abortTurn(chatKey, undefined, undefined, [turn.id]).catch((error) =>
-              deps.logger.error("inbound.abort_failed", { error: String(error) }),
-            );
-            reject(new Error(`agent turn did not finish within ${timeoutMs / 60_000} minutes`));
+            timedOut = true;
+            // The failure is reported only once the stop attempt has settled.
+            void this.abortTurn(chatKey, undefined, undefined, [turn.id])
+              .catch((error) => deps.logger.error("inbound.abort_failed", { error: String(error) }))
+              .finally(() =>
+                reject(new Error(`agent turn did not finish within ${timeoutMs / 60_000} minutes`)),
+              );
           }, timeoutMs);
           timer.unref?.();
         };
         if (existing && existing.state !== "queued") arm();
         else turnStarted.set(turn.id, arm);
       });
+      // The stop settles the turn first; the timeout stays the outcome.
+      const settled = promiseFor(turn).then(
+        (output) => (timedOut ? expired : output),
+        (error) => (timedOut ? expired : Promise.reject(error)),
+      );
       try {
-        return await Promise.race([promiseFor(turn), expired]);
+        return await Promise.race([settled, expired]);
       } finally {
         clearTimeout(timer);
         turnStarted.delete(turn.id);

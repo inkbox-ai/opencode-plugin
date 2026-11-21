@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   AGENT_BODY_MAX_BYTES,
   createInboundHandler,
+  InboundEventInvalidError,
   InboundQueueFullError,
   MAX_CONCURRENT_SCRIPTS,
   MAX_PENDING_BYTES,
@@ -154,7 +155,7 @@ it("dedupes on delivery_id: a retry is skipped, a replay runs again", async () =
   await vi.waitFor(() => expect(sessions.runInbound).toHaveBeenCalledTimes(2));
 });
 
-it("ignores events that are unverified, not from Inkbox, or lack a delivery_id", async () => {
+it("ignores unverified or non-Inkbox events and rejects malformed ones", async () => {
   const { dir, handler, sessions } = setup();
   expect(await handler.handle(inboundEvent({ type: "agent" }, {}, false))).toBe(true);
   expect(
@@ -163,7 +164,14 @@ it("ignores events that are unverified, not from Inkbox, or lack a delivery_id",
       provider: "external",
     } as VerifiedEvent),
   ).toBe(true);
-  expect(await handler.handle(inboundEvent({ type: "agent" }, {}, true, null))).toBe(true);
+  for (const malformed of [
+    inboundEvent({ type: "agent" }, {}, true, null),
+    inboundEvent({ type: "unknown" }),
+    inboundEvent({ type: "script" }),
+  ]) {
+    await expect(handler.handle(malformed)).rejects.toBeInstanceOf(InboundEventInvalidError);
+    expect(() => handler.admits(malformed)).toThrow(InboundEventInvalidError);
+  }
   expect(fs.readdirSync(path.join(dir, "events"))).toEqual([]);
   expect(sessions.runInbound).not.toHaveBeenCalled();
 });
