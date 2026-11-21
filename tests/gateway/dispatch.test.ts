@@ -48,6 +48,7 @@ function makeDeps(over: Partial<DispatchDeps> = {}): DispatchDeps {
     sessions: {
       handleInbound: vi.fn(async () => {}),
       runCapture: vi.fn(async () => undefined),
+      runInbound: vi.fn(async () => undefined),
       runText: vi.fn(async () => undefined),
       runA2A: vi.fn(async () => undefined),
       abortA2A: vi.fn(async () => false),
@@ -813,4 +814,17 @@ it("hands WhatsApp Companion voice metadata to the durable consumer without eage
   expect(text).toContain("Current WhatsApp source wa-voice");
   expect(text).toContain("Local media:");
   expect(text).not.toContain("transcript unavailable");
+});
+
+it("routes inbound.received only when local delivery handles it", async () => {
+  const inboundEvent = event("inbound.received", { event_id: "inbev_1" });
+  const ignored = makeDeps();
+  expect(await dispatchEvent(ignored, inboundEvent)).toBe(true);
+  expect(ignored.sessions.runCapture).not.toHaveBeenCalled();
+  expect(ignored.sessions.handleInbound).not.toHaveBeenCalled();
+
+  const onInbound = vi.fn(async () => true);
+  const local = makeDeps({ onInbound });
+  expect(await dispatchEvent(local, inboundEvent)).toBe(true);
+  expect(onInbound).toHaveBeenCalledWith(inboundEvent, local.sessions);
 });

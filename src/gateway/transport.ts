@@ -59,6 +59,11 @@ export async function openTransport(opts: {
 }): Promise<Transport> {
   const { gateway, localUrl, ownsProcess, logger } = opts;
 
+  if (gateway.localDelivery) {
+    logger.info("transport.local", {});
+    return { publicUrl: "", close: async () => {} };
+  }
+
   if (gateway.publicUrl) {
     logger.info("transport.public_url", { publicUrl: gateway.publicUrl });
     return { publicUrl: gateway.publicUrl, close: async () => {} };

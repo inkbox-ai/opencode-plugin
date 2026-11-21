@@ -138,6 +138,8 @@ export interface ResolvedGatewayConfig {
   port: number;
   publicUrl?: string;
   tunnelName?: string;
+  // INKBOX_DELIVERY_MODE=local: events arrive on the loopback listener only.
+  localDelivery: boolean;
   allowedUsers: string[];
   allowAllUsers: boolean;
   allowedInboundContactIds: string[];
@@ -403,6 +405,7 @@ function resolveGatewayConfig(
   const realtimeKeyPresent = Boolean(
     nonEmptyString(env[realtimeKeyEnvVar]) ?? nonEmptyString(env.OPENAI_API_KEY),
   );
+  const localDelivery = env.INKBOX_DELIVERY_MODE?.trim().toLowerCase() === "local";
   const envAllowedUsers = nonEmptyString(env.INKBOX_ALLOWED_USERS)
     ?.split(",")
     .map((s) => s.trim())
@@ -413,7 +416,9 @@ function resolveGatewayConfig(
     projectDirectory:
       nonEmptyString(opts.projectDirectory) ?? nonEmptyString(env.INKBOX_PROJECT_DIR),
     serverUrl: nonEmptyString(opts.serverUrl) ?? nonEmptyString(env.OPENCODE_SERVER_URL),
-    host: nonEmptyString(opts.host) ?? nonEmptyString(env.INKBOX_GATEWAY_HOST) ?? "127.0.0.1",
+    host: localDelivery
+      ? "127.0.0.1"
+      : (nonEmptyString(opts.host) ?? nonEmptyString(env.INKBOX_GATEWAY_HOST) ?? "127.0.0.1"),
     port: numeric(opts.port) ?? numeric(env.INKBOX_GATEWAY_PORT) ?? DEFAULT_GATEWAY_PORT,
     publicUrl: nonEmptyString(opts.publicUrl) ?? nonEmptyString(env.INKBOX_PUBLIC_URL),
     // Tunnels are provisioned under the bare handle, so the default strips
@@ -422,6 +427,7 @@ function resolveGatewayConfig(
       nonEmptyString(opts.tunnelName) ??
       nonEmptyString(env.INKBOX_TUNNEL_NAME) ??
       identity?.replace(/^@/, ""),
+    localDelivery,
     allowedUsers: stringArray(opts.allowedUsers).length
       ? stringArray(opts.allowedUsers)
       : (envAllowedUsers ?? []),
