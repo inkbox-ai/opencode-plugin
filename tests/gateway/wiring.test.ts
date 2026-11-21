@@ -108,6 +108,7 @@ async function start(
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+  vi.stubEnv("HOME", dir);
   if (previousInventoryReady !== undefined)
     createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
   const gateway = defaultGatewayConfig();
@@ -288,6 +289,12 @@ it("refuses a hosted inbound.received delivery before admission when the queue i
   await gateway.dispatchVerified!(id, event);
   await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
   expect(gateway.activity!()).toMatchObject({ inbound: MAX_PENDING_EVENTS + 1 });
+  expect(
+    fs.readFileSync(
+      path.join(dir, ".inkbox", "inbound", "events", "new-delivery", "body"),
+      "utf-8",
+    ),
+  ).toBe("ping");
 });
 
 it("refuses a malformed hosted inbound.received delivery before admission", async () => {

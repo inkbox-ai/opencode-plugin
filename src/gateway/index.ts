@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
@@ -265,7 +266,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   const inbound = g.localDelivery
     ? createInboundHandler({
         dir: `${state.filePath}.inbound-deliveries`,
-        eventsDir: path.join(path.dirname(state.filePath), "inbound", "events"),
+        eventsDir: path.join(os.homedir(), ".inkbox", "inbound", "events"),
         inkbox: opts.inkbox,
         sessions,
         logger,
