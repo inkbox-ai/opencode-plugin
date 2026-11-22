@@ -353,4 +353,16 @@ describe("resolveConfig", () => {
       expect(cfg.gateway.serve).toEqual({ bin: "custom", port: 6006 });
     });
   });
+
+  it("binds loopback only in local delivery mode", () => {
+    const local = resolveConfig(
+      { gateway: { host: "0.0.0.0" } },
+      { ...FULL_ENV, INKBOX_DELIVERY_MODE: "local" },
+    );
+    expect(local.gateway.localDelivery).toBe(true);
+    expect(local.gateway.host).toBe("127.0.0.1");
+    const remote = resolveConfig({ gateway: { host: "0.0.0.0" } }, FULL_ENV);
+    expect(remote.gateway.localDelivery).toBe(false);
+    expect(remote.gateway.host).toBe("0.0.0.0");
+  });
 });

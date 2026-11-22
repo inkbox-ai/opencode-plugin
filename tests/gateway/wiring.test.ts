@@ -4,6 +4,11 @@ import * as path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { defaultGatewayConfig, type ResolvedConfig } from "../../src/config.js";
 import type { CompanionTurn } from "../../src/gateway/companion.js";
+import {
+  InboundEventInvalidError,
+  InboundQueueFullError,
+  MAX_PENDING_EVENTS,
+} from "../../src/gateway/inbound.js";
 import { startGateway } from "../../src/gateway/index.js";
 import { createStateStore } from "../../src/gateway/state.js";
 import type { ReplyTarget } from "../../src/gateway/types.js";
@@ -69,10 +74,16 @@ vi.mock("../../src/gateway/a2a.js", () => ({
 vi.mock("../../src/gateway/hosted-call-completion.js", () => ({
   createHostedCallCompletion: () => ({ catchUp: async () => {} }),
 }));
-vi.mock("../../src/gateway/dispatch.js", async (load) => ({
-  ...(await load<any>()),
-  dispatchEvent: (deps: any, event: any) => deps.sessions.handleInbound(event.body.message),
-}));
+vi.mock("../../src/gateway/dispatch.js", async (load) => {
+  const actual = await load<any>();
+  return {
+    ...actual,
+    dispatchEvent: (deps: any, event: any) =>
+      event.eventType === "inbound.received"
+        ? actual.dispatchEvent(deps, event)
+        : deps.sessions.handleInbound(event.body.message),
+  };
+});
 
 const dirs: string[] = [];
 const gateways: Awaited<ReturnType<typeof startGateway>>[] = [];
@@ -91,15 +102,23 @@ async function start(
   existingDir?: string,
   native?: { messages: Map<string, any[]>; statuses: Record<string, { type: string }> },
   subscriptionsManagedExternally?: boolean,
+  localDelivery = false,
+  admitVerified?: (event: unknown) => Promise<boolean>,
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
   if (!existingDir) dirs.push(dir);
   vi.stubEnv("INKBOX_OPENCODE_HOME", dir);
+  vi.stubEnv("HOME", dir);
   if (previousInventoryReady !== undefined)
     createStateStore(dir).update({ permissionInventory: { ready: previousInventoryReady } });
   const gateway = defaultGatewayConfig();
   const config = {
-    gateway: { ...gateway, permissionTimeoutS: 1, voice: { ...gateway.voice, enabled: false } },
+    gateway: {
+      ...gateway,
+      localDelivery,
+      permissionTimeoutS: 1,
+      voice: { ...gateway.voice, enabled: false },
+    },
     outbound: { allowedRecipients: [] as string[], approval: "ask", askTimeoutMs: 1000 },
   } as ResolvedConfig;
   const identity = {
@@ -143,6 +162,7 @@ async function start(
       ownsProcess: false,
       subscriptionsManagedExternally,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      ...(admitVerified ? { admitVerified } : {}),
     }),
   );
   return { config, identity, inkbox, dir, opencode, messages, statuses, gateway: gateways.at(-1)! };
@@ -168,6 +188,128 @@ it("retains standalone subscription ownership and honors an external owner", asy
   expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
   await start(undefined, undefined, undefined, true);
   expect(hooks.subscriptions).toHaveBeenCalledTimes(1);
+});
+
+it("registers no webhook URL in local delivery mode", async () => {
+  await start(undefined, undefined, undefined, false, true);
+  expect(hooks.subscriptions).not.toHaveBeenCalled();
+});
+
+it("acks a hosted inbound.received delivery once queued and counts its retry backoff as activity", async () => {
+  const { gateway, dir } = await start(undefined, undefined, undefined, false, true);
+  const id = `evt_${"b".repeat(64)}`;
+  const body = {
+    event_type: "inbound.received",
+    timestamp: "2026-11-19T12:00:00+00:00",
+    data: {
+      event_id: "inbev_2b7e9c1a-4d3f-4a5b-9c8d-7e6f5a4b3c2d",
+      delivery_id: "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b",
+      received_at: "2026-11-19T11:59:59+00:00",
+      source: {
+        id: "inbsrc_0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+        name: "hooks",
+        instructions: null,
+      },
+      handler: { type: "script", command: `echo x >> ${path.join(dir, "runs")}; exit 1` },
+      signature_verified: false,
+      request: {
+        method: "POST",
+        query: {},
+        headers: {},
+        content_type: "text/plain",
+        body: "ping",
+        body_encoding: "utf8",
+      },
+    },
+    id,
+    hosted_delivery: {
+      version: 1,
+      activation_id: "3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a",
+      event_id: id,
+      starts_agent: true,
+    },
+  };
+  await gateway.dispatchVerified!(id, {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: id,
+    body,
+    headers: {},
+  } as never);
+  await vi.waitFor(() => expect(fs.existsSync(path.join(dir, "runs"))).toBe(true));
+  await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
+  expect(gateway.activity!()).toMatchObject({ inbound: 1 });
+});
+
+it("refuses a hosted inbound.received delivery before admission when the queue is full, never after", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-wiring-"));
+  dirs.push(dir);
+  const queue = path.join(dir, "state.json.inbound-deliveries");
+  fs.mkdirSync(queue, { recursive: true });
+  for (let n = 0; n < MAX_PENDING_EVENTS; n++)
+    fs.writeFileSync(
+      path.join(queue, `held-${n}.json`),
+      JSON.stringify({
+        status: "agent",
+        deliveryId: `held-${n}`,
+        eventId: "inbev_held",
+        sourceId: "inbsrc_held",
+        source: "held",
+        message: "held",
+        attempts: 0,
+        nextAt: Date.now() + 86400_000,
+        updatedAt: Date.now(),
+      }),
+    );
+  const admit = vi.fn(async () => true);
+  const { gateway } = await start(undefined, dir, undefined, false, true, admit);
+  const id = `evt_${"c".repeat(64)}`;
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: id,
+    body: {
+      event_type: "inbound.received",
+      data: {
+        event_id: "inbev_new",
+        delivery_id: "new-delivery",
+        source: { id: "inbsrc_new", name: "hooks" },
+        handler: { type: "agent" },
+        request: { body: "ping", body_encoding: "utf8" },
+      },
+      id,
+    },
+    headers: {},
+  } as never;
+  await expect(hooks.server.admitVerified(event)).rejects.toBeInstanceOf(InboundQueueFullError);
+  expect(admit).not.toHaveBeenCalled();
+  // Admitted before the queue filled: it is stored past the cap.
+  await gateway.dispatchVerified!(id, event);
+  await vi.waitFor(() => expect(gateway.eventState!(id)).toBe("completed"));
+  expect(gateway.activity!()).toMatchObject({ inbound: MAX_PENDING_EVENTS + 1 });
+  expect(
+    fs.readFileSync(
+      path.join(dir, ".inkbox", "inbound", "events", "new-delivery", "body"),
+      "utf-8",
+    ),
+  ).toBe("ping");
+});
+
+it("refuses a malformed hosted inbound.received delivery before admission", async () => {
+  const admit = vi.fn(async () => true);
+  await start(undefined, undefined, undefined, false, true, admit);
+  const event = {
+    provider: "inkbox",
+    verified: true,
+    eventType: "inbound.received",
+    requestId: "req-malformed",
+    body: { event_type: "inbound.received", data: { event_id: "inbev_bad" } },
+    headers: {},
+  } as never;
+  await expect(hooks.server.admitVerified(event)).rejects.toBeInstanceOf(InboundEventInvalidError);
+  expect(admit).not.toHaveBeenCalled();
 });
 
 it("allows default Companion sponsors and still honors explicit local recipient and sender restrictions", async () => {

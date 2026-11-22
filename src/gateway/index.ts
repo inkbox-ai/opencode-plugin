@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import type { InkboxRuntime } from "../client.js";
 import type { ResolvedConfig } from "../config.js";
 import { bindHostState } from "../host/state.js";
@@ -21,6 +23,7 @@ import { dispatchEvent, senderAllowed } from "./dispatch.js";
 import { createEscalationBridge } from "./escalation.js";
 import { normalizePermission, subscribePermissionEvents } from "./events.js";
 import { createHostedCallCompletion } from "./hosted-call-completion.js";
+import { createInboundHandler, InboundQueueFullError } from "./inbound.js";
 import { createPendingReplies } from "./pending.js";
 import {
   createNativePermissionInventory,
@@ -260,6 +263,17 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     config: opts.config,
     track: (task) => deliveries.track(task),
   });
+  const inbound = g.localDelivery
+    ? createInboundHandler({
+        dir: `${state.filePath}.inbound-deliveries`,
+        eventsDir: path.join(os.homedir(), ".inkbox", "inbound", "events"),
+        inkbox: opts.inkbox,
+        sessions,
+        logger,
+        bounded: !opts.admitVerified,
+      })
+    : undefined;
+  const admitVerified = opts.admitVerified;
   const hostedCalls = createHostedCallCompletion({
     inkbox: opts.inkbox,
     contacts,
@@ -300,7 +314,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
     logger,
     dedup,
     onEvent,
-    admitVerified: opts.admitVerified,
+    // Refused before admission so the sender retries; an admitted delivery is always stored.
+    admitVerified: admitVerified
+      ? async (event) => {
+          if (event.eventType === "inbound.received" && inbound && !inbound.admits(event))
+            throw new InboundQueueFullError();
+          return admitVerified(event);
+        }
+      : undefined,
     ...(callBridge
       ? { onCallUpgrade: (req, socket, head) => void callBridge.handleUpgrade(req, socket, head) }
       : {}),
@@ -327,7 +348,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
   }
 
   try {
-    if (!opts.subscriptionsManagedExternally)
+    if (!opts.subscriptionsManagedExternally && !g.localDelivery)
       await reconcileSubscriptions(deps, transport.publicUrl);
   } catch (err) {
     voiceNotes.close();
@@ -434,6 +455,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
 
   acceptingVoiceNotes = true;
   voiceNotes.recover();
+  inbound?.recover();
   async function onEvent(event: VerifiedEvent): Promise<boolean | undefined> {
     if (
       event.provider === "inkbox" &&
@@ -476,6 +498,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
         bursts,
         onExternal: g.externalEvents ? handleExternal : undefined,
         onHostedCallEnded: (event) => hostedCalls.ingest(event),
+        onInbound: inbound ? (event) => inbound.handle(event) : undefined,
       },
       event,
     );
@@ -854,11 +877,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<GatewayHa
             !(turn.state === "completed" && !turn.deliver),
         ).length,
       permissions: state.listPermissions().length,
+      inbound: inbound?.pending() ?? 0,
     }),
     ready: () => transport.ready?.() ?? true,
     async close() {
       acceptingVoiceNotes = false;
       voiceNotes.close();
+      inbound?.close();
       sessions.freezeAdmission?.();
       await escalation
         .close()

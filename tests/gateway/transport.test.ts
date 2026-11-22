@@ -141,6 +141,16 @@ describe("openTransport tunnel driving", () => {
     expect(transport.publicUrl).toBe("https://static.example");
     expect(connectMock).not.toHaveBeenCalled();
   });
+
+  it("opens no tunnel and exposes no public URL in local delivery mode", async () => {
+    const opts = makeOpts(makeListener());
+    opts.gateway = { ...opts.gateway, localDelivery: true, publicUrl: "https://static.example" };
+
+    const transport = await openTransport(opts);
+    expect(transport.publicUrl).toBe("");
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(opts.state.update).not.toHaveBeenCalled();
+  });
 });
 
 describe("installTunnelWarnFilter", () => {

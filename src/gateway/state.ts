@@ -56,6 +56,7 @@ export interface DurableTurn {
   replyTarget?: ReplyTarget;
   a2aContext?: ActiveA2ATurn;
   hostedCapture?: DurableHostedCapture;
+  inboundDeliveryId?: string;
   output?: string;
   deliveryMessageId?: string;
   error?: string;

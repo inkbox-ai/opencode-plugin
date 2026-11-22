@@ -66,6 +66,8 @@ export interface DispatchDeps {
   // Handle a verified non-Inkbox (external) webhook.
   onExternal?(event: VerifiedEvent): Promise<void>;
   onHostedCallEnded?(event: CallEndedWebhookPayload): Promise<void>;
+  // Set only in local delivery mode.
+  onInbound?(event: VerifiedEvent, sessions: SessionManager): Promise<boolean>;
 }
 
 function messageChatKey(deps: DispatchDeps, input: ChatKeyInput, participants: number): string {
@@ -129,6 +131,10 @@ export async function dispatchEvent(deps: DispatchDeps, event: VerifiedEvent): P
     case "message.bounced":
     case "message.failed":
       return handleDeliveryFailure(deps, type, event);
+    case "inbound.received":
+      if (deps.onInbound) return deps.onInbound(event, deps.sessions);
+      deps.logger.info("dispatch.ignored", { type });
+      return true;
     case "call.ended":
       if (deps.onHostedCallEnded) {
         await deps.onHostedCallEnded(event.body as unknown as CallEndedWebhookPayload);
