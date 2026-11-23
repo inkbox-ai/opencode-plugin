@@ -2581,8 +2581,8 @@ describe("native iMessage durable source ownership", () => {
 });
 
 describe("Slack native host lifecycle", () => {
-  function setup(existingDir?: string) {
-    const d = makeManager(existingDir);
+  function setup(existingDir?: string, factory = createSessionManager) {
+    const d = makeManager(existingDir, factory);
     d.config.gateway.slackEnabled = true;
     const route: import("../../src/slack.js").SlackRoute = {
       identityId: "identity-1",
@@ -2799,6 +2799,90 @@ describe("Slack native host lifecycle", () => {
         "interrupted",
       );
       await d.mgr.close();
+    },
+  );
+  it("recognizes a snapshot transcript after the Slack trigger's leading mention", async () => {
+    const d = setup();
+    const c = {
+      ...d.c,
+      voiceNoteEvent: {
+        event_type: "slack.mention_received",
+        data: {
+          message_id: "source-1",
+          connection_id: d.route.connectionId,
+          conversation_id: d.route.conversationId,
+          event: {
+            type: "message",
+            text: d.route.rawText,
+            files: [
+              {
+                id: "FVOICE",
+                transcription: { status: "completed", text: "Recorded thread update." },
+              },
+            ],
+          },
+        },
+      },
+      voiceNoteDeadline: Date.now() + 60_000,
+    };
+    const page: any = await d.companionApi.loadInitialization();
+    const text = `${d.route.rawText}\n\n[Voice note 1 — automatically transcribed]\nRecorded thread update.`;
+    page.entries.find((entry: any) => entry.isTrigger).text = text;
+    page.text = text;
+    d.companionApi.loadInitialization.mockResolvedValue(page);
+    await d.mgr.acceptCompanion(c, "hello");
+    await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+    expect(
+      d.state.listTurns().find((turn) => turn.id.endsWith(":history"))?.companion
+        ?.voiceNoteInSnapshot,
+    ).toBe(true);
+    const prompt = JSON.stringify(d.opencode.session.promptAsync.mock.calls[0]);
+    expect(prompt.match(/Recorded thread update\./g)).toHaveLength(1);
+    await d.mgr.close();
+  });
+  it.each([false, true])(
+    "labels a Slack transcript once without waiting when the envelope names another message (snapshot labels=%s)",
+    async (labelled) => {
+      const resolveVoiceNote = vi.fn();
+      const d = setup(undefined, (deps) => createSessionManager({ ...deps, resolveVoiceNote }));
+      const c = {
+        ...d.c,
+        voiceNoteEvent: {
+          event_type: "slack.mention_received",
+          data: {
+            message_id: "another-message",
+            connection_id: d.route.connectionId,
+            conversation_id: d.route.conversationId,
+            event: {
+              type: "message",
+              text: d.route.rawText,
+              files: [
+                {
+                  id: "FVOICE",
+                  transcription: { status: "completed", text: "Recorded thread update." },
+                },
+              ],
+            },
+          },
+        },
+        voiceNoteResolved: true,
+      };
+      const page: any = await d.companionApi.loadInitialization();
+      if (labelled) {
+        const text = `${d.route.rawText}\n\n[Voice note 1 — automatically transcribed]\nRecorded thread update.`;
+        page.entries.find((entry: any) => entry.isTrigger).text = text;
+        page.text = text;
+      }
+      d.companionApi.loadInitialization.mockResolvedValue(page);
+      try {
+        await d.mgr.acceptCompanion(c, "hello");
+        await vi.waitFor(() => expect(d.opencode.session.promptAsync).toHaveBeenCalledOnce());
+        const prompt = JSON.stringify(d.opencode.session.promptAsync.mock.calls);
+        expect(prompt.match(/Recorded thread update\./g)).toHaveLength(1);
+        expect(resolveVoiceNote).not.toHaveBeenCalled();
+      } finally {
+        await d.mgr.close();
+      }
     },
   );
   it("uses one channel-wide Companion history while delivering current thread and null-thread sources precisely", async () => {

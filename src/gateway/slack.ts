@@ -3,12 +3,20 @@ import {
   parseSlack,
   prepareSlackSource,
   resolveSlackAuthor,
+  SlackConnectionDenied,
   type SlackRoute,
   slackControlText,
   slackRouteKey,
 } from "../slack.js";
+import {
+  VOICE_NOTE_WAIT_MS,
+  VoiceNoteNotAdmitted,
+  voiceNoteContext,
+  voiceNoteSourceId,
+} from "../voice-notes.js";
 import { companionChatKey, companionMetadata } from "./companion.js";
 import type { DispatchDeps } from "./dispatch.js";
+import { retryableRead } from "./sessions.js";
 import type { VerifiedEvent } from "./types.js";
 
 export function slackSenderAllowed(route: SlackRoute, config: DispatchDeps["config"]): boolean {
@@ -26,13 +34,26 @@ export function slackSenderAllowed(route: SlackRoute, config: DispatchDeps["conf
     )
   );
 }
+// Reads made before the turn is admitted. A timeout, network failure, 408,
+// 429 or 5xx leaves the message unadmitted so it can be delivered again; a
+// denial and every other error stay final.
+async function readBeforeAdmission<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof SlackConnectionDenied || !retryableRead(error)) throw error;
+    throw new VoiceNoteNotAdmitted("Slack is temporarily unavailable.", { cause: error });
+  }
+}
 export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): Promise<boolean> {
   if (!deps.config.gateway.slackEnabled || !event.verified) return true;
-  const identity = await deps.inkbox.getIdentity();
-  const client = await deps.inkbox.getClient();
+  const identity = await readBeforeAdmission(() => deps.inkbox.getIdentity());
+  const client = await readBeforeAdmission(() => deps.inkbox.getClient());
   const route = parseSlack(event.body, identity.id);
   if (!route) return true;
-  const connection = await ownSlackConnection(client, identity.id, route.connectionId);
+  const connection = await readBeforeAdmission(() =>
+    ownSlackConnection(client, identity.id, route.connectionId),
+  );
   route.connectionGeneration = connection.generation;
   if (connection.workspaceId !== route.workspaceId)
     throw new Error("Slack connection workspace mismatch.");
@@ -56,8 +77,24 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     }
     const source = await prepareSlackSource(client, identity.id, event.body);
     if (!slackSenderAllowed(source.route, deps.config)) return true;
+    const files = (event.body.data as Record<string, any>).event?.files;
+    // A completion is matched by the retained message ID, so wait only when
+    // the envelope names the same message as the archived source.
+    const voice =
+      Array.isArray(files) &&
+      files.some((item) => item && typeof item === "object" && "transcription" in item);
+    const waits = voice && voiceNoteSourceId(event.body) === source.id;
     const turn = {
       metadata,
+      ...(waits
+        ? {
+            voiceNoteEvent: structuredClone(event.body),
+            voiceNoteDeadline: Date.now() + VOICE_NOTE_WAIT_MS,
+          }
+        : // Without a wait, results already present are labelled once, as for WhatsApp.
+          voice
+          ? { voiceNoteEvent: structuredClone(event.body), voiceNoteResolved: true }
+          : {}),
       identityId: identity.id,
       handle: identity.agentHandle,
       sourceId: source.id,
@@ -93,7 +130,9 @@ export async function dispatchSlack(deps: DispatchDeps, event: VerifiedEvent): P
     from: route.author,
     messageId: route.sourceEventId,
     conversationId: route.conversationId,
-    text: route.text,
+    text: [route.text, voiceNoteContext((event.body.data as Record<string, any>).event)]
+      .filter(Boolean)
+      .join("\n\n"),
     rawText: nativeText,
     mediaPaths: [],
     contactId: route.contactId,

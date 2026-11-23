@@ -1,5 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { InkboxAPIError } from "@inkbox/sdk";
+import { SLACK_EVENTS } from "./slack.js";
 
 export type VoiceEvent = Record<string, any>;
 export class VoiceNoteNotAdmitted extends Error {}
@@ -18,9 +20,32 @@ type Saved = {
   pending: Record<string, Pending>;
   done: Record<string, number>;
 };
-const FAMILIES = new Set(["text", "imessage", "whatsapp"]);
+const FAMILIES = new Set(["text", "imessage", "whatsapp", "slack"]);
+// Read lazily: the Slack module also imports from this one.
+const slackReceived = (type: string) => (SLACK_EVENTS as readonly string[]).includes(type);
 
 export const TRANSCRIPTION_FINISHED = "message.transcription_finished";
+/** How long an inbound turn waits for its voice-note transcript. */
+export const VOICE_NOTE_WAIT_MS = 60_000;
+
+/** A server that predates transcription callbacks rejects only that event type. */
+export function transcriptionEventUnsupported(error: unknown): boolean {
+  if (!(error instanceof InkboxAPIError) || error.statusCode !== 422) return false;
+  const issues = error.detail;
+  return (
+    Array.isArray(issues) &&
+    issues.length > 0 &&
+    issues.every(
+      (issue) =>
+        issue?.type === "enum" &&
+        issue.input === TRANSCRIPTION_FINISHED &&
+        Array.isArray(issue.loc) &&
+        issue.loc[0] === "body" &&
+        issue.loc[1] === "event_types" &&
+        typeof issue.loc[2] === "number",
+    )
+  );
+}
 
 function channelOf(event: VoiceEvent): string | undefined {
   return event.event_type === TRANSCRIPTION_FINISHED
@@ -28,31 +53,59 @@ function channelOf(event: VoiceEvent): string | undefined {
     : event.event_type?.split(".")[0];
 }
 
-function source(event: VoiceEvent): VoiceEvent | undefined {
-  return event.data?.[channelOf(event) === "text" ? "text_message" : "message"];
+/** The message whose attachments carry transcription results. */
+export function voiceNoteMessage(event: VoiceEvent): VoiceEvent | undefined {
+  const family = channelOf(event);
+  // Slack keeps the native message under data.event and names the retained
+  // message with data.message_id.
+  if (family === "slack") return event.data?.event;
+  return event.data?.[family === "text" ? "text_message" : "message"];
+}
+const source = voiceNoteMessage;
+/** The retained message ID shared by a received event and its completion. */
+export function voiceNoteSourceId(event: VoiceEvent): string | undefined {
+  const id = channelOf(event) === "slack" ? event.data?.message_id : source(event)?.id;
+  return typeof id === "string" ? id : undefined;
+}
+function attachments(message: VoiceEvent | undefined): VoiceEvent[] | undefined {
+  if (Array.isArray(message?.media)) return message.media;
+  return Array.isArray(message?.files) ? message.files : undefined;
+}
+function received(event: VoiceEvent): boolean {
+  return event.event_type.endsWith(".received") || slackReceived(event.event_type);
 }
 function key(event: VoiceEvent): string | undefined {
-  const message = source(event),
+  const id = voiceNoteSourceId(event),
     family = channelOf(event);
-  if (event.event_type === TRANSCRIPTION_FINISHED && event.data?.message_id !== message?.id)
-    return undefined;
-  return family && FAMILIES.has(family) && typeof message?.id === "string"
-    ? `${family}:${message.id}`
-    : undefined;
+  if (event.event_type === TRANSCRIPTION_FINISHED) {
+    if (event.data?.message_id !== id) return undefined;
+  } else if (family === "slack" && !slackReceived(event.event_type)) return undefined;
+  return family && FAMILIES.has(family) && id ? `${family}:${id}` : undefined;
 }
 function pending(message: VoiceEvent | undefined): boolean {
   return (
-    Array.isArray(message?.media) &&
-    message.media.some((item: VoiceEvent) => item?.transcription?.status === "pending")
+    attachments(message)?.some((item: VoiceEvent) => item?.transcription?.status === "pending") ??
+    false
+  );
+}
+function sameSlackSource(before: VoiceEvent, after: VoiceEvent): boolean {
+  return ["identity_id", "connection_id", "conversation_id", "message_ts"].every(
+    (field) =>
+      after.data?.[field] == null ||
+      before.data?.[field] == null ||
+      after.data[field] === before.data[field],
   );
 }
 function merge(original: VoiceEvent, updated: VoiceEvent): VoiceEvent {
   const before = source(original),
-    after = source(updated);
+    after = source(updated),
+    slack = channelOf(original) === "slack";
   if (
     !before ||
     !after ||
-    before.id !== after.id ||
+    channelOf(updated) !== channelOf(original) ||
+    voiceNoteSourceId(original) !== voiceNoteSourceId(updated) ||
+    (slack && !sameSlackSource(original, updated)) ||
     after.direction === "outbound" ||
     after.is_blocked === true ||
     (after.conversation_id &&
@@ -65,20 +118,22 @@ function merge(original: VoiceEvent, updated: VoiceEvent): VoiceEvent {
     return original;
   const event = structuredClone(original),
     message = source(event);
-  if (!message) return original;
-  if (!Array.isArray(after.media)) return original;
-  message.media = (before.media ?? []).map((item: VoiceEvent, index: number) => {
-    const current = item.id
-      ? after.media.find((candidate: VoiceEvent) => candidate.id === item.id)
-      : after.media[index];
-    if (item.transcription && item.transcription.status !== "pending") return item;
-    return current?.transcription ? { ...item, transcription: current.transcription } : item;
-  });
+  const updates = attachments(after);
+  if (!message || !updates) return original;
+  message[slack ? "files" : "media"] = (attachments(before) ?? []).map(
+    (item: VoiceEvent, index: number) => {
+      const current = item.id
+        ? updates.find((candidate: VoiceEvent) => candidate?.id === item.id)
+        : updates[index];
+      if (item.transcription && item.transcription.status !== "pending") return item;
+      return current?.transcription ? { ...item, transcription: current.transcription } : item;
+    },
+  );
   return event;
 }
 
 export function voiceNoteContext(message: VoiceEvent | undefined): string {
-  return (Array.isArray(message?.media) ? message.media : [])
+  return (attachments(message) ?? [])
     .flatMap((item: VoiceEvent, index: number) => {
       const result = item?.transcription;
       if (!result || result.error_code === "not_audio") return [];
@@ -97,10 +152,12 @@ export function snapshotHasVoiceNote(
   message: VoiceEvent | undefined,
   entries: { id: string; isTrigger?: boolean; text?: string }[],
   caption: string,
+  sourceId: string | undefined = message?.id,
 ): boolean {
-  const trigger = entries.find((entry) => entry.id === message?.id && entry.isTrigger === true);
-  if (!trigger || !Array.isArray(message?.media)) return false;
-  const notes = message.media.flatMap((item: VoiceEvent, index: number) => {
+  const trigger = entries.find((entry) => entry.id === sourceId && entry.isTrigger === true);
+  const items = attachments(message);
+  if (!sourceId || !trigger || !items) return false;
+  const notes = items.flatMap((item: VoiceEvent, index: number) => {
     const result = item?.transcription;
     if (!result || result.error_code === "not_audio") return [];
     const text = typeof result.text === "string" ? result.text.trim() : "";
@@ -217,26 +274,25 @@ export class VoiceNoteInbox {
       return true;
     }
     if (event.companion) return false;
-    if (!event.event_type.endsWith(".received")) return false;
+    if (!received(event)) return false;
     const retained = this.saved.pending[id];
     if (this.saved.done[id] || (retained && !retained.resolutionOnly)) return true;
-    if (
-      !Array.isArray(source(event)?.media) ||
-      !source(event)?.media.some((item: VoiceEvent) => item?.transcription)
-    )
-      return false;
+    if (!attachments(source(event))?.some((item: VoiceEvent) => item?.transcription)) return false;
     if (retained) return true;
     const cached = this.early.get(id);
     this.early.delete(id);
     const current = cached && Date.now() - cached.at < 300_000 ? merge(event, cached.event) : event;
-    this.saved.pending[id] = { event: current, deadline: Date.now() + 60_000 };
+    this.saved.pending[id] = { event: current, deadline: Date.now() + VOICE_NOTE_WAIT_MS };
     this.persist();
     if (pending(source(current))) this.schedule(id);
     else await this.launch(id, false);
     return true;
   }
   /** Resolve within an already-durable consumer without independently dispatching it. */
-  async resolve(event: VoiceEvent, deadline = Date.now() + 60_000): Promise<VoiceEvent> {
+  async resolve(
+    event: VoiceEvent,
+    deadline = Date.now() + VOICE_NOTE_WAIT_MS,
+  ): Promise<VoiceEvent> {
     if (this.stopped) throw new Error("Voice-note receiver is stopping.");
     if (process.env.INKBOX_HOSTED_MODE === "1") return event;
     const id = key(event);
@@ -395,7 +451,10 @@ export async function pollVoiceNote(
 ): Promise<VoiceEvent | undefined> {
   const message = source(event),
     family = channelOf(event);
-  if (!message?.id || !options.apiKey) return;
+  if (!options.apiKey) return;
+  const origin = (options.baseUrl || "https://inkbox.ai").replace(/\/$/, "");
+  if (family === "slack") return pollSlackVoiceNote(event, origin, options.apiKey);
+  if (!message?.id) return;
   const signal = AbortSignal.timeout(10_000);
   const identity = await options.identity();
   const id = encodeURIComponent(message.id),
@@ -407,13 +466,10 @@ export async function pollVoiceNote(
         ? `/api/v1/${family}/messages/${id}?agent_identity_id=${owner}`
         : undefined;
   if (!path) return;
-  const response = await fetch(
-    `${(options.baseUrl || "https://inkbox.ai").replace(/\/$/, "")}${path}`,
-    {
-      headers: { "X-Api-Key": options.apiKey },
-      signal,
-    },
-  );
+  const response = await fetch(`${origin}${path}`, {
+    headers: { "X-Api-Key": options.apiKey },
+    signal,
+  });
   if (!response.ok) return;
   return {
     ...event,
@@ -422,4 +478,32 @@ export async function pollVoiceNote(
       [family === "text" ? "text_message" : "message"]: await response.json(),
     },
   };
+}
+
+/** Read one retained Slack message; its files carry the current transcription results. */
+async function pollSlackVoiceNote(
+  event: VoiceEvent,
+  origin: string,
+  apiKey: string,
+): Promise<VoiceEvent | undefined> {
+  const id = voiceNoteSourceId(event),
+    connection = event.data?.connection_id;
+  if (!id || typeof connection !== "string" || !source(event)) return;
+  const response = await fetch(
+    `${origin}/api/v1/slack/connections/${encodeURIComponent(connection)}/archive/messages?message_id=${encodeURIComponent(id)}`,
+    { headers: { "X-Api-Key": apiKey }, signal: AbortSignal.timeout(10_000) },
+  );
+  if (!response.ok) return;
+  const body = (await response.json()) as { messages?: unknown };
+  const found = Array.isArray(body?.messages)
+    ? body.messages.find((candidate: VoiceEvent) => candidate?.id === id)
+    : undefined;
+  if (
+    !found ||
+    found.connection_id !== connection ||
+    (event.data?.conversation_id && found.conversation_id !== event.data.conversation_id) ||
+    !Array.isArray(found.files)
+  )
+    return;
+  return { ...event, data: { ...event.data, event: { ...event.data.event, files: found.files } } };
 }

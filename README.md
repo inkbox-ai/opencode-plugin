@@ -397,6 +397,8 @@ Incoming MMS, iMessage, and WhatsApp audio keeps its original attachment and cap
 
 If transcription fails, is skipped, or remains unavailable after the wait and read, the original message follows the usual attachment-handling path. Completion notifications do not create a second turn. The plugin subscribes to `message.transcription_finished` once per identity. The event’s `data.channel` and `data.message_id` identify the original message; the plugin resumes that message in its original session. Pending messages retain their original deadline across restarts.
 
+Slack audio follows the same wait, read, and label: the received event's `data.message_id` matches the completion, results arrive on `data.event.files[].transcription`, and when Slack is enabled the single `message.transcription_finished` subscription is the Slack webhook subscription, because Slack completions are delivered only alongside the Slack message events.
+
 ## Inbound gateway (email/text/calls come to the agent)
 
 Beyond outbound tools, the plugin can run an **inbound gateway**: a long-lived

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Inkbox } from "@inkbox/sdk";
+import { Inkbox, InkboxAPIError } from "@inkbox/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultGatewayConfig } from "../../src/config.js";
 import { dispatchSlack } from "../../src/gateway/slack.js";
@@ -16,6 +16,7 @@ import {
 import { createSlackActivity } from "../../src/slack-activity.js";
 import { configureSlack } from "../../src/slack-setup.js";
 import { slackTools } from "../../src/tools/slack.js";
+import { VoiceNoteNotAdmitted } from "../../src/voice-notes.js";
 
 const identityId = "11111111-1111-4111-8111-111111111111",
   connectionId = "22222222-2222-4222-8222-222222222222",
@@ -69,6 +70,37 @@ function client() {
       sendMessage: vi.fn(async () => ({ id: "action", status: "sent" })),
     },
   };
+}
+/** One active subscription per URL may hold each event, as on the server. */
+function subscriptionServer(seed: { id: string; eventTypes: string[] }[]) {
+  const url = "https://receiver.test";
+  const rows = seed.map((row) => ({ ...row, url, status: "active" }));
+  const conflict = (id: string | undefined, eventTypes: string[]) => {
+    if (rows.some((row) => row.id !== id && row.eventTypes.some((e) => eventTypes.includes(e))))
+      throw new InkboxAPIError(409, "Subscription already exists");
+  };
+  const subscriptions = {
+    list: vi.fn(async () => rows.map((row) => ({ ...row, eventTypes: [...row.eventTypes] }))),
+    create: vi.fn(async (options: { eventTypes: string[] }) => {
+      conflict(undefined, options.eventTypes);
+      const row = { id: `created-${rows.length}`, url, status: "active", ...options };
+      rows.push(row);
+      return row;
+    }),
+    update: vi.fn(async (id: string, options: { eventTypes: string[] }) => {
+      conflict(id, options.eventTypes);
+      const row = rows.find((candidate) => candidate.id === id)!;
+      row.eventTypes = [...options.eventTypes];
+      return row;
+    }),
+    delete: vi.fn(async (id: string) => {
+      rows.splice(
+        rows.findIndex((row) => row.id === id),
+        1,
+      );
+    }),
+  };
+  return { rows, sdk: { webhooks: { subscriptions } } as any };
 }
 afterEach(() => vi.unstubAllGlobals());
 describe("Slack signed source and published SDK contract", () => {
@@ -297,6 +329,269 @@ describe("Slack signed source and published SDK contract", () => {
       eventTypes: expect.arrayContaining([...SLACK_SUBSCRIPTION_EVENTS, "text.received"]),
     });
     expect(create).not.toHaveBeenCalled();
+  });
+  it.each([
+    {
+      name: "upgrade: moves the standalone completion row onto the Slack row",
+      rows: [
+        { id: "completions", eventTypes: ["message.transcription_finished"] },
+        { id: "slack", eventTypes: [...SLACK_SUBSCRIPTION_EVENTS] },
+      ],
+      target: "slack",
+    },
+    {
+      name: "two Slack rows: completion joins the row with the most message kinds",
+      rows: [
+        { id: "channel", eventTypes: ["slack.channel_message_received"] },
+        {
+          id: "addressed",
+          eventTypes: SLACK_SUBSCRIPTION_EVENTS.filter(
+            (e) => e !== "slack.channel_message_received",
+          ),
+        },
+        { id: "shared", eventTypes: ["message.transcription_finished", "a2a.task.created"] },
+      ],
+      target: "addressed",
+    },
+  ])("$name", async ({ rows, target }) => {
+    const server = subscriptionServer(rows);
+    await reconcileSlackSubscription(server.sdk, identityId, "https://receiver.test");
+    const holders = server.rows.filter((row) =>
+      row.eventTypes.includes("message.transcription_finished"),
+    );
+    expect(holders.map((row) => row.id)).toEqual([target]);
+    expect(server.rows.find((row) => row.id === "shared")?.eventTypes).toEqual(
+      rows.some((row) => row.id === "shared") ? ["a2a.task.created"] : undefined,
+    );
+    expect(server.rows.some((row) => row.id === "completions")).toBe(false);
+    expect(server.sdk.webhooks.subscriptions.create).not.toHaveBeenCalled();
+    // A restart finds the completion on the Slack row and changes nothing.
+    server.sdk.webhooks.subscriptions.update.mockClear();
+    server.sdk.webhooks.subscriptions.delete.mockClear();
+    await reconcileSlackSubscription(server.sdk, identityId, "https://receiver.test");
+    expect(server.sdk.webhooks.subscriptions.update).not.toHaveBeenCalled();
+    expect(server.sdk.webhooks.subscriptions.delete).not.toHaveBeenCalled();
+  });
+  it("keeps Slack messages when an older API rejects transcription completions", async () => {
+    const create = vi.fn(async (options: { eventTypes: string[] }) => {
+      if (options.eventTypes.includes("message.transcription_finished"))
+        throw Object.assign(new InkboxAPIError(422, "Unknown event"), {
+          detail: [
+            {
+              type: "enum",
+              loc: ["body", "event_types", SLACK_SUBSCRIPTION_EVENTS.length],
+              input: "message.transcription_finished",
+            },
+          ],
+        });
+      return { id: "slack" };
+    });
+    const sdk: any = {
+      webhooks: { subscriptions: { list: vi.fn(async () => []), update: vi.fn(), create } },
+    };
+    await reconcileSlackSubscription(sdk, identityId, "https://receiver.test");
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenLastCalledWith({
+      agentIdentityId: identityId,
+      url: "https://receiver.test",
+      eventTypes: SLACK_SUBSCRIPTION_EVENTS,
+    });
+  });
+  it.each([
+    { messageId: undefined, waits: false },
+    { messageId: sourceId, waits: true },
+  ])(
+    "waits on a Companion voice note only with its source key ($messageId)",
+    async ({ messageId, waits }) => {
+      const acceptCompanion = vi.fn();
+      const body = {
+        ...event({
+          ...(messageId ? { message_id: messageId } : {}),
+          event: {
+            type: "message",
+            text: "<@UBOT> Hello",
+            files: [{ id: "FVOICE", transcription: { status: "pending" } }],
+          },
+        }),
+        companion: {
+          channel: "slack",
+          scope_id: "scope",
+          conversation_id: "conversation",
+          activation_id: "activation",
+          phase: "live",
+          sequence: 2,
+        },
+      };
+      await dispatchSlack(
+        {
+          config: {
+            gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+          },
+          inkbox: {
+            getIdentity: async () => ({ id: identityId, agentHandle: "example-agent" }),
+            getClient: async () => client(),
+          },
+          sessions: { acceptCompanion },
+        } as any,
+        { body, provider: "inkbox", verified: true, headers: {}, requestId: "companion-voice" },
+      );
+      expect(acceptCompanion).toHaveBeenCalledTimes(1);
+      const turn = acceptCompanion.mock.calls[0][0];
+      expect(turn.sourceId).toBe(sourceId);
+      // Without a wait the results already present are kept for labelling only.
+      expect(Boolean(turn.voiceNoteEvent)).toBe(true);
+      expect(Boolean(turn.voiceNoteResolved)).toBe(!waits);
+      expect(typeof turn.voiceNoteDeadline === "number").toBe(waits);
+    },
+  );
+  it("keeps a completed transcript for labelling on a Companion turn that does not wait", async () => {
+    const acceptCompanion = vi.fn();
+    const sdk = client();
+    const body = {
+      ...event({
+        message_id: "99999999-9999-4999-8999-999999999999",
+        event: {
+          type: "message",
+          text: "<@UBOT> Hello",
+          files: [
+            {
+              id: "FVOICE",
+              transcription: { status: "completed", text: "Move the review to Thursday." },
+            },
+          ],
+        },
+      }),
+      companion: {
+        channel: "slack",
+        scope_id: "scope",
+        conversation_id: "conversation",
+        activation_id: "activation",
+        phase: "live",
+        sequence: 2,
+      },
+    };
+    await dispatchSlack(
+      {
+        config: {
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: {
+          getIdentity: async () => ({ id: identityId, agentHandle: "example-agent" }),
+          getClient: async () => sdk,
+        },
+        sessions: { acceptCompanion },
+      } as any,
+      { body, provider: "inkbox", verified: true, headers: {}, requestId: "companion-label" },
+    );
+    expect(acceptCompanion).toHaveBeenCalledTimes(1);
+    const [turn] = acceptCompanion.mock.calls[0];
+    expect(turn.voiceNoteResolved).toBe(true);
+    expect(turn.voiceNoteDeadline).toBeUndefined();
+    expect(JSON.stringify(turn.voiceNoteEvent)).toContain("Move the review to Thursday.");
+  });
+  it.each([
+    { failure: new InkboxAPIError(408, "Request timeout"), retryable: true },
+    { failure: new InkboxAPIError(403, "Forbidden"), retryable: false },
+  ])(
+    "leaves a Slack turn unadmitted when the identity read fails temporarily ($failure)",
+    async ({ failure, retryable }) => {
+      const sdk = client(),
+        handleInbound = vi.fn();
+      const getIdentity = vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValue({ id: identityId });
+      const deps = {
+        config: {
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: { getIdentity, getClient: async () => sdk },
+        sessions: { status: () => ({}), handleInbound },
+      } as any;
+      const error = await dispatchSlack(deps, {
+        body: event(),
+        provider: "inkbox",
+        verified: true,
+        headers: {},
+        requestId: "identity",
+      }).catch((value: unknown) => value);
+      expect(error instanceof VoiceNoteNotAdmitted).toBe(retryable);
+      if (!retryable) expect(error).toBe(failure);
+      expect(handleInbound).not.toHaveBeenCalled();
+      expect(sdk.slack.listConnections).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    {
+      failure: new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
+      retryable: true,
+    },
+    { failure: new TypeError("Cannot read properties of undefined"), retryable: false },
+    { failure: new InkboxAPIError(408, "Request timeout"), retryable: true },
+    { failure: new InkboxAPIError(503, "Service unavailable"), retryable: true },
+    { failure: new InkboxAPIError(429, "Too many requests"), retryable: true },
+    { failure: new InkboxAPIError(403, "Forbidden"), retryable: false },
+    { failure: undefined, retryable: false },
+  ])(
+    "leaves a Slack turn unadmitted only on a temporary connection read failure ($failure)",
+    async ({ failure, retryable }) => {
+      const sdk = client(),
+        handleInbound = vi.fn();
+      if (failure) sdk.slack.listConnections.mockRejectedValueOnce(failure);
+      else sdk.slack.listConnections.mockResolvedValueOnce({ connections: [] });
+      const outcome = dispatchSlack(
+        {
+          config: {
+            gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+          },
+          inkbox: { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk },
+          sessions: { status: () => ({}), handleInbound },
+        } as any,
+        { body: event(), provider: "inkbox", verified: true, headers: {}, requestId: "read" },
+      );
+      const error = await outcome.catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(Error);
+      expect(error instanceof VoiceNoteNotAdmitted).toBe(retryable);
+      if (failure && !retryable) expect(error).toBe(failure);
+      expect(handleInbound).not.toHaveBeenCalled();
+    },
+  );
+  it("labels a Slack voice-note transcript separately from the sender's text", async () => {
+    const sdk = client(),
+      handleInbound = vi.fn();
+    const body = event({
+      message_id: sourceId,
+      event: {
+        type: "message",
+        text: "<@UBOT> Hello",
+        files: [
+          {
+            id: "FVOICE",
+            name: "voice.m4a",
+            mimetype: "audio/mp4",
+            transcription: { status: "completed", text: "Move the review to Thursday." },
+          },
+        ],
+      },
+    });
+    await dispatchSlack(
+      {
+        config: {
+          baseUrl: "https://example.com",
+          gateway: { ...defaultGatewayConfig(), slackEnabled: true, allowAllUsers: true },
+        },
+        inkbox: { getIdentity: async () => ({ id: identityId }), getClient: async () => sdk },
+        sessions: { status: () => ({}), handleInbound },
+      } as any,
+      { body, provider: "inkbox", verified: true, headers: {}, requestId: "voice" },
+    );
+    expect(handleInbound).toHaveBeenCalledTimes(1);
+    const text: string = handleInbound.mock.calls[0][0].text;
+    expect(text.startsWith("<@UBOT> Hello\nAttachment references (not downloaded):")).toBe(true);
+    expect(
+      text.endsWith("\n\n[Voice note 1 — automatically transcribed]\nMove the review to Thursday."),
+    ).toBe(true);
+    expect(handleInbound.mock.calls[0][0].rawText).toBe("Hello");
   });
   it("exercises real SDK snake-case routes, null thread and stable idempotency headers", async () => {
     const requests: { url: string; init?: RequestInit }[] = [];
