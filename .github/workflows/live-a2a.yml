@@ -59,15 +59,28 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve latest host version
+        id: host
+        run: |
+          version=$(npm view opencode-ai@latest version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Keyed on the resolved host release so a new release never reuses a stale cache.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.npm/_cacache
+          key: npm-${{ runner.os }}-opencode-${{ steps.host.outputs.version }}-${{ hashFiles('package.json', 'pnpm-lock.yaml') }}
+
       - name: Install protocol driver
         run: pip install 'inkbox==0.7.29'
 
       - name: Install plugin and host
+        env:
+          HOST_VERSION: ${{ steps.host.outputs.version }}
         run: |
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" ci
           bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install --no-save --package-lock=false \
             @opencode-ai/sdk@1.17.18 @opencode-ai/plugin@1.17.18
-          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g opencode-ai@latest
+          bash "$GITHUB_WORKSPACE/tests/ci/npm_with_retry.sh" install -g "opencode-ai@$HOST_VERSION"
 
       - name: Boot the AUT gateway
         env:
