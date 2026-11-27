@@ -35,7 +35,9 @@ export function createVaultRuntime(
       unlocking = undefined;
     }
     if (!key) {
-      throw new Error(`Vault is locked. Set ${keyEnvVar} locally to unlock credential tools.`);
+      throw new Error(
+        `Vault is locked. Set ${keyEnvVar} to unlock credential tools (hosted by Inkbox: save it as a Secret in the identity's Env vars tab).`,
+      );
     }
     if (!unlocking) {
       const pending = (async (): Promise<FreshCredentials> => {

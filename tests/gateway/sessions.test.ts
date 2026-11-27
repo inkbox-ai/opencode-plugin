@@ -1417,6 +1417,36 @@ describe("capture turns", () => {
     expect(d.opencode.session.promptAsync).toHaveBeenCalledTimes(submitted);
   });
 
+  it("marks an A2A turn failed when the OpenCode run ends in an error", async () => {
+    vi.useFakeTimers();
+    const d = makeManager();
+    try {
+      const submit = d.opencode.session.promptAsync.getMockImplementation()!;
+      d.opencode.session.promptAsync.mockImplementation(async (o: any) => {
+        const result = await submit(o);
+        const last = d.messages.get(o.path.id)!.at(-1);
+        last.info.error = { name: "APIError", data: { message: "model unavailable" } };
+        return result;
+      });
+      const pending = d.mgr.runA2A("a2a:context-1", "task", {
+        taskId: "task-1",
+        messageId: "message-1",
+        contextId: "context-1",
+        replyIntentCommitted: false,
+      });
+      const outcome = pending.catch((error) => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(String(await outcome)).toContain("OpenCode turn failed");
+      const turn = d.state
+        .listTurns()
+        .find((candidate) => candidate.a2aContext?.taskId === "task-1");
+      expect(turn?.state).toBe("failed");
+    } finally {
+      await d.mgr.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("runs an inbound turn once per delivery and rejoins it after a restart", async () => {
     const d = makeManager();
     expect(await d.mgr.runInbound("inbound:payments", "event", "delivery-1")).toBe("reply");

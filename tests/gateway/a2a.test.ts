@@ -76,6 +76,30 @@ function abortableA2ARun(result = "[SILENT]") {
   return { runA2A, abortA2A };
 }
 
+function failingA2ARun(
+  state: ReturnType<typeof createStateStore>,
+  opts: { fenced?: boolean; markFailed?: boolean; error: string },
+) {
+  return vi.fn(async (chatKey: string, _prompt: string, context: any) => {
+    if (opts.fenced) await context.beforeReplyIntent();
+    if (opts.markFailed) {
+      state.saveTurn({
+        id: crypto.randomUUID(),
+        messageID: "msg",
+        chatKey,
+        state: "failed",
+        kind: "capture",
+        text: "",
+        deliver: false,
+        a2aContext: context,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    }
+    throw new Error(opts.error);
+  });
+}
+
 describe("createA2AHandler", () => {
   beforeEach(() => {
     process.env.INKBOX_OPENCODE_HOME = `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-gateway-${crypto.randomUUID()}`;
@@ -1629,6 +1653,85 @@ describe("createA2AHandler", () => {
       expect.objectContaining({ taskId: "task-1", contextId: "context-1" }),
     );
     expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized");
+  });
+
+  it("fails the task with a generic reason when the agent run fails", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => ({
+      state: payload.intent === "fail" ? "failed" : "working",
+    }));
+    const runA2A = failingA2ARun(state, {
+      markFailed: true,
+      error: "OpenCode turn failed: provider secret detail",
+    });
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => taskSnapshot()),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await vi.waitFor(() =>
+      expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized"),
+    );
+    expect(a2aReply).toHaveBeenCalledWith("task-1", {
+      intent: "fail",
+      text: "The agent run failed before producing a result.",
+    });
+    expect(JSON.stringify(a2aReply.mock.calls)).not.toContain("secret detail");
+    await handler.close();
+  });
+
+  it("does not fail the task when the run was not marked failed or a reply intent is fenced", async () => {
+    for (const [fenced, markFailed] of [
+      [false, false],
+      [true, true],
+    ]) {
+      const state = createStateStore(
+        `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+      );
+      const a2aReply = vi.fn(async () => ({ state: "working" }));
+      const runA2A = failingA2ARun(state, {
+        fenced,
+        markFailed,
+        error: "Durable turn lease was lost.",
+      });
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const handler = createA2AHandler({
+        inkbox: {
+          getIdentity: vi.fn(async () => ({
+            id: "identity-1",
+            a2aTask: vi.fn(async () => taskSnapshot()),
+            a2aReply,
+          })),
+          getClient: vi.fn(),
+        } as any,
+        sessions: { runA2A, abortA2A: vi.fn(async () => true) } as any,
+        state,
+        logger,
+      });
+
+      await handler.handle(event());
+      await vi.waitFor(() =>
+        expect(logger.error).toHaveBeenCalledWith("a2a.turn_failed", expect.anything()),
+      );
+      expect(a2aReply).not.toHaveBeenCalledWith(
+        "task-1",
+        expect.objectContaining({ intent: "fail" }),
+      );
+      expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("running");
+      await handler.close();
+    }
   });
 
   it("does not overwrite an input-required outcome with default completion", async () => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.30 (unreleased)
+
+- Fail an inbound A2A task with a short generic reason when the agent run fails. Previously the task stayed working with progress updates continuing. Error details are not sent to the caller. Explicit outcomes, cancellation, `[SILENT]`, and ambiguous reply fencing are unchanged.
+- Explain both ways to provide `INKBOX_OPENCODE_VAULT_KEY` in the credential and troubleshooting skills, the README, and the "Vault is locked" error: a Secret in the identity's Env vars tab for agents hosted by Inkbox, or a shell export otherwise.
+
 ## 0.2.29 (unreleased)
 
 - Wait for Slack voice-note transcripts the same way as MMS, iMessage, and WhatsApp audio, keyed by the received event's `data.message_id`; the Slack subscription now includes `message.transcription_finished`.

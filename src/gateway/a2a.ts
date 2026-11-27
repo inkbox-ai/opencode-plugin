@@ -35,6 +35,7 @@ const INBOUND_TASK_DIRECTIVE =
   "inkbox_a2a_ask_caller, or inkbox_a2a_fail. When caller input is needed, use " +
   "inkbox_a2a_ask_caller and wait for the caller instead of completing the task.";
 const ACK_TEMPLATE = "Task {taskId} received. Work is queued and starting.";
+const RUN_FAILED_REASON = "The agent run failed before producing a result.";
 const RETRY_MS = 5_000;
 const DRAIN_STALE_MS = 5_000;
 
@@ -676,6 +677,19 @@ export function createA2AHandler(deps: {
     clearA2AProgressDrain(taskId);
   }
 
+  // Only a durable turn the session layer gave up on; lease loss and shutdown leave it active.
+  function runFailed(data: A2AEventData): boolean {
+    const turn = deps.state
+      .listTurns()
+      .filter(
+        (candidate) =>
+          candidate.a2aContext?.taskId === data.task_id &&
+          candidate.a2aContext.messageId === (data.message_id ?? ""),
+      )
+      .sort((left, right) => right.createdAt - left.createdAt)[0];
+    return turn?.state === "failed";
+  }
+
   async function runTurn(
     key: string,
     data: A2AEventData,
@@ -732,11 +746,20 @@ export function createA2AHandler(deps: {
       `caller_org=${caller.organization_id ?? "unknown"}]`;
     persist(deps.state, key, data, "running");
     try {
-      const reply = await deps.sessions.runA2A(
-        chatKey,
-        `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
-        context,
-      );
+      let intent: "complete" | "fail" = "complete";
+      let reply: string | undefined;
+      try {
+        reply = await deps.sessions.runA2A(
+          chatKey,
+          `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
+          context,
+        );
+      } catch (error) {
+        if (!runFailed(data) || registry(deps.state)[key]?.replyIntentFenced) throw error;
+        deps.logger.error("a2a.turn_failed", { taskId, error: String(error) });
+        intent = "fail";
+        reply = RUN_FAILED_REASON;
+      }
       if (closing || settlingTasks.has(taskId)) return;
       if (
         !context.replyIntentCommitted &&
@@ -755,7 +778,7 @@ export function createA2AHandler(deps: {
           const task = await id.a2aTask(taskId);
           if (!TURN_STOPPED.has(normalizedState(task.state))) {
             terminalAttempted = true;
-            await id.a2aReply(taskId, { intent: "complete", text: reply });
+            await id.a2aReply(taskId, { intent, text: reply });
           }
         } catch (error) {
           if (!terminalAttempted) clearA2AProgressDrain(taskId, coordinationToken);
