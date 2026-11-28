@@ -153,3 +153,14 @@ it("uses published SDK cryptography, fresh reads, identity grants and seed-free 
   deleted = true;
   await expect(credentials.getLogin(secret.id)).rejects.toThrow();
 }, 20000);
+
+it("names the env var and the hosted Secret path when locked", async () => {
+  const runtime: any = {
+    getClient: async () => ({}),
+    getIdentity: async () => ({ id: "identity" }),
+  };
+  const vault = createVaultRuntime(runtime, { keyEnvVar: "SYNTHETIC_UNSET_VAULT_KEY" });
+  await expect(vault.getCredentials()).rejects.toThrow(
+    /Set SYNTHETIC_UNSET_VAULT_KEY .*Secret in the identity's Env vars tab/,
+  );
+});

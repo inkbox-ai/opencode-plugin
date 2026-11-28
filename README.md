@@ -285,7 +285,8 @@ export default async (input: any) => InkboxPlugin(input, {
   `inkbox_totp_code` must be enabled by exact name — `"vault"` or `"all"`
   never turns them on. Vault tools also need the unlock key in
   `INKBOX_OPENCODE_VAULT_KEY` (override the variable name with the `vault.keyEnvVar`
-  option).
+  option). On an agent hosted by Inkbox, save it as a Secret in the identity's
+  Env vars tab; a shell export does not reach the agent.
 - `inkbox_doctor` lists everything that's currently disabled, so the agent can
   tell you what to enable instead of silently lacking a capability.
 
@@ -592,7 +593,7 @@ The bridge owns automatic and source-correlated tool reply targets and allows on
 
 Approval prompts serialize per conversation. Only explicit approval tokens answer them; Stop and fresh instructions are not swallowed. Shared-channel replies require the prompted author and exact native route. `/health`, the CLI doctor, and `inkbox_doctor` expose pending/unconfirmed/blocked counts separately from process liveness. Never delete the durable journal to clear an uncertainty warning.
 
-**Vault migration:** export `INKBOX_OPENCODE_VAULT_KEY` for lazy optional unlocking. Existing custom `vault.keyEnvVar` settings still work. If you retain `INKBOX_VAULT_KEY` or a Vault key in the SDK's global config, the SDK may unlock eagerly; remove that global setting when migrating to the plugin-local variable. Locked metadata listing continues to work. Individual plaintext/TOTP reads recheck the configured identity's grants and refresh the secret; login payloads expose `has_totp`, never the TOTP seed. Existing typed tool names remain supported; `inkbox_credentials_get_secret` adds key-pair/other reads and must be enabled by its exact name.
+**Vault migration:** export `INKBOX_OPENCODE_VAULT_KEY` for lazy optional unlocking (on an agent hosted by Inkbox, save it as a Secret in the identity's Env vars tab instead). Existing custom `vault.keyEnvVar` settings still work. If you retain `INKBOX_VAULT_KEY` or a Vault key in the SDK's global config, the SDK may unlock eagerly; remove that global setting when migrating to the plugin-local variable. Locked metadata listing continues to work. Individual plaintext/TOTP reads recheck the configured identity's grants and refresh the secret; login payloads expose `has_totp`, never the TOTP seed. Existing typed tool names remain supported; `inkbox_credentials_get_secret` adds key-pair/other reads and must be enabled by its exact name.
 
 Doctor distinguishes disabled channels, missing SDK capabilities, disconnected Slack workspaces, incomplete active webhook coverage, and unverified native backend support. An available source permits a bounded read-only native endpoint probe; absent source or tunnel URL remains explicitly unverified. These checks never send messages or modify subscriptions.
 

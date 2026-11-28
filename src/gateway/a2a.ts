@@ -35,6 +35,8 @@ const INBOUND_TASK_DIRECTIVE =
   "inkbox_a2a_ask_caller, or inkbox_a2a_fail. When caller input is needed, use " +
   "inkbox_a2a_ask_caller and wait for the caller instead of completing the task.";
 const ACK_TEMPLATE = "Task {taskId} received. Work is queued and starting.";
+const RUN_FAILED_REASON = "The agent run failed before producing a result.";
+const FAIL_REPLY_ATTEMPTS = 3;
 const RETRY_MS = 5_000;
 const DRAIN_STALE_MS = 5_000;
 
@@ -676,6 +678,25 @@ export function createA2AHandler(deps: {
     clearA2AProgressDrain(taskId);
   }
 
+  function failedTurnIds(data: A2AEventData): Set<string> {
+    return new Set(
+      deps.state
+        .listTurns()
+        .filter(
+          (turn) =>
+            turn.state === "failed" &&
+            turn.a2aContext?.taskId === data.task_id &&
+            turn.a2aContext.messageId === (data.message_id ?? ""),
+        )
+        .map((turn) => turn.id),
+    );
+  }
+
+  // Only a durable turn this run gave up on; lease loss and shutdown leave it active.
+  function runFailed(data: A2AEventData, priorFailed: Set<string>): boolean {
+    return [...failedTurnIds(data)].some((turnId) => !priorFailed.has(turnId));
+  }
+
   async function runTurn(
     key: string,
     data: A2AEventData,
@@ -732,11 +753,22 @@ export function createA2AHandler(deps: {
       `caller_org=${caller.organization_id ?? "unknown"}]`;
     persist(deps.state, key, data, "running");
     try {
-      const reply = await deps.sessions.runA2A(
-        chatKey,
-        `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
-        context,
-      );
+      let intent: "complete" | "fail" = "complete";
+      let reply: string | undefined;
+      const priorFailed = failedTurnIds(data);
+      try {
+        reply = await deps.sessions.runA2A(
+          chatKey,
+          `${marker}\n${INBOUND_TASK_DIRECTIVE}\n${body}`.trim(),
+          context,
+        );
+      } catch (error) {
+        if (!runFailed(data, priorFailed) || registry(deps.state)[key]?.replyIntentFenced)
+          throw error;
+        deps.logger.error("a2a.turn_failed", { taskId, error: String(error) });
+        intent = "fail";
+        reply = RUN_FAILED_REASON;
+      }
       if (closing || settlingTasks.has(taskId)) return;
       if (
         !context.replyIntentCommitted &&
@@ -752,10 +784,20 @@ export function createA2AHandler(deps: {
         try {
           heartbeat = setInterval(() => renewA2AProgressDrain(taskId, coordinationToken), 1_000);
           heartbeat.unref?.();
-          const task = await id.a2aTask(taskId);
-          if (!TURN_STOPPED.has(normalizedState(task.state))) {
-            terminalAttempted = true;
-            await id.a2aReply(taskId, { intent: "complete", text: reply });
+          // The fence blocks restart resume, so the generic fail retries here instead.
+          for (let attempt = 1; ; attempt++) {
+            try {
+              const task = await id.a2aTask(taskId);
+              if (TURN_STOPPED.has(normalizedState(task.state))) break;
+              terminalAttempted = true;
+              await id.a2aReply(taskId, { intent, text: reply });
+              break;
+            } catch (error) {
+              if (intent !== "fail" || attempt >= FAIL_REPLY_ATTEMPTS) throw error;
+              if (closing || settlingTasks.has(taskId)) throw error;
+              deps.logger.warn("a2a.fail_reply_retry", { taskId, error: String(error) });
+              await waitForRetry(taskId, RETRY_MS);
+            }
           }
         } catch (error) {
           if (!terminalAttempted) clearA2AProgressDrain(taskId, coordinationToken);

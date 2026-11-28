@@ -22,7 +22,7 @@ Start with `inkbox_doctor` (default-enabled). It reports config presence, API re
 | `sender_sms_pending` | The Inkbox phone number is still propagating to carriers. Retry later and verify `smsStatus`. |
 | `recipient_not_opted_in` | Ask the recipient to text `START` to the agent's Inkbox number, then retry. |
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
-| `Vault is locked` | Export `INKBOX_OPENCODE_VAULT_KEY=<the vault key>` in the shell launching opencode (or the custom env var configured via the `vault.keyEnvVar` plugin option), then restart opencode. |
+| `Vault is locked` | Hosted by Inkbox: save the vault key as a Secret named `INKBOX_OPENCODE_VAULT_KEY` in the identity's Env vars tab and retry once the change is applied; a terminal export does not reach the agent. Otherwise export `INKBOX_OPENCODE_VAULT_KEY=<the vault key>` in the shell launching opencode (or the custom env var configured via the `vault.keyEnvVar` plugin option), then restart opencode. |
 
 ## Vault unlock pattern
 

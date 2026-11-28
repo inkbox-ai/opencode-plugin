@@ -31,7 +31,7 @@ const options = { "tools": { "enable": ["vault", "inkbox_credentials_get_login",
 - The vault unlock key must be available in the `INKBOX_OPENCODE_VAULT_KEY` env var (or a custom env var if the `vault.keyEnvVar` plugin option is configured).
 - The identity must have access grants to the secrets in question (admin-set via the Inkbox Console).
 
-If `INKBOX_OPENCODE_VAULT_KEY` is not set, a plaintext credential read returns "Vault is locked." Direct the user to export the env var in the shell launching opencode, then retry.
+If `INKBOX_OPENCODE_VAULT_KEY` is not set, a plaintext credential read returns "Vault is locked." If this agent is hosted by Inkbox, ask the user to save the vault unlock key as a Secret named `INKBOX_OPENCODE_VAULT_KEY` in this identity's Env vars tab and retry once the agent shows the change applied; exporting it in a terminal does not reach the agent. Otherwise, direct the user to export the env var in the shell launching opencode, then retry.
 
 ## Workflow
 
@@ -58,7 +58,7 @@ If `INKBOX_OPENCODE_VAULT_KEY` is not set, a plaintext credential read returns "
 
 | Error | Meaning |
 |---|---|
-| `Vault is locked. Set the INKBOX_OPENCODE_VAULT_KEY...` | Env var missing — direct the user to set it. |
+| `Vault is locked. Set INKBOX_OPENCODE_VAULT_KEY...` | Env var missing: direct the user to set it (hosted by Inkbox: a Secret in the identity's Env vars tab). |
 | Tool not available | The vault tools aren't enabled — see the enabling snippet above; check `inkbox_doctor`. |
 | `No credential with id '...'` on get_* | Wrong secret id, or this identity doesn't have access. |
 | `TypeError` on get_login/get_api_key/get_ssh_key | Caller picked the wrong typed getter for the secret's type. Re-list to see `secretType`. |
