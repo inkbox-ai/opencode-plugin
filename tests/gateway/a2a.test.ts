@@ -1734,6 +1734,94 @@ describe("createA2AHandler", () => {
     }
   });
 
+  it("retries a failed generic fail reply instead of leaving the task working", async () => {
+    vi.useFakeTimers();
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    let failAttempts = 0;
+    const a2aReply = vi.fn(async (_taskId: string, payload: any) => {
+      if (payload.intent !== "fail") return { state: "working" };
+      if (++failAttempts === 1) throw new Error("network down");
+      return { state: "failed" };
+    });
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => taskSnapshot()),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: failingA2ARun(state, { markFailed: true, error: "OpenCode turn failed" }),
+        abortA2A: vi.fn(async () => true),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    await handler.handle(event());
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() =>
+      expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("finalized"),
+    );
+    expect(failAttempts).toBe(2);
+    await handler.close();
+  });
+
+  it("does not fail the task for a failed turn left by an earlier run", async () => {
+    const state = createStateStore(
+      `${process.env.TMPDIR ?? "/tmp"}/opencode-a2a-${crypto.randomUUID()}`,
+    );
+    state.saveTurn({
+      id: crypto.randomUUID(),
+      messageID: "msg",
+      chatKey: "a2a:identity-1:context-1",
+      state: "failed",
+      kind: "capture",
+      text: "",
+      deliver: false,
+      a2aContext: { taskId: "task-1", messageId: "message-1" } as any,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const a2aReply = vi.fn(async () => ({ state: "working" }));
+    const jobs: Promise<void>[] = [];
+    const handler = createA2AHandler({
+      inkbox: {
+        getIdentity: vi.fn(async () => ({
+          id: "identity-1",
+          a2aTask: vi.fn(async () => taskSnapshot()),
+          a2aReply,
+        })),
+        getClient: vi.fn(),
+      } as any,
+      sessions: {
+        runA2A: failingA2ARun(state, { error: "Durable turn lease was lost." }),
+        abortA2A: vi.fn(async () => true),
+      } as any,
+      state,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      track: (task) => {
+        const job = task();
+        jobs.push(job);
+        return job;
+      },
+    });
+
+    await handler.handle(event());
+    await vi.waitFor(() => expect(jobs).toHaveLength(1));
+    await jobs[0];
+    expect((state.read().a2aTasks as any)["task-1:message-1"].state).toBe("running");
+    expect(a2aReply).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({ intent: "fail" }),
+    );
+    await handler.close();
+  });
+
   it("does not overwrite an input-required outcome with default completion", async () => {
     const a2aReply = vi.fn();
     const identity = {
